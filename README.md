@@ -48,7 +48,7 @@ flowchart LR
 ### 1. Clone & Install
 
 ```bash
-git clone https://github.com/kolganov/figma-mcp-bridge.git
+git clone https://github.com/kolganovr/figma-mcp-bridge.git
 cd figma-mcp-bridge
 python install.py
 ```
