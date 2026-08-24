@@ -6,3 +6,7 @@ Thumbs.db
 .env.local
 .vscode/
 .idea/
+planning/
+roadmap/
+internal/
+
