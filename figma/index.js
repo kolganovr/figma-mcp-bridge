@@ -2,6 +2,7 @@
 const http = require("http");
 const path = require("path");
 const fs = require("fs");
+const { optimizeFigmaData } = require("./optimizer");
 
 const FIGMA_TOKEN = process.env.FIGMA_PERSONAL_ACCESS_TOKEN || process.env.FIGMA_API_KEY || "";
 
@@ -447,25 +448,39 @@ const TOOLS = [
   },
   {
     name: "get_file",
-    description: "Get full document metadata and layer hierarchy of a Figma cloud file by URL or file key.",
+    description: "Get full document metadata and token-optimized layer hierarchy of a Figma file by URL or file key. Automatically prunes noise and converts to semantic Pseudo-JSX/Tree format to save 85%+ tokens.",
     inputSchema: {
       type: "object",
       properties: {
         file_key: { type: "string", description: "Figma file key or complete Figma file/design URL" },
-        depth: { type: "number", description: "Hierarchy depth (default: 2)" }
+        depth: { type: "number", description: "Hierarchy depth (default: 2)" },
+        format: {
+          type: "string",
+          enum: ["jsx", "tree", "json", "raw"],
+          description: "Output format: 'jsx' (clean semantic Pseudo-JSX, default), 'tree' (indented text tree), 'json' (pruned JSON), or 'raw' (unmodified raw Figma API response)"
+        },
+        simplify: { type: "boolean", description: "Whether to apply token pruning and vector collapsing (default: true)" },
+        include_hidden: { type: "boolean", description: "Whether to include hidden layers (default: false)" }
       },
       required: ["file_key"]
     }
   },
   {
     name: "get_node",
-    description: "Get specific node subtree data from a cloud document by node ID.",
+    description: "Get token-optimized node/component design data for specific nodes in a Figma file. Automatically prunes AST noise, collapses vector icons, and returns clean Pseudo-JSX/Tree format (saves 85%+ tokens).",
     inputSchema: {
       type: "object",
       properties: {
         file_key: { type: "string", description: "Figma file key or complete Figma URL" },
-        node_ids: { type: "string", description: "Comma-separated node IDs (e.g. '0:1' or '123-456')" },
-        depth: { type: "number", description: "Subtree depth (default: 3)" }
+        node_ids: { type: "string", description: "Comma-separated list of node IDs (e.g. '1234:5678') or encoded from URL" },
+        depth: { type: "number", description: "Subtree depth (default: 3)" },
+        format: {
+          type: "string",
+          enum: ["jsx", "tree", "json", "raw"],
+          description: "Output format: 'jsx' (clean semantic Pseudo-JSX, default), 'tree' (indented text tree), 'json' (pruned JSON), or 'raw' (unmodified raw Figma API response)"
+        },
+        simplify: { type: "boolean", description: "Whether to apply token pruning and vector collapsing (default: true)" },
+        include_hidden: { type: "boolean", description: "Whether to include hidden layers (default: false)" }
       },
       required: ["file_key"]
     }
@@ -931,7 +946,15 @@ async function handleCallTool(name, args = {}) {
         const { fileKey } = parseFigmaUrlOrKey(args.file_key);
         const depth = args.depth || 2;
         const data = await figmaApiRequest(`/files/${fileKey}?depth=${depth}`);
-        return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+        const format = args.format || "jsx";
+        const simplify = args.simplify !== false;
+        const output = optimizeFigmaData(data, {
+          format,
+          simplify,
+          maxDepth: args.max_depth || 25,
+          includeHidden: args.include_hidden === true
+        });
+        return { content: [{ type: "text", text: output }] };
       }
       case "get_node": {
         const parsed = parseFigmaUrlOrKey(args.file_key);
@@ -941,7 +964,15 @@ async function handleCallTool(name, args = {}) {
         nodeIds = nodeIds.replace(/-/g, ":");
         const depth = args.depth || 3;
         const data = await figmaApiRequest(`/files/${fileKey}/nodes?ids=${encodeURIComponent(nodeIds)}&depth=${depth}`);
-        return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+        const format = args.format || "jsx";
+        const simplify = args.simplify !== false;
+        const output = optimizeFigmaData(data, {
+          format,
+          simplify,
+          maxDepth: args.max_depth || 25,
+          includeHidden: args.include_hidden === true
+        });
+        return { content: [{ type: "text", text: output }] };
       }
       case "get_image": {
         const parsed = parseFigmaUrlOrKey(args.file_key);

@@ -86,16 +86,16 @@ Restart your IDE (**Antigravity**, **Claude Desktop**, or **Cursor**) to discove
 | `figma_get_selection` | *None* | Retrieves geometry, bounding box, fill/stroke properties, and hierarchy of currently selected nodes. |
 | `figma_create_ui_card` | `title`, `subtitle`, `badge_text`, `button_text`, `bg_color`, `width` | High-level macro generator for AutoLayout cards with instant visual inspection. |
 
-### 2. Cloud REST API Tools (Figma Cloud)
+### 2. Cloud REST API Tools (with Token Optimizer)
 
-| Tool | Description |
-| :--- | :--- |
-| `get_file` | Retrieve full document tree and metadata from Figma Cloud. |
-| `get_node` | Fetch specific node trees by Node ID. |
-| `get_image` | Render remote images or frames via Figma Cloud. |
-| `get_styles` | Inspect global published styles and color tokens. |
-| `get_components` | Discover published team components and variants. |
-| `get_comments` / `post_comment` | Read and post comments directly on design files. |
+| Tool | Parameters | Description |
+| :--- | :--- | :--- |
+| `get_file` | `file_key` *(string, required)*<br>`format` *(enum: jsx, tree, json, raw)*<br>`depth` *(number)*<br>`simplify` *(bool, default true)* | Retrieves file metadata and token-optimized layer hierarchy. Prunes 85%+ AST noise and returns clean Pseudo-JSX. |
+| `get_node` | `file_key` *(string, required)*<br>`node_ids` *(string, required)*<br>`format` *(enum: jsx, tree, json, raw)*<br>`depth` *(number)*<br>`simplify` *(bool, default true)* | Fetches specific node subtrees converted to token-efficient Pseudo-JSX, Tree, or JSON format. |
+| `get_image` | `file_key`, `node_ids`, `format`, `scale` | Renders remote images or frames via Figma Cloud. |
+| `get_styles` | `file_key` | Inspects global published styles and color tokens. |
+| `get_components` | `file_key` | Discovers published team components and variants. |
+| `get_comments` / `post_comment` | `file_key`, `message`, `client_meta` | Reads and posts comments directly on design files. |
 
 ---
 
