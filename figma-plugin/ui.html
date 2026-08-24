@@ -1,0 +1,925 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Antigravity Bridge</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Roboto+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <style>
+    /* =========================================================
+       DESIGN TOKENS (Antigravity DS Tokens 1:1)
+       ========================================================= */
+    :root {
+      --bg-app: #121215;
+      --bg-surface: #18181b;
+      --bg-elevated: #202024;
+      --bg-terminal: #09090b;
+
+      --border-subtle: #27272a;
+      --border-contrast: #3f3f46;
+      --border-focus: #6366f1;
+
+      --text-primary: #f4f4f5;
+      --text-secondary: #a1a1aa;
+      --text-muted: #71717a;
+
+      --status-online: #4ade80;
+      --status-online-bg: #0f291e;
+      --status-online-border: #166534;
+
+      --status-busy: #60a5fa;
+      --status-busy-bg: #172554;
+      --status-busy-border: #1e40af;
+
+      --status-capture: #c084fc;
+      --status-capture-bg: #2e1065;
+      --status-capture-border: #6b21a8;
+
+      --status-error: #f87171;
+      --status-error-bg: #450a0a;
+      --status-error-border: #991b1b;
+
+      --radius-xs: 3px;
+      --radius-sm: 6px;
+      --radius-md: 8px;
+      --radius-lg: 10px;
+      --radius-pill: 9999px;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      padding: 14px;
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      font-size: 11px;
+      background: var(--bg-app);
+      color: var(--text-primary);
+      user-select: none;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+      gap: 10px;
+    }
+
+    /* =========================================================
+       01. HEADER UNIT (Isometric Dimensional Core & StatusPill)
+       ========================================================= */
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-shrink: 0;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-md);
+      padding: 8px 12px;
+      transition: all 0.25s ease;
+    }
+
+    .brand-group {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .logo-container {
+      width: 28px;
+      height: 28px;
+      border-radius: 7px;
+      background: var(--status-online-bg);
+      border: 1px solid var(--status-online-border);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      transition: all 0.25s ease;
+    }
+    .logo-container.busy {
+      background: var(--status-busy-bg);
+      border-color: var(--status-busy-border);
+    }
+    .logo-container.capture {
+      background: var(--status-capture-bg);
+      border-color: var(--status-capture-border);
+    }
+    .logo-container.offline {
+      background: var(--status-error-bg);
+      border-color: var(--status-error-border);
+    }
+
+    .logo-iso {
+      width: 18px;
+      height: 18px;
+    }
+
+    .titles {
+      display: flex;
+      flex-direction: column;
+      gap: 1px;
+    }
+    .brand-title {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--text-primary);
+      line-height: 14px;
+    }
+    .brand-sub {
+      font-size: 9px;
+      color: var(--text-muted);
+      line-height: 11px;
+      font-family: 'Roboto Mono', monospace;
+    }
+
+    .status-pill {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 0.4px;
+      padding: 4px 8px;
+      border-radius: var(--radius-pill);
+      background: var(--status-online-bg);
+      color: var(--status-online);
+      border: 1px solid var(--status-online-border);
+      transition: all 0.25s ease;
+    }
+    .status-pill.busy {
+      background: var(--status-busy-bg);
+      color: var(--status-busy);
+      border-color: var(--status-busy-border);
+    }
+    .status-pill.capture {
+      background: var(--status-capture-bg);
+      color: var(--status-capture);
+      border-color: var(--status-capture-border);
+    }
+    .status-pill.offline {
+      background: var(--status-error-bg);
+      color: var(--status-error);
+      border-color: var(--status-error-border);
+    }
+
+    .status-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--status-online);
+      box-shadow: 0 0 6px rgba(74, 222, 128, 0.6);
+      transition: all 0.25s ease;
+    }
+    .status-dot.busy {
+      background: var(--status-busy);
+      box-shadow: 0 0 6px rgba(96, 165, 250, 0.8);
+      animation: pulseDot 0.8s infinite alternate;
+    }
+    .status-dot.capture {
+      background: var(--status-capture);
+      box-shadow: 0 0 6px rgba(192, 132, 252, 0.8);
+      animation: pulseDot 0.6s infinite alternate;
+    }
+    .status-dot.offline {
+      background: var(--status-error);
+      box-shadow: none;
+      animation: none;
+    }
+
+    @keyframes pulseDot {
+      from { opacity: 0.4; transform: scale(0.9); }
+      to { opacity: 1; transform: scale(1.1); }
+    }
+
+    /* =========================================================
+       02. ACTIVITY CARD (Executing / Idle / Error)
+       ========================================================= */
+    .activity-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-lg);
+      padding: 10px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      flex-shrink: 0;
+      transition: border-color 0.25s ease, box-shadow 0.25s ease;
+    }
+    .activity-card.busy {
+      border-color: #1e3a8a;
+      box-shadow: 0 0 12px rgba(59, 130, 246, 0.08);
+    }
+    .activity-card.capture {
+      border-color: #4c1d95;
+      box-shadow: 0 0 12px rgba(168, 85, 247, 0.08);
+    }
+    .activity-card.error {
+      border-color: #7f1d1d;
+      box-shadow: 0 0 12px rgba(239, 68, 68, 0.08);
+    }
+
+    .card-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .card-tag {
+      font-size: 8px;
+      font-weight: 700;
+      color: var(--text-muted);
+      letter-spacing: 0.5px;
+    }
+    .card-tag.busy { color: var(--status-busy); }
+    .card-tag.capture { color: var(--status-capture); }
+    .card-tag.error { color: var(--status-error); }
+
+    .card-badge {
+      font-size: 8px;
+      font-weight: 500;
+      color: var(--status-online);
+    }
+    .card-badge.busy { color: var(--status-busy); }
+    .card-badge.capture { color: var(--status-capture); }
+    .card-badge.error { color: var(--status-error); }
+
+    .task-desc {
+      font-family: 'Roboto Mono', monospace;
+      font-size: 10px;
+      font-weight: 400;
+      color: var(--text-secondary);
+      line-height: 14px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .task-desc.busy { color: var(--text-primary); }
+    .task-desc.error { color: #fca5a5; }
+
+    .progress-bar {
+      height: 3px;
+      width: 100%;
+      background: var(--border-subtle);
+      border-radius: var(--radius-pill);
+      overflow: hidden;
+      display: none;
+    }
+    .progress-bar.active {
+      display: block;
+    }
+    .progress-fill {
+      height: 100%;
+      width: 70%;
+      background: linear-gradient(90deg, #3b82f6, #60a5fa);
+      border-radius: var(--radius-pill);
+      animation: progressShift 1.4s infinite ease-in-out alternate;
+    }
+    .progress-fill.capture {
+      background: linear-gradient(90deg, #8b5cf6, #c084fc);
+    }
+
+    @keyframes progressShift {
+      from { width: 25%; transform: translateX(0%); }
+      to { width: 90%; transform: translateX(15%); }
+    }
+
+    /* =========================================================
+       03. METRICS ROW (3 Compact Metric Cards)
+       ========================================================= */
+    .metrics-bar {
+      display: flex;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+    .metric-box {
+      flex: 1;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-md);
+      padding: 6px 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .metric-val {
+      font-size: 14px;
+      font-weight: 700;
+      line-height: 16px;
+      font-family: 'Roboto Mono', monospace;
+    }
+    .metric-val.blue { color: var(--status-busy); }
+    .metric-val.purple { color: var(--status-capture); }
+    .metric-val.green { color: var(--status-online); }
+    .metric-label {
+      font-size: 8px;
+      color: var(--text-muted);
+    }
+
+    /* =========================================================
+       04. TERMINAL STREAM ORGANISM (Pro Monospace Event Log)
+       ========================================================= */
+    .terminal-box {
+      flex: 1;
+      background: var(--bg-terminal);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-lg);
+      padding: 10px 12px;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      min-height: 0;
+      gap: 6px;
+    }
+
+    .term-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-shrink: 0;
+      padding-bottom: 6px;
+      border-bottom: 1px solid #1f1f23;
+    }
+    .term-title-group {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .term-prompt {
+      font-family: 'Roboto Mono', monospace;
+      font-size: 9px;
+      font-weight: 700;
+      color: #38bdf8;
+    }
+    .term-title {
+      font-family: 'Roboto Mono', monospace;
+      font-size: 8px;
+      font-weight: 700;
+      color: var(--text-secondary);
+      letter-spacing: 0.5px;
+    }
+
+    .term-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .term-btn {
+      font-size: 8px;
+      font-weight: 500;
+      color: var(--text-muted);
+      cursor: pointer;
+      padding: 1px 4px;
+      border-radius: var(--radius-xs);
+      transition: all 0.15s ease;
+    }
+    .term-btn:hover {
+      background: var(--border-subtle);
+      color: var(--text-primary);
+    }
+    .term-btn.accent {
+      color: #38bdf8;
+    }
+    .term-btn.accent:hover {
+      background: rgba(56, 189, 248, 0.15);
+      color: #7dd3fc;
+    }
+
+    .log-list {
+      flex: 1;
+      overflow-y: auto;
+      font-family: 'Roboto Mono', ui-monospace, Consolas, monospace;
+      font-size: 9px;
+      line-height: 1.5;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      padding-top: 2px;
+    }
+    .log-list::-webkit-scrollbar {
+      width: 4px;
+    }
+    .log-list::-webkit-scrollbar-thumb {
+      background: var(--border-subtle);
+      border-radius: 4px;
+    }
+
+    .log-row {
+      display: flex;
+      align-items: baseline;
+      gap: 6px;
+      word-break: break-all;
+    }
+    .log-time {
+      color: #52525b;
+      font-size: 8px;
+      flex-shrink: 0;
+    }
+    .tag {
+      font-size: 7px;
+      font-weight: 700;
+      padding: 1px 4px;
+      border-radius: var(--radius-xs);
+      flex-shrink: 0;
+      letter-spacing: 0.3px;
+    }
+    .tag.run { background: #172554; color: #60a5fa; }
+    .tag.shot { background: #2e1065; color: #c084fc; }
+    .tag.ok { background: #0f291e; color: #4ade80; }
+    .tag.err { background: #450a0a; color: #f87171; }
+    .tag.sys { background: #27272a; color: #a1a1aa; }
+
+    .log-text {
+      color: #d4d4d8;
+    }
+
+    .term-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding-top: 4px;
+      border-top: 1px solid #18181b;
+      font-family: 'Roboto Mono', monospace;
+      font-size: 7px;
+      color: var(--text-muted);
+      flex-shrink: 0;
+    }
+    .term-count {
+      color: var(--status-online);
+    }
+
+    /* =========================================================
+       05. BOTTOM ACTION BAR (Toggle on Left, Ping on Right)
+       ========================================================= */
+    .bottom-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-shrink: 0;
+      padding-top: 2px;
+    }
+
+    .toggle-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      cursor: pointer;
+    }
+    .toggle-track {
+      width: 28px;
+      height: 16px;
+      border-radius: var(--radius-pill);
+      background: var(--border-subtle);
+      border: 1px solid var(--border-contrast);
+      position: relative;
+      transition: all 0.2s ease;
+      flex-shrink: 0;
+    }
+    .toggle-track.active {
+      background: #8b5cf6;
+      border-color: #a855f7;
+    }
+    .toggle-knob {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: #a1a1aa;
+      position: absolute;
+      top: 1px;
+      left: 1px;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.25);
+      transition: transform 0.2s ease, background 0.2s ease;
+    }
+    .toggle-track.active .toggle-knob {
+      background: #ffffff;
+      transform: translateX(12px);
+    }
+    .toggle-label {
+      font-size: 9px;
+      font-weight: 500;
+      color: var(--text-muted);
+      transition: color 0.2s ease;
+    }
+    .toggle-track.active + .toggle-label {
+      color: var(--text-primary);
+    }
+
+    .btn-action {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-md);
+      padding: 6px 12px;
+      color: var(--text-primary);
+      font-size: 9px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+    .btn-action:hover {
+      background: var(--bg-elevated);
+      border-color: var(--border-contrast);
+    }
+    .btn-action:active {
+      transform: scale(0.98);
+    }
+    .btn-icon {
+      font-size: 10px;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- 01. HEADER UNIT -->
+  <div class="header">
+    <div class="brand-group">
+      <div id="logo-box" class="logo-container">
+        <svg class="logo-iso" viewBox="0 0 24 24" fill="none">
+          <path id="iso-mesh-1" d="M12 3L19.5 7.5V16.5L12 21L4.5 16.5V7.5L12 3Z" stroke="#4ADE80" stroke-width="1.6" stroke-linejoin="round"/>
+          <path id="iso-mesh-2" d="M12 3V12M12 12L4.5 7.5M12 12L19.5 7.5" stroke="#4ADE80" stroke-width="1.6" stroke-linejoin="round"/>
+          <path id="iso-mesh-3" d="M12 12V21M12 12L19.5 16.5M12 12L4.5 16.5" stroke="#4ADE80" stroke-width="1.6" stroke-opacity="0.4" stroke-linejoin="round"/>
+          <circle id="iso-glow" cx="12" cy="12" r="3.5" fill="#22C55E" fill-opacity="0.35"/>
+          <circle cx="12" cy="12" r="2" fill="#FFFFFF"/>
+        </svg>
+      </div>
+      <div class="titles">
+        <span class="brand-title">Antigravity Bridge</span>
+        <span class="brand-sub">Local :8765 • v3.0</span>
+      </div>
+    </div>
+    <div id="status-pill" class="status-pill">
+      <div id="status-dot" class="status-dot"></div>
+      <span id="status-text">CONNECTED</span>
+    </div>
+  </div>
+
+  <!-- 02. ACTIVITY CARD -->
+  <div id="act-card" class="activity-card">
+    <div class="card-top">
+      <span id="card-tag" class="card-tag">AI ASSISTANT STATUS</span>
+      <span id="card-badge" class="card-badge">⚡ Ready</span>
+    </div>
+    <div id="task-desc" class="task-desc">Listening on 127.0.0.1:8765. Ready for commands.</div>
+    <div id="progress-bar" class="progress-bar">
+      <div id="progress-fill" class="progress-fill"></div>
+    </div>
+  </div>
+
+  <!-- 03. METRICS ROW -->
+  <div class="metrics-bar">
+    <div class="metric-box">
+      <span id="m-cmds" class="metric-val blue">0</span>
+      <span class="metric-label">Commands</span>
+    </div>
+    <div class="metric-box">
+      <span id="m-caps" class="metric-val purple">0</span>
+      <span class="metric-label">Captures</span>
+    </div>
+    <div class="metric-box">
+      <span id="m-lat" class="metric-val green">—</span>
+      <span class="metric-label">Latency</span>
+    </div>
+  </div>
+
+  <!-- 04. TERMINAL STREAM -->
+  <div class="terminal-box">
+    <div class="term-head">
+      <div class="term-title-group">
+        <span class="term-prompt">&gt;_</span>
+        <span class="term-title">EVENT STREAM</span>
+      </div>
+      <div class="term-actions">
+        <span id="term-copy" class="term-btn">Copy</span>
+        <span id="term-clear" class="term-btn accent">Clear</span>
+      </div>
+    </div>
+    <div id="log-list" class="log-list">
+      <div class="log-row">
+        <span class="log-time">[Init]</span>
+        <span class="tag sys">SYS</span>
+        <span class="log-text">Bridge v3.0 initialized on :8765</span>
+      </div>
+    </div>
+    <div class="term-footer">
+      <span id="term-count" class="term-count">● 1 event logged</span>
+      <span id="term-latency">Latency: --</span>
+    </div>
+  </div>
+
+  <!-- 05. BOTTOM ACTION BAR -->
+  <div class="bottom-bar">
+    <div id="toggle-zoom" class="toggle-row">
+      <div id="toggle-track" class="toggle-track active">
+        <div class="toggle-knob"></div>
+      </div>
+      <span class="toggle-label">Auto-zoom canvas</span>
+    </div>
+    <button id="ping-btn" class="btn-action">
+      <span class="btn-icon">⚡</span>
+      <span>Ping Bridge</span>
+    </button>
+  </div>
+
+  <!-- JAVASCRIPT LOGIC & LONG POLLING -->
+  <script>
+    const SERVER_URL = 'http://127.0.0.1:8765';
+
+    // State
+    let cmdCount = 0;
+    let capCount = 0;
+    let totalLogs = 1;
+    let autoZoom = true;
+    let isPolling = false;
+
+    // Elements
+    const logoBox = document.getElementById('logo-box');
+    const isoMesh1 = document.getElementById('iso-mesh-1');
+    const isoMesh2 = document.getElementById('iso-mesh-2');
+    const isoMesh3 = document.getElementById('iso-mesh-3');
+    const isoGlow = document.getElementById('iso-glow');
+
+    const statusPill = document.getElementById('status-pill');
+    const statusDot = document.getElementById('status-dot');
+    const statusText = document.getElementById('status-text');
+
+    const actCard = document.getElementById('act-card');
+    const cardTag = document.getElementById('card-tag');
+    const cardBadge = document.getElementById('card-badge');
+    const taskDesc = document.getElementById('task-desc');
+    const progressBar = document.getElementById('progress-bar');
+    const progressFill = document.getElementById('progress-fill');
+
+    const mCmds = document.getElementById('m-cmds');
+    const mCaps = document.getElementById('m-caps');
+    const mLat = document.getElementById('m-lat');
+
+    const logList = document.getElementById('log-list');
+    const termCopy = document.getElementById('term-copy');
+    const termClear = document.getElementById('term-clear');
+    const termCount = document.getElementById('term-count');
+    const termLatency = document.getElementById('term-latency');
+
+    const toggleZoom = document.getElementById('toggle-zoom');
+    const toggleTrack = document.getElementById('toggle-track');
+    const pingBtn = document.getElementById('ping-btn');
+
+    function getTime() {
+      const now = new Date();
+      return now.toTimeString().split(' ')[0];
+    }
+
+    function addLog(tagType, tagText, msg) {
+      totalLogs++;
+      const row = document.createElement('div');
+      row.className = 'log-row';
+      row.innerHTML = `<span class="log-time">${getTime()}</span><span class="tag ${tagType}">${tagText}</span><span class="log-text">${escapeHtml(msg)}</span>`;
+      logList.appendChild(row);
+      logList.scrollTop = logList.scrollHeight;
+      termCount.textContent = `● ${totalLogs} events logged`;
+    }
+
+    function escapeHtml(str) {
+      return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    function setLogoColors(stroke, glow) {
+      isoMesh1.setAttribute('stroke', stroke);
+      isoMesh2.setAttribute('stroke', stroke);
+      isoMesh3.setAttribute('stroke', stroke);
+      isoGlow.setAttribute('fill', glow);
+    }
+
+    function setCardState(isBusy, text, isCapture = false) {
+      if (isBusy) {
+        if (isCapture) {
+          actCard.className = 'activity-card capture';
+          cardTag.className = 'card-tag capture';
+          cardTag.textContent = 'VISUAL FEEDBACK LOOP';
+          cardBadge.className = 'card-badge capture';
+          cardBadge.textContent = '📸 1.5x Vision';
+          taskDesc.className = 'task-desc busy';
+          taskDesc.textContent = text || 'Exporting canvas viewport PNG to AI context...';
+          progressBar.className = 'progress-bar active';
+          progressFill.className = 'progress-fill capture';
+
+          logoBox.className = 'logo-container capture';
+          setLogoColors('#C084FC', '#A855F7');
+
+          statusPill.className = 'status-pill capture';
+          statusDot.className = 'status-dot capture';
+          statusText.textContent = 'CAPTURE';
+        } else {
+          actCard.className = 'activity-card busy';
+          cardTag.className = 'card-tag busy';
+          cardTag.textContent = 'CURRENT EXECUTION';
+          cardBadge.className = 'card-badge busy';
+          cardBadge.textContent = '🔮 Multi-Step Script';
+          taskDesc.className = 'task-desc busy';
+          taskDesc.textContent = text || 'Executing code in Figma sandbox...';
+          progressBar.className = 'progress-bar active';
+          progressFill.className = 'progress-fill';
+
+          logoBox.className = 'logo-container busy';
+          setLogoColors('#60A5FA', '#3B82F6');
+
+          statusPill.className = 'status-pill busy';
+          statusDot.className = 'status-dot busy';
+          statusText.textContent = 'BUSY';
+        }
+      } else {
+        actCard.className = 'activity-card';
+        cardTag.className = 'card-tag';
+        cardTag.textContent = 'AI ASSISTANT STATUS';
+        cardBadge.className = 'card-badge';
+        cardBadge.textContent = '⚡ Ready';
+        taskDesc.className = 'task-desc';
+        taskDesc.textContent = 'Listening on 127.0.0.1:8765. Ready for commands.';
+        progressBar.className = 'progress-bar';
+
+        logoBox.className = 'logo-container';
+        setLogoColors('#4ADE80', '#22C55E');
+
+        statusPill.className = 'status-pill';
+        statusDot.className = 'status-dot';
+        statusText.textContent = 'CONNECTED';
+      }
+    }
+
+    function setOfflineState(errMsg) {
+      actCard.className = 'activity-card error';
+      cardTag.className = 'card-tag error';
+      cardTag.textContent = 'CONNECTION ERROR';
+      cardBadge.className = 'card-badge error';
+      cardBadge.textContent = '⚠️ Server Down';
+      taskDesc.className = 'task-desc error';
+      taskDesc.textContent = errMsg || 'Cannot connect to 127.0.0.1:8765. Run install.py.';
+      progressBar.className = 'progress-bar';
+
+      logoBox.className = 'logo-container offline';
+      setLogoColors('#F87171', '#EF4444');
+
+      statusPill.className = 'status-pill offline';
+      statusDot.className = 'status-dot offline';
+      statusText.textContent = 'OFFLINE';
+    }
+
+    // Toggle Auto-Zoom
+    toggleZoom.onclick = () => {
+      autoZoom = !autoZoom;
+      toggleTrack.className = autoZoom ? 'toggle-track active' : 'toggle-track';
+      parent.postMessage({ pluginMessage: { type: 'SET_AUTO_ZOOM', value: autoZoom } }, '*');
+      addLog('sys', 'SYS', `Auto-zoom canvas: ${autoZoom ? 'ON' : 'OFF'}`);
+    };
+
+    // Copy Logs
+    termCopy.onclick = async () => {
+      const texts = Array.from(logList.children).map(r => r.innerText).join('\n');
+      try {
+        await navigator.clipboard.writeText(texts);
+        termCopy.textContent = 'Copied!';
+        setTimeout(() => { termCopy.textContent = 'Copy'; }, 1500);
+      } catch (e) {
+        termCopy.textContent = 'Error';
+        setTimeout(() => { termCopy.textContent = 'Copy'; }, 1500);
+      }
+    };
+
+    // Clear Logs
+    termClear.onclick = () => {
+      logList.innerHTML = '';
+      totalLogs = 0;
+      addLog('sys', 'SYS', 'Logs cleared');
+    };
+
+    // Ping Bridge
+    pingBtn.onclick = async () => {
+      const t0 = performance.now();
+      try {
+        const res = await fetch(`${SERVER_URL}/status`);
+        const dt = Math.round(performance.now() - t0);
+        if (res.ok) {
+          addLog('ok', 'PING', `Local bridge operational (${dt}ms)`);
+          mLat.textContent = `${dt}ms`;
+          termLatency.textContent = `Latency: ${dt}ms`;
+          if (statusText.textContent === 'OFFLINE') setCardState(false);
+        } else {
+          addLog('err', 'ERR', `Bridge returned HTTP ${res.status}`);
+        }
+      } catch (err) {
+        addLog('err', 'ERR', `Ping failed: ${err.message}`);
+        setOfflineState('Connection refused at 127.0.0.1:8765');
+      }
+    };
+
+    // Long Polling Loop
+    async function pollCommands() {
+      if (isPolling) return;
+      isPolling = true;
+
+      try {
+        const res = await fetch(`${SERVER_URL}/poll`, { method: 'GET' });
+        if (res.ok) {
+          if (statusText.textContent === 'OFFLINE') {
+            setCardState(false);
+          }
+
+          const data = await res.json();
+          if (data && data.id) {
+            const startTime = performance.now();
+            if (data.type === 'SCREENSHOT') {
+              capCount++;
+              mCaps.textContent = capCount;
+              const desc = data.description || 'Canvas Screenshot';
+              setCardState(true, `📸 Capturing (${data.nodeIds || 'Selection'})...`, true);
+              addLog('shot', 'SHOT', `Capture viewport (scale ${data.scale || 1.5}x)`);
+
+              parent.postMessage({
+                pluginMessage: {
+                  type: 'SCREENSHOT',
+                  id: data.id,
+                  nodeIds: data.nodeIds,
+                  scale: data.scale || 1.5,
+                  description: desc,
+                  autoZoom,
+                  startTime
+                }
+              }, '*');
+            } else if (data.code) {
+              cmdCount++;
+              mCmds.textContent = cmdCount;
+              const desc = data.description || 'Command Execution';
+              const isCap = data.capture === true;
+              if (isCap) { capCount++; mCaps.textContent = capCount; }
+
+              setCardState(true, isCap ? `${desc} (+ 📸 Vision)` : desc, isCap);
+              addLog('run', 'RUN', `${desc} (#${data.id.slice(0, 5)})`);
+              if (isCap) addLog('shot', 'SHOT', `Visual capture requested by model`);
+
+              parent.postMessage({
+                pluginMessage: {
+                  type: 'EXECUTE',
+                  id: data.id,
+                  code: data.code,
+                  description: desc,
+                  capture: isCap,
+                  scale: data.scale || 1.5,
+                  autoZoom,
+                  startTime
+                }
+              }, '*');
+            }
+          }
+        } else {
+          setOfflineState('Server HTTP Error: ' + res.status);
+        }
+      } catch (err) {
+        setOfflineState('Cannot connect to 127.0.0.1:8765');
+      } finally {
+        isPolling = false;
+        setTimeout(pollCommands, 250);
+      }
+    }
+
+    // Message from Figma Backend
+    window.onmessage = async (event) => {
+      const msg = event.data.pluginMessage;
+      if (!msg) return;
+
+      if (msg.type === 'RESULT') {
+        setCardState(false);
+        const desc = msg.description || 'Command';
+        
+        if (msg.startTime) {
+          const latency = Math.round(performance.now() - msg.startTime);
+          mLat.textContent = `${latency}ms`;
+          termLatency.textContent = `Latency: ${latency}ms`;
+        }
+
+        if (msg.success) {
+          if (msg.screenshot || msg.screenshots) {
+            addLog('ok', 'OK', `${desc} finished`);
+            const targetInfo = msg.targetName ? `[${msg.targetName}]` : '';
+            addLog('shot', 'AI', `Rendered PNG ${targetInfo} sent to context`);
+          } else {
+            addLog('ok', 'OK', `${desc} finished`);
+          }
+        } else {
+          addLog('err', 'ERR', `Error: ${msg.error}`);
+        }
+
+        try {
+          await fetch(`${SERVER_URL}/result`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(msg)
+          });
+        } catch (e) {
+          addLog('err', 'ERR', `Failed to return result: ${e.message}`);
+        }
+      }
+    };
+
+    pollCommands();
+  </script>
+</body>
+</html>

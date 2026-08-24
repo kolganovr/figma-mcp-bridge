@@ -1,0 +1,28 @@
+{
+  "name": "figma_execute_code",
+  "description": "EXECUTE LIVE JAVASCRIPT in the open Figma document to create, edit, move, style, color, or delete any elements on the canvas (requires 'Antigravity Bridge' plugin running in Figma). You have full access to figma API and ensureFont(family, style). Set 'capture: true' to automatically capture and view a PNG screenshot of the resulting UI elements (HIGHLY RECOMMENDED when creating or modifying UI components, layouts, buttons, or screens to visually verify design fidelity, contrast, typography, and spacing).",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "code": {
+        "type": "string",
+        "description": "JavaScript code to execute in Figma sandbox. Example: const frame = figma.createFrame(); frame.resize(400, 600); frame.name = 'My Screen'; figma.currentPage.appendChild(frame); figma.currentPage.selection = [frame]; figma.viewport.scrollAndZoomIntoView([frame]); return 'Created frame';"
+      },
+      "description": {
+        "type": "string",
+        "description": "Short human-readable title of what action is being performed (e.g. 'Создание экрана входа', 'Обновление цветов карточки') to show in Figma toast notifications and plugin logs."
+      },
+      "capture": {
+        "type": "boolean",
+        "description": "Set to true to immediately capture a PNG screenshot of the selected or created UI elements and return it to the model for visual verification (Visual Feedback Loop)."
+      },
+      "scale": {
+        "type": "number",
+        "description": "Screenshot resolution scale factor (default: 1.5)."
+      }
+    },
+    "required": [
+      "code"
+    ]
+  }
+}

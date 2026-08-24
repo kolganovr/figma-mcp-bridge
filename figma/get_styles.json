@@ -1,0 +1,1 @@
+{"name":"get_styles","description":"Get all styles (colors, text styles, shadows, effects) defined in a Figma file","parameters":{"properties":{"file_key":{"description":"Figma file key or complete Figma URL","type":"string"}},"required":["file_key"],"type":"object"}}

@@ -1,0 +1,1 @@
+{"name":"get_comments","description":"List all comments on a Figma file","parameters":{"properties":{"file_key":{"description":"Figma file key or complete Figma URL","type":"string"}},"required":["file_key"],"type":"object"}}

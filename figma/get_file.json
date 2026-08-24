@@ -1,0 +1,1 @@
+{"name":"get_file","description":"Get full document metadata and layer hierarchy of a Figma file by URL or file key","parameters":{"properties":{"depth":{"description":"Hierarchy depth (default: 2)","type":"number"},"file_key":{"description":"Figma file key or complete Figma file/design URL","type":"string"}},"required":["file_key"],"type":"object"}}
