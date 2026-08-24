@@ -75,6 +75,10 @@ Restart your IDE (**Antigravity**, **Claude Desktop**, or **Cursor**) to discove
 
 | Tool | Parameters | Description |
 | :--- | :--- | :--- |
+| `figma_find_components` | `query` *(string)*<br>`page_name` *(string)*<br>`include_variants` *(bool)*<br>`limit` *(number)* | Fast token-efficient catalog search for master components, variant matrices, and component properties in the active document. |
+| `figma_insert_component_instance` | `component_name` *(string)*<br>`component_id` *(string)*<br>`properties` *(object)*<br>`text_overrides` *(object)*<br>`target_parent_id` *(string)*<br>`capture` *(bool)* | Instantiates a master component or variant, safely overrides text/fonts, places into AutoLayout parent, and returns a PNG screenshot. |
+| `figma_get_variables` | `collection_name` *(string)* | Retrieves all design tokens, Figma Variable collections, modes (e.g. Light/Dark), and values. |
+| `figma_set_variables_mode` | `collection_name` *(string)*<br>`mode_name` *(string)*<br>`target_id` *(string)*<br>`capture` *(bool)* | Switches the active theme mode (e.g. "Dark", "Light") for a target frame, selection, or entire page. |
 | `figma_execute_code` | `code` *(string, required)*<br>`description` *(string)*<br>`capture` *(bool, default false)*<br>`scale` *(number, default 1.5)* | Executes live JavaScript in Figma sandbox. When `capture: true`, returns an uncompressed Base64 PNG screenshot directly to the model. |
 | `figma_screenshot` | `node_ids` *(array)*<br>`scale` *(number)*<br>`description` *(string)* | Captures selected nodes or entire viewport as PNG. |
 | `figma_get_selection` | *None* | Retrieves geometry, bounding box, fill/stroke properties, and hierarchy of currently selected nodes. |

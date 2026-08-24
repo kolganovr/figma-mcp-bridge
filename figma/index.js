@@ -243,6 +243,120 @@ const TOOLS = [
       }
     }
   },
+  {
+    name: "figma_find_components",
+    description: "Find and inspect components, component sets, variants, and component property definitions in the active Figma file without flooding LLM context. Returns names, variant values, keys, and IDs.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "Search query to filter components by name, description, or variant name (optional, if empty returns all top components)"
+        },
+        page_name: {
+          type: "string",
+          description: "Optional page name filter (e.g. '🎨 Design System' or 'Components')"
+        },
+        include_variants: {
+          type: "boolean",
+          description: "Whether to collect and return all available variant property keys and values (default: true)"
+        },
+        limit: {
+          type: "number",
+          description: "Maximum number of components to return to prevent token bloat (default: 30)"
+        }
+      }
+    }
+  },
+  {
+    name: "figma_insert_component_instance",
+    description: "Create and insert an instance of a master component or component set into the canvas or target AutoLayout container. Supports selecting variants, applying text overrides with auto font loading, and returns a PNG screenshot for visual verification.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        component_name: {
+          type: "string",
+          description: "Name of the master component or ComponentSet to instantiate (e.g. 'Button', 'Card', 'Input')"
+        },
+        component_id: {
+          type: "string",
+          description: "Direct node ID of the master component or ComponentSet (optional alternative to component_name)"
+        },
+        properties: {
+          type: "object",
+          description: "Key-value map of variant properties and component properties to apply (e.g. {'Type': 'Primary', 'Size': 'MD', 'State': 'Default'})"
+        },
+        text_overrides: {
+          type: "object",
+          description: "Key-value map of text overrides for text layers inside the component (e.g. {'Label': 'Submit', 'Description': 'Confirm order'})"
+        },
+        target_parent_id: {
+          type: "string",
+          description: "Target container/frame node ID to insert the instance into. If omitted, inserts into current selected frame or active page."
+        },
+        position: {
+          type: "object",
+          properties: {
+            x: { type: "number" },
+            y: { type: "number" },
+            index: { type: "number", description: "Child index in AutoLayout parent" }
+          },
+          description: "Optional placement coordinates or child index in AutoLayout container"
+        },
+        capture: {
+          type: "boolean",
+          description: "Whether to automatically capture and return a PNG screenshot of the inserted instance (default: true)"
+        },
+        scale: {
+          type: "number",
+          description: "Screenshot resolution scale (default: 1.5)"
+        }
+      }
+    }
+  },
+  {
+    name: "figma_get_variables",
+    description: "Retrieve all Figma Variable collections, modes (e.g. Light/Dark), and design tokens (colors, numbers, strings, booleans) from the active document.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        collection_name: {
+          type: "string",
+          description: "Optional filter by variable collection name (e.g. 'Theme', 'Tokens', 'Spacing')"
+        }
+      }
+    }
+  },
+  {
+    name: "figma_set_variables_mode",
+    description: "Switch the active Figma Variables mode (e.g. Dark Mode, Light Mode, Brand theme) for a specific artboard/frame or the entire page.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        collection_name: {
+          type: "string",
+          description: "Name of the variable collection (e.g. 'Theme', 'Mode', 'Brand')"
+        },
+        mode_name: {
+          type: "string",
+          description: "Target mode name to activate (e.g. 'Dark', 'Light', 'Compact')"
+        },
+        target_id: {
+          type: "string",
+          description: "Target node ID (frame/artboard) to set mode on. If omitted, applies to current selection or active page."
+        },
+        capture: {
+          type: "boolean",
+          description: "Whether to capture a PNG screenshot of the target after switching mode (default: true)"
+        },
+        scale: {
+          type: "number",
+          description: "Screenshot resolution scale (default: 1.5)"
+        }
+      },
+      required: ["collection_name", "mode_name"]
+    }
+  },
 
   // 2. Figma REST API Tools (Cloud)
   {
@@ -562,6 +676,103 @@ async function handleCallTool(name, args = {}) {
 
         const content = [];
         content.push({ type: "text", text: String(response.result) });
+        if (response.screenshot) {
+          const cleanB64 = response.screenshot.replace(/^data:image\/\w+;base64,/, "");
+          content.push({
+            type: "image",
+            data: cleanB64,
+            mimeType: "image/png"
+          });
+        }
+
+        return { content };
+      }
+
+      // Design System Tools
+      case "figma_find_components": {
+        const response = await sendCommandToPlugin({
+          type: "FIND_COMPONENTS",
+          query: args.query || "",
+          page_name: args.page_name,
+          include_variants: args.include_variants !== false,
+          limit: args.limit || 30
+        }, 30000);
+
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify(response.result, null, 2)
+          }]
+        };
+      }
+
+      case "figma_insert_component_instance": {
+        const capture = args.capture !== false;
+        const scale = args.scale || 1.5;
+        const response = await sendCommandToPlugin({
+          type: "INSERT_COMPONENT_INSTANCE",
+          component_name: args.component_name,
+          component_id: args.component_id,
+          properties: args.properties || {},
+          text_overrides: args.text_overrides || {},
+          target_parent_id: args.target_parent_id,
+          position: args.position,
+          capture: capture,
+          scale: scale
+        }, 40000);
+
+        const content = [];
+        const resText = typeof response.result === "object" ? JSON.stringify(response.result, null, 2) : String(response.result);
+        content.push({
+          type: "text",
+          text: `Figma Component Instance Inserted: ${resText}`
+        });
+
+        if (response.screenshot) {
+          const cleanB64 = response.screenshot.replace(/^data:image\/\w+;base64,/, "");
+          content.push({
+            type: "image",
+            data: cleanB64,
+            mimeType: "image/png"
+          });
+        }
+
+        return { content };
+      }
+
+      case "figma_get_variables": {
+        const response = await sendCommandToPlugin({
+          type: "GET_VARIABLES",
+          collection_name: args.collection_name
+        }, 30000);
+
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify(response.result, null, 2)
+          }]
+        };
+      }
+
+      case "figma_set_variables_mode": {
+        const capture = args.capture !== false;
+        const scale = args.scale || 1.5;
+        const response = await sendCommandToPlugin({
+          type: "SET_VARIABLES_MODE",
+          collection_name: args.collection_name,
+          mode_name: args.mode_name,
+          target_id: args.target_id,
+          capture: capture,
+          scale: scale
+        }, 35000);
+
+        const content = [];
+        const resText = typeof response.result === "object" ? JSON.stringify(response.result, null, 2) : String(response.result);
+        content.push({
+          type: "text",
+          text: `Figma Variable Mode Updated: ${resText}`
+        });
+
         if (response.screenshot) {
           const cleanB64 = response.screenshot.replace(/^data:image\/\w+;base64,/, "");
           content.push({

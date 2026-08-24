@@ -1,0 +1,1 @@
+{"name":"figma_get_variables","description":"Retrieve all Figma Variable collections, modes (e.g. Light/Dark), and design tokens (colors, numbers, strings, booleans) from the active document.","parameters":{"properties":{"collection_name":{"description":"Optional filter by variable collection name (e.g. 'Theme', 'Tokens', 'Spacing')","type":"string"}},"type":"object"}}
