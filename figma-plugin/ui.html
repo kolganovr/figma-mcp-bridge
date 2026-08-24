@@ -50,22 +50,31 @@
     * { box-sizing: border-box; margin: 0; padding: 0; }
 
     body {
-      padding: 14px;
       font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
       font-size: 11px;
       background: var(--bg-app);
       color: var(--text-primary);
       user-select: none;
-      display: flex;
-      flex-direction: column;
       height: 100vh;
       overflow: hidden;
-      gap: 10px;
     }
 
     /* =========================================================
-       01. HEADER UNIT (Isometric Dimensional Core & StatusPill)
+       VIEW 1: FULL DASHBOARD VIEW (360 x 480)
        ========================================================= */
+    #view-full {
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      gap: 8px;
+    }
+
+    #view-full.hidden {
+      display: none !important;
+    }
+
+    /* 01. HEADER UNIT */
     .header {
       display: flex;
       align-items: center;
@@ -74,7 +83,7 @@
       background: var(--bg-surface);
       border: 1px solid var(--border-subtle);
       border-radius: var(--radius-md);
-      padding: 8px 12px;
+      padding: 7px 10px;
       transition: all 0.25s ease;
     }
 
@@ -85,9 +94,9 @@
     }
 
     .logo-container {
-      width: 28px;
-      height: 28px;
-      border-radius: 7px;
+      width: 24px;
+      height: 24px;
+      border-radius: 6px;
       background: var(--status-online-bg);
       border: 1px solid var(--status-online-border);
       display: flex;
@@ -110,8 +119,8 @@
     }
 
     .logo-iso {
-      width: 18px;
-      height: 18px;
+      width: 16px;
+      height: 16px;
     }
 
     .titles {
@@ -120,15 +129,15 @@
       gap: 1px;
     }
     .brand-title {
-      font-size: 12px;
+      font-size: 11px;
       font-weight: 700;
       color: var(--text-primary);
-      line-height: 14px;
+      line-height: 13px;
     }
     .brand-sub {
-      font-size: 9px;
+      font-size: 8px;
       color: var(--text-muted);
-      line-height: 11px;
+      line-height: 10px;
       font-family: 'Roboto Mono', monospace;
     }
 
@@ -191,17 +200,28 @@
       to { opacity: 1; transform: scale(1.1); }
     }
 
-    /* =========================================================
-       02. ACTIVITY CARD (Executing / Idle / Error)
-       ========================================================= */
+    /* 02. TAB CONTENT CONTAINERS */
+    .tab-content {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      min-height: 0;
+      overflow-y: auto;
+    }
+    .tab-content.hidden {
+      display: none !important;
+    }
+
+    /* STREAM TAB STYLES */
     .activity-card {
       background: var(--bg-surface);
       border: 1px solid var(--border-subtle);
       border-radius: var(--radius-lg);
-      padding: 10px 12px;
+      padding: 8px 10px;
       display: flex;
       flex-direction: column;
-      gap: 6px;
+      gap: 4px;
       flex-shrink: 0;
       transition: border-color 0.25s ease, box-shadow 0.25s ease;
     }
@@ -244,13 +264,16 @@
 
     .task-desc {
       font-family: 'Roboto Mono', monospace;
-      font-size: 10px;
+      font-size: 9px;
       font-weight: 400;
       color: var(--text-secondary);
-      line-height: 14px;
+      line-height: 13px;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+      user-select: text;
+      -webkit-user-select: text;
+      cursor: text;
     }
     .task-desc.busy { color: var(--text-primary); }
     .task-desc.error { color: #fca5a5; }
@@ -263,9 +286,7 @@
       overflow: hidden;
       display: none;
     }
-    .progress-bar.active {
-      display: block;
-    }
+    .progress-bar.active { display: block; }
     .progress-fill {
       height: 100%;
       width: 70%;
@@ -277,17 +298,9 @@
       background: linear-gradient(90deg, #8b5cf6, #c084fc);
     }
 
-    @keyframes progressShift {
-      from { width: 25%; transform: translateX(0%); }
-      to { width: 90%; transform: translateX(15%); }
-    }
-
-    /* =========================================================
-       03. METRICS ROW (3 Compact Metric Cards)
-       ========================================================= */
     .metrics-bar {
       display: flex;
-      gap: 8px;
+      gap: 6px;
       flex-shrink: 0;
     }
     .metric-box {
@@ -295,15 +308,15 @@
       background: var(--bg-surface);
       border: 1px solid var(--border-subtle);
       border-radius: var(--radius-md);
-      padding: 6px 10px;
+      padding: 4px 8px;
       display: flex;
       flex-direction: column;
-      gap: 2px;
+      gap: 1px;
     }
     .metric-val {
-      font-size: 14px;
+      font-size: 13px;
       font-weight: 700;
-      line-height: 16px;
+      line-height: 15px;
       font-family: 'Roboto Mono', monospace;
     }
     .metric-val.blue { color: var(--status-busy); }
@@ -314,34 +327,30 @@
       color: var(--text-muted);
     }
 
-    /* =========================================================
-       04. TERMINAL STREAM ORGANISM (Pro Monospace Event Log)
-       ========================================================= */
     .terminal-box {
-      flex: 1;
+      height: 140px;
+      flex-shrink: 0;
       background: var(--bg-terminal);
       border: 1px solid var(--border-subtle);
       border-radius: var(--radius-lg);
-      padding: 10px 12px;
+      padding: 8px 10px;
       display: flex;
       flex-direction: column;
       overflow: hidden;
-      min-height: 0;
-      gap: 6px;
+      gap: 4px;
     }
-
     .term-head {
       display: flex;
       align-items: center;
       justify-content: space-between;
       flex-shrink: 0;
-      padding-bottom: 6px;
+      padding-bottom: 4px;
       border-bottom: 1px solid #1f1f23;
     }
     .term-title-group {
       display: flex;
       align-items: center;
-      gap: 6px;
+      gap: 5px;
     }
     .term-prompt {
       font-family: 'Roboto Mono', monospace;
@@ -356,11 +365,10 @@
       color: var(--text-secondary);
       letter-spacing: 0.5px;
     }
-
     .term-actions {
       display: flex;
       align-items: center;
-      gap: 8px;
+      gap: 6px;
     }
     .term-btn {
       font-size: 8px;
@@ -371,63 +379,66 @@
       border-radius: var(--radius-xs);
       transition: all 0.15s ease;
     }
-    .term-btn:hover {
-      background: var(--border-subtle);
-      color: var(--text-primary);
-    }
-    .term-btn.accent {
-      color: #38bdf8;
-    }
-    .term-btn.accent:hover {
-      background: rgba(56, 189, 248, 0.15);
-      color: #7dd3fc;
-    }
+    .term-btn:hover { background: var(--border-subtle); color: var(--text-primary); }
+    .term-btn.accent { color: #38bdf8; }
+    .term-btn.accent:hover { background: rgba(56, 189, 248, 0.15); color: #7dd3fc; }
 
     .log-list {
       flex: 1;
       overflow-y: auto;
       font-family: 'Roboto Mono', ui-monospace, Consolas, monospace;
       font-size: 9px;
-      line-height: 1.5;
+      line-height: 1.4;
       display: flex;
       flex-direction: column;
-      gap: 4px;
+      gap: 3px;
       padding-top: 2px;
+      user-select: text;
+      -webkit-user-select: text;
+      cursor: text;
     }
-    .log-list::-webkit-scrollbar {
-      width: 4px;
+    .log-list * {
+      user-select: text;
+      -webkit-user-select: text;
     }
-    .log-list::-webkit-scrollbar-thumb {
-      background: var(--border-subtle);
-      border-radius: 4px;
+    .log-list ::selection,
+    .log-list *::selection {
+      background: rgba(99, 102, 241, 0.45);
+      color: #ffffff;
     }
+    .log-list::-webkit-scrollbar { width: 4px; }
+    .log-list::-webkit-scrollbar-thumb { background: var(--border-subtle); border-radius: 4px; }
 
     .log-row {
-      display: flex;
-      align-items: baseline;
-      gap: 6px;
-      word-break: break-all;
+      display: block;
+      white-space: nowrap;
+      line-height: 1.5;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
     .log-time {
+      display: inline;
       color: #52525b;
       font-size: 8px;
-      flex-shrink: 0;
     }
     .tag {
+      display: inline-block;
       font-size: 7px;
       font-weight: 700;
-      padding: 1px 4px;
+      padding: 0 4px;
       border-radius: var(--radius-xs);
-      flex-shrink: 0;
       letter-spacing: 0.3px;
+      margin: 0 4px;
+      vertical-align: 1px;
+      line-height: 13px;
     }
     .tag.run { background: #172554; color: #60a5fa; }
     .tag.shot { background: #2e1065; color: #c084fc; }
     .tag.ok { background: #0f291e; color: #4ade80; }
     .tag.err { background: #450a0a; color: #f87171; }
     .tag.sys { background: #27272a; color: #a1a1aa; }
-
     .log-text {
+      display: inline;
       color: #d4d4d8;
     }
 
@@ -435,32 +446,303 @@
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding-top: 4px;
+      padding-top: 3px;
       border-top: 1px solid #18181b;
       font-family: 'Roboto Mono', monospace;
       font-size: 7px;
       color: var(--text-muted);
       flex-shrink: 0;
     }
-    .term-count {
-      color: var(--status-online);
+    .term-count { color: var(--status-online); }
+
+    /* SETTINGS TAB STYLES */
+    .settings-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-md);
+      padding: 8px 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+    .settings-card-title {
+      font-size: 8px;
+      font-weight: 700;
+      color: var(--text-muted);
+      letter-spacing: 0.5px;
     }
 
-    /* =========================================================
-       05. BOTTOM ACTION BAR (Toggle on Left, Ping on Right)
-       ========================================================= */
-    .bottom-bar {
+    .segmented-control {
+      display: flex;
+      background: var(--bg-app);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-sm);
+      padding: 2px;
+      gap: 2px;
+      height: 30px;
+    }
+    .segmented-opt {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 10px;
+      font-weight: 500;
+      color: var(--text-muted);
+      border-radius: 4px;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+    .segmented-opt.active {
+      background: var(--bg-elevated);
+      color: var(--text-primary);
+      border: 1px solid var(--border-contrast);
+      font-weight: 600;
+    }
+
+    .setting-toggle-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 2px 0;
+    }
+    .setting-label-group {
+      display: flex;
+      flex-direction: column;
+      gap: 1px;
+    }
+    .setting-title {
+      font-size: 10px;
+      font-weight: 500;
+      color: var(--text-primary);
+    }
+    .setting-desc {
+      font-size: 8px;
+      color: var(--text-muted);
+    }
+
+    .input-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .server-input {
+      flex: 1;
+      height: 28px;
+      background: var(--bg-app);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-sm);
+      padding: 0 8px;
+      color: var(--text-primary);
+      font-family: 'Roboto Mono', monospace;
+      font-size: 10px;
+      outline: none;
+      transition: border-color 0.15s ease;
+    }
+    .server-input:focus {
+      border-color: var(--border-contrast);
+    }
+
+    /* 03. BOTTOM NAVIGATION BAR (NavTabs 1:1) */
+    .nav-tabs-bar {
       display: flex;
       align-items: center;
       justify-content: space-between;
       flex-shrink: 0;
-      padding-top: 2px;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-md);
+      padding: 4px;
+      height: 34px;
     }
 
-    .toggle-row {
+    .nav-pills {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .nav-pill {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 4px 10px;
+      border-radius: 5px;
+      font-size: 10px;
+      font-weight: 500;
+      color: var(--text-muted);
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+    .nav-pill:hover {
+      color: var(--text-primary);
+    }
+    .nav-pill.active {
+      background: var(--bg-elevated);
+      color: var(--text-primary);
+      border: 1px solid var(--border-contrast);
+      font-weight: 600;
+    }
+
+    .btn-icon-styled {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border-subtle);
+      border-radius: 6px;
+      padding: 4px 8px;
+      color: var(--text-secondary);
+      font-size: 10px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+    .btn-icon-styled:hover {
+      background: #27272e;
+      border-color: var(--border-contrast);
+      color: var(--text-primary);
+    }
+    .btn-icon-styled:active {
+      transform: scale(0.97);
+    }
+
+    /* =========================================================
+       VIEW 2: COMPACT FLOATING MINI-BAR (260 x 44)
+       ========================================================= */
+    #view-compact {
+      width: 260px;
+      height: 44px;
+      padding: 6px 10px;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+      transition: border-color 0.25s ease;
+    }
+
+    #view-compact.hidden {
+      display: none !important;
+    }
+
+    #view-compact.busy {
+      border-color: var(--status-busy);
+    }
+    #view-compact.capture {
+      border-color: var(--status-capture);
+    }
+    #view-compact.offline {
+      border-color: var(--status-error);
+    }
+
+    .compact-left {
       display: flex;
       align-items: center;
       gap: 8px;
+      min-width: 0;
+    }
+
+    .compact-status-pill {
+      width: 24px;
+      height: 24px;
+      border-radius: 6px;
+      background: var(--status-online-bg);
+      border: 1px solid var(--status-online-border);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      transition: all 0.25s ease;
+    }
+    .compact-status-pill.busy {
+      background: var(--status-busy-bg);
+      border-color: var(--status-busy-border);
+    }
+    .compact-status-pill.capture {
+      background: var(--status-capture-bg);
+      border-color: var(--status-capture-border);
+    }
+    .compact-status-pill.offline {
+      background: var(--status-error-bg);
+      border-color: var(--status-error-border);
+    }
+
+    .compact-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--status-online);
+      box-shadow: 0 0 5px rgba(74, 222, 128, 0.6);
+      transition: all 0.25s ease;
+    }
+    .compact-dot.busy {
+      background: var(--status-busy);
+      box-shadow: 0 0 5px rgba(96, 165, 250, 0.8);
+      animation: pulseDot 0.8s infinite alternate;
+    }
+    .compact-dot.capture {
+      background: var(--status-capture);
+      box-shadow: 0 0 5px rgba(192, 132, 252, 0.8);
+      animation: pulseDot 0.6s infinite alternate;
+    }
+    .compact-dot.offline {
+      background: var(--status-error);
+      box-shadow: none;
+      animation: none;
+    }
+
+    .compact-label {
+      font-size: 10px;
+      font-weight: 500;
+      color: var(--text-primary);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .compact-label.offline {
+      color: var(--status-error);
+    }
+
+    .compact-right {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+
+    .icon-btn {
+      width: 24px;
+      height: 24px;
+      border-radius: 6px;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border-subtle);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      color: var(--text-secondary);
+    }
+    .icon-btn:hover {
+      background: #2b2b32;
+      border-color: var(--border-contrast);
+      color: var(--text-primary);
+    }
+    .icon-btn:active {
+      transform: scale(0.95);
+    }
+    .icon-btn.active {
+      border-color: #8b5cf6;
+      color: #c084fc;
+    }
+
+    /* TOGGLE SWITCH ATOM */
+    .toggle-row {
+      display: flex;
+      align-items: center;
       cursor: pointer;
     }
     .toggle-track {
@@ -492,155 +774,224 @@
       background: #ffffff;
       transform: translateX(12px);
     }
-    .toggle-label {
-      font-size: 9px;
-      font-weight: 500;
-      color: var(--text-muted);
-      transition: color 0.2s ease;
-    }
-    .toggle-track.active + .toggle-label {
-      color: var(--text-primary);
-    }
-
-    .btn-action {
-      display: inline-flex;
-      align-items: center;
-      gap: 5px;
-      background: var(--bg-surface);
-      border: 1px solid var(--border-subtle);
-      border-radius: var(--radius-md);
-      padding: 6px 12px;
-      color: var(--text-primary);
-      font-size: 9px;
-      font-weight: 500;
-      cursor: pointer;
-      transition: all 0.15s ease;
-    }
-    .btn-action:hover {
-      background: var(--bg-elevated);
-      border-color: var(--border-contrast);
-    }
-    .btn-action:active {
-      transform: scale(0.98);
-    }
-    .btn-icon {
-      font-size: 10px;
-    }
   </style>
 </head>
 <body>
 
-  <!-- 01. HEADER UNIT -->
-  <div class="header">
-    <div class="brand-group">
-      <div id="logo-box" class="logo-container">
-        <svg class="logo-iso" viewBox="0 0 24 24" fill="none">
-          <path id="iso-mesh-1" d="M12 3L19.5 7.5V16.5L12 21L4.5 16.5V7.5L12 3Z" stroke="#4ADE80" stroke-width="1.6" stroke-linejoin="round"/>
-          <path id="iso-mesh-2" d="M12 3V12M12 12L4.5 7.5M12 12L19.5 7.5" stroke="#4ADE80" stroke-width="1.6" stroke-linejoin="round"/>
-          <path id="iso-mesh-3" d="M12 12V21M12 12L19.5 16.5M12 12L4.5 16.5" stroke="#4ADE80" stroke-width="1.6" stroke-opacity="0.4" stroke-linejoin="round"/>
-          <circle id="iso-glow" cx="12" cy="12" r="3.5" fill="#22C55E" fill-opacity="0.35"/>
-          <circle cx="12" cy="12" r="2" fill="#FFFFFF"/>
+  <!-- =========================================================
+       VIEW A: FULL DASHBOARD (360 x 480)
+       ========================================================= -->
+  <div id="view-full">
+
+    <!-- 01. MASTER HEADER -->
+    <div class="header">
+      <div class="brand-group">
+        <div id="logo-box" class="logo-container">
+          <svg class="logo-iso" viewBox="0 0 24 24" fill="none">
+            <path id="iso-mesh-1" d="M12 3L19.5 7.5V16.5L12 21L4.5 16.5V7.5L12 3Z" stroke="#4ADE80" stroke-width="1.6" stroke-linejoin="round"/>
+            <path id="iso-mesh-2" d="M12 3V12M12 12L4.5 7.5M12 12L19.5 7.5" stroke="#4ADE80" stroke-width="1.6" stroke-linejoin="round"/>
+            <path id="iso-mesh-3" d="M12 12V21M12 12L19.5 16.5M12 12L4.5 16.5" stroke="#4ADE80" stroke-width="1.6" stroke-opacity="0.4" stroke-linejoin="round"/>
+            <circle id="iso-glow" cx="12" cy="12" r="3.5" fill="#22C55E" fill-opacity="0.35"/>
+            <circle cx="12" cy="12" r="2" fill="#FFFFFF"/>
+          </svg>
+        </div>
+        <div class="titles">
+          <span class="brand-title">Antigravity Bridge</span>
+          <span id="header-sub" class="brand-sub">Local :8765 • v3.1</span>
+        </div>
+      </div>
+      <div id="status-pill" class="status-pill">
+        <div id="status-dot" class="status-dot"></div>
+        <span id="status-text">CONNECTED</span>
+      </div>
+    </div>
+
+    <!-- 02. STREAM TAB -->
+    <div id="tab-stream" class="tab-content">
+      <!-- Activity Card -->
+      <div id="act-card" class="activity-card">
+        <div class="card-top">
+          <span id="card-tag" class="card-tag">AI ASSISTANT STATUS</span>
+          <span id="card-badge" class="card-badge">⚡ Ready</span>
+        </div>
+        <div id="task-desc" class="task-desc">Listening on 127.0.0.1:8765. Ready for commands.</div>
+        <div id="progress-bar" class="progress-bar">
+          <div id="progress-fill" class="progress-fill"></div>
+        </div>
+      </div>
+
+      <!-- Metrics Row -->
+      <div class="metrics-bar">
+        <div class="metric-box">
+          <span id="m-cmds" class="metric-val blue">0</span>
+          <span class="metric-label">Commands</span>
+        </div>
+        <div class="metric-box">
+          <span id="m-caps" class="metric-val purple">0</span>
+          <span class="metric-label">Captures</span>
+        </div>
+        <div class="metric-box">
+          <span id="m-lat" class="metric-val green">—</span>
+          <span class="metric-label">Latency</span>
+        </div>
+      </div>
+
+      <!-- Terminal Stream -->
+      <div class="terminal-box">
+        <div class="term-head">
+          <div class="term-title-group">
+            <span class="term-prompt">&gt;_</span>
+            <span class="term-title">EVENT STREAM</span>
+          </div>
+          <div class="term-actions">
+            <span id="term-copy" class="term-btn">Copy</span>
+            <span id="term-clear" class="term-btn accent">Clear</span>
+          </div>
+        </div>
+        <div id="log-list" class="log-list">
+          <div class="log-row"><span class="log-time">[Init]</span> <span class="tag sys">SYS</span> <span class="log-text">Bridge v3.1 initialized on :8765</span></div>
+        </div>
+        <div class="term-footer">
+          <span id="term-count" class="term-count">● 1 event logged</span>
+          <span id="term-latency">Latency: --</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 03. SETTINGS TAB -->
+    <div id="tab-settings" class="tab-content hidden">
+      <!-- Section 1: Display & Appearance -->
+      <div class="settings-card">
+        <span class="settings-card-title">DISPLAY & APPEARANCE</span>
+        <div class="segmented-control">
+          <div id="seg-full" class="segmented-opt active">Full Dashboard</div>
+          <div id="seg-compact" class="segmented-opt">Compact Mini-Bar</div>
+        </div>
+      </div>
+
+      <!-- Section 2: Canvas & AI Automation -->
+      <div class="settings-card">
+        <span class="settings-card-title">CANVAS & AI AUTOMATION</span>
+        <div class="setting-toggle-row">
+          <div class="setting-label-group">
+            <span class="setting-title">Auto-zoom canvas</span>
+            <span class="setting-desc">Focus camera on generated UI frames</span>
+          </div>
+          <div id="toggle-zoom-set" class="toggle-row">
+            <div id="toggle-zoom-track" class="toggle-track active">
+              <div class="toggle-knob"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="setting-toggle-row">
+          <div class="setting-label-group">
+            <span class="setting-title">Smart Placement</span>
+            <span class="setting-desc">Auto-offset new frames to free canvas area</span>
+          </div>
+          <div id="toggle-place-set" class="toggle-row">
+            <div id="toggle-place-track" class="toggle-track active">
+              <div class="toggle-knob"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Section 3: Local Bridge Server -->
+      <div class="settings-card">
+        <span class="settings-card-title">LOCAL BRIDGE SERVER</span>
+        <div class="input-row">
+          <input id="server-url-input" class="server-input" type="text" value="http://127.0.0.1:8765" spellcheck="false" />
+          <button id="ping-btn" class="btn-icon-styled">
+            <span>⚡</span>
+            <span>Ping</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 04. BOTTOM NAVIGATION BAR (NavTabs) -->
+    <div class="nav-tabs-bar">
+      <div class="nav-pills">
+        <div id="nav-btn-stream" class="nav-pill active">
+          <span>⚡</span>
+          <span>Stream</span>
+        </div>
+        <div id="nav-btn-settings" class="nav-pill">
+          <span>⚙️</span>
+          <span>Settings</span>
+        </div>
+      </div>
+      <button id="btn-mini-mode" class="btn-icon-styled">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 14H10V20"/><path d="M20 10H14V4"/><path d="M14 10L21 3"/><path d="M10 14L3 21"/>
+        </svg>
+        <span>Mini Mode</span>
+      </button>
+    </div>
+
+  </div>
+
+  <!-- =========================================================
+       VIEW B: COMPACT FLOATING MINI-BAR (260 x 44)
+       ========================================================= -->
+  <div id="view-compact" class="hidden">
+    <div class="compact-left">
+      <div id="compact-pill" class="compact-status-pill">
+        <div id="compact-dot" class="compact-dot"></div>
+      </div>
+      <span id="compact-text" class="compact-label">Bridge Ready</span>
+    </div>
+
+    <div class="compact-right">
+      <!-- Target / Focus button (Auto-zoom toggle) -->
+      <div id="compact-focus-btn" class="icon-btn active" title="Toggle Auto-Zoom">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="7"/>
+          <path d="M12 2V5M12 19V22M2 12H5M19 12H22"/>
         </svg>
       </div>
-      <div class="titles">
-        <span class="brand-title">Antigravity Bridge</span>
-        <span class="brand-sub">Local :8765 • v3.0</span>
+
+      <!-- Expand button (Open Full Dashboard) -->
+      <div id="compact-expand-btn" class="icon-btn" title="Expand Full Dashboard">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M15 3H21V9M9 21H3V15M21 3L14 10M3 21L10 14"/>
+        </svg>
       </div>
-    </div>
-    <div id="status-pill" class="status-pill">
-      <div id="status-dot" class="status-dot"></div>
-      <span id="status-text">CONNECTED</span>
     </div>
   </div>
 
-  <!-- 02. ACTIVITY CARD -->
-  <div id="act-card" class="activity-card">
-    <div class="card-top">
-      <span id="card-tag" class="card-tag">AI ASSISTANT STATUS</span>
-      <span id="card-badge" class="card-badge">⚡ Ready</span>
-    </div>
-    <div id="task-desc" class="task-desc">Listening on 127.0.0.1:8765. Ready for commands.</div>
-    <div id="progress-bar" class="progress-bar">
-      <div id="progress-fill" class="progress-fill"></div>
-    </div>
-  </div>
-
-  <!-- 03. METRICS ROW -->
-  <div class="metrics-bar">
-    <div class="metric-box">
-      <span id="m-cmds" class="metric-val blue">0</span>
-      <span class="metric-label">Commands</span>
-    </div>
-    <div class="metric-box">
-      <span id="m-caps" class="metric-val purple">0</span>
-      <span class="metric-label">Captures</span>
-    </div>
-    <div class="metric-box">
-      <span id="m-lat" class="metric-val green">—</span>
-      <span class="metric-label">Latency</span>
-    </div>
-  </div>
-
-  <!-- 04. TERMINAL STREAM -->
-  <div class="terminal-box">
-    <div class="term-head">
-      <div class="term-title-group">
-        <span class="term-prompt">&gt;_</span>
-        <span class="term-title">EVENT STREAM</span>
-      </div>
-      <div class="term-actions">
-        <span id="term-copy" class="term-btn">Copy</span>
-        <span id="term-clear" class="term-btn accent">Clear</span>
-      </div>
-    </div>
-    <div id="log-list" class="log-list">
-      <div class="log-row">
-        <span class="log-time">[Init]</span>
-        <span class="tag sys">SYS</span>
-        <span class="log-text">Bridge v3.0 initialized on :8765</span>
-      </div>
-    </div>
-    <div class="term-footer">
-      <span id="term-count" class="term-count">● 1 event logged</span>
-      <span id="term-latency">Latency: --</span>
-    </div>
-  </div>
-
-  <!-- 05. BOTTOM ACTION BAR -->
-  <div class="bottom-bar">
-    <div id="toggle-zoom" class="toggle-row">
-      <div id="toggle-track" class="toggle-track active">
-        <div class="toggle-knob"></div>
-      </div>
-      <span class="toggle-label">Auto-zoom canvas</span>
-    </div>
-    <button id="ping-btn" class="btn-action">
-      <span class="btn-icon">⚡</span>
-      <span>Ping Bridge</span>
-    </button>
-  </div>
-
-  <!-- JAVASCRIPT LOGIC & LONG POLLING -->
+  <!-- JAVASCRIPT ENGINE -->
   <script>
-    const SERVER_URL = 'http://127.0.0.1:8765';
+    let SERVER_URL = 'http://127.0.0.1:8765';
 
     // State
     let cmdCount = 0;
     let capCount = 0;
     let totalLogs = 1;
     let autoZoom = true;
+    let smartPlacement = true;
+    let currentView = 'full'; // 'full' | 'compact'
+    let currentTab = 'stream'; // 'stream' | 'settings'
     let isPolling = false;
 
-    // Elements
+    // Elements - Full View
+    const viewFull = document.getElementById('view-full');
+    const viewCompact = document.getElementById('view-compact');
+
     const logoBox = document.getElementById('logo-box');
     const isoMesh1 = document.getElementById('iso-mesh-1');
     const isoMesh2 = document.getElementById('iso-mesh-2');
     const isoMesh3 = document.getElementById('iso-mesh-3');
     const isoGlow = document.getElementById('iso-glow');
+    const headerSub = document.getElementById('header-sub');
 
     const statusPill = document.getElementById('status-pill');
     const statusDot = document.getElementById('status-dot');
     const statusText = document.getElementById('status-text');
+
+    const tabStream = document.getElementById('tab-stream');
+    const tabSettings = document.getElementById('tab-settings');
 
     const actCard = document.getElementById('act-card');
     const cardTag = document.getElementById('card-tag');
@@ -659,9 +1010,27 @@
     const termCount = document.getElementById('term-count');
     const termLatency = document.getElementById('term-latency');
 
-    const toggleZoom = document.getElementById('toggle-zoom');
-    const toggleTrack = document.getElementById('toggle-track');
+    // Settings elements
+    const segFull = document.getElementById('seg-full');
+    const segCompact = document.getElementById('seg-compact');
+    const toggleZoomTrack = document.getElementById('toggle-zoom-track');
+    const toggleZoomSet = document.getElementById('toggle-zoom-set');
+    const togglePlaceTrack = document.getElementById('toggle-place-track');
+    const togglePlaceSet = document.getElementById('toggle-place-set');
+    const serverUrlInput = document.getElementById('server-url-input');
     const pingBtn = document.getElementById('ping-btn');
+
+    // Navigation elements
+    const navBtnStream = document.getElementById('nav-btn-stream');
+    const navBtnSettings = document.getElementById('nav-btn-settings');
+    const btnMiniMode = document.getElementById('btn-mini-mode');
+
+    // Compact elements
+    const compactPill = document.getElementById('compact-pill');
+    const compactDot = document.getElementById('compact-dot');
+    const compactText = document.getElementById('compact-text');
+    const compactFocusBtn = document.getElementById('compact-focus-btn');
+    const compactExpandBtn = document.getElementById('compact-expand-btn');
 
     function getTime() {
       const now = new Date();
@@ -672,7 +1041,7 @@
       totalLogs++;
       const row = document.createElement('div');
       row.className = 'log-row';
-      row.innerHTML = `<span class="log-time">${getTime()}</span><span class="tag ${tagType}">${tagText}</span><span class="log-text">${escapeHtml(msg)}</span>`;
+      row.innerHTML = `<span class="log-time">${getTime()}</span> <span class="tag ${tagType}">${tagText}</span> <span class="log-text">${escapeHtml(msg)}</span>`;
       logList.appendChild(row);
       logList.scrollTop = logList.scrollHeight;
       termCount.textContent = `● ${totalLogs} events logged`;
@@ -689,6 +1058,7 @@
       isoGlow.setAttribute('fill', glow);
     }
 
+    // Update Status across BOTH views (Full & Compact)
     function setCardState(isBusy, text, isCapture = false) {
       if (isBusy) {
         if (isCapture) {
@@ -708,6 +1078,12 @@
           statusPill.className = 'status-pill capture';
           statusDot.className = 'status-dot capture';
           statusText.textContent = 'CAPTURE';
+
+          viewCompact.className = 'capture';
+          compactPill.className = 'compact-status-pill capture';
+          compactDot.className = 'compact-dot capture';
+          compactText.className = 'compact-label';
+          compactText.textContent = 'Capturing...';
         } else {
           actCard.className = 'activity-card busy';
           cardTag.className = 'card-tag busy';
@@ -725,6 +1101,12 @@
           statusPill.className = 'status-pill busy';
           statusDot.className = 'status-dot busy';
           statusText.textContent = 'BUSY';
+
+          viewCompact.className = 'busy';
+          compactPill.className = 'compact-status-pill busy';
+          compactDot.className = 'compact-dot busy';
+          compactText.className = 'compact-label';
+          compactText.textContent = 'Executing...';
         }
       } else {
         actCard.className = 'activity-card';
@@ -742,6 +1124,12 @@
         statusPill.className = 'status-pill';
         statusDot.className = 'status-dot';
         statusText.textContent = 'CONNECTED';
+
+        viewCompact.className = '';
+        compactPill.className = 'compact-status-pill';
+        compactDot.className = 'compact-dot';
+        compactText.className = 'compact-label';
+        compactText.textContent = 'Bridge Ready';
       }
     }
 
@@ -761,24 +1149,145 @@
       statusPill.className = 'status-pill offline';
       statusDot.className = 'status-dot offline';
       statusText.textContent = 'OFFLINE';
+
+      viewCompact.className = 'offline';
+      compactPill.className = 'compact-status-pill offline';
+      compactDot.className = 'compact-dot offline';
+      compactText.className = 'compact-label offline';
+      compactText.textContent = 'Server Offline';
     }
 
-    // Toggle Auto-Zoom
-    toggleZoom.onclick = () => {
-      autoZoom = !autoZoom;
-      toggleTrack.className = autoZoom ? 'toggle-track active' : 'toggle-track';
+    // View Switching Logic (Full <-> Compact)
+    function switchView(viewName) {
+      currentView = viewName;
+      if (viewName === 'compact') {
+        viewFull.classList.add('hidden');
+        viewCompact.classList.remove('hidden');
+        parent.postMessage({ pluginMessage: { type: 'RESIZE_WINDOW', width: 260, height: 44 } }, '*');
+      } else {
+        viewCompact.classList.add('hidden');
+        viewFull.classList.remove('hidden');
+        parent.postMessage({ pluginMessage: { type: 'RESIZE_WINDOW', width: 360, height: 390 } }, '*');
+      }
+    }
+
+    // Tab Switching Logic (Stream <-> Settings)
+    function switchTab(tabName) {
+      currentTab = tabName;
+      if (tabName === 'settings') {
+        tabStream.classList.add('hidden');
+        tabSettings.classList.remove('hidden');
+        navBtnStream.classList.remove('active');
+        navBtnSettings.classList.add('active');
+        headerSub.textContent = 'Preferences • v3.1';
+      } else {
+        tabSettings.classList.add('hidden');
+        tabStream.classList.remove('hidden');
+        navBtnSettings.classList.remove('active');
+        navBtnStream.classList.add('active');
+        headerSub.textContent = 'Local :8765 • v3.1';
+      }
+    }
+
+    // Settings Save & Persistence
+    function savePreferences() {
+      const defaultView = segCompact.classList.contains('active') ? 'compact' : 'full';
+      const settings = {
+        defaultView,
+        autoZoom,
+        smartPlacement,
+        serverUrl: SERVER_URL
+      };
+      parent.postMessage({ pluginMessage: { type: 'SAVE_SETTINGS', settings } }, '*');
+    }
+
+    // Wire Navigation & View Events
+    navBtnStream.onclick = () => switchTab('stream');
+    navBtnSettings.onclick = () => switchTab('settings');
+    btnMiniMode.onclick = () => switchView('compact');
+    compactExpandBtn.onclick = () => switchView('full');
+
+    // Default View Selector
+    segFull.onclick = () => {
+      segFull.classList.add('active');
+      segCompact.classList.remove('active');
+      savePreferences();
+    };
+    segCompact.onclick = () => {
+      segCompact.classList.add('active');
+      segFull.classList.remove('active');
+      savePreferences();
+    };
+
+    // Auto-zoom Toggle (Settings & Compact)
+    function setAutoZoom(val) {
+      autoZoom = val;
+      toggleZoomTrack.className = autoZoom ? 'toggle-track active' : 'toggle-track';
+      compactFocusBtn.className = autoZoom ? 'icon-btn active' : 'icon-btn';
       parent.postMessage({ pluginMessage: { type: 'SET_AUTO_ZOOM', value: autoZoom } }, '*');
       addLog('sys', 'SYS', `Auto-zoom canvas: ${autoZoom ? 'ON' : 'OFF'}`);
+      savePreferences();
+    }
+    toggleZoomSet.onclick = () => setAutoZoom(!autoZoom);
+    compactFocusBtn.onclick = () => setAutoZoom(!autoZoom);
+
+    // Smart Placement Toggle
+    togglePlaceSet.onclick = () => {
+      smartPlacement = !smartPlacement;
+      togglePlaceTrack.className = smartPlacement ? 'toggle-track active' : 'toggle-track';
+      parent.postMessage({ pluginMessage: { type: 'SET_SMART_PLACEMENT', value: smartPlacement } }, '*');
+      addLog('sys', 'SYS', `Smart placement: ${smartPlacement ? 'ON' : 'OFF'}`);
+      savePreferences();
     };
+
+    // Server URL Input
+    serverUrlInput.onchange = () => {
+      SERVER_URL = serverUrlInput.value.trim() || 'http://127.0.0.1:8765';
+      addLog('sys', 'SYS', `Bridge URL updated: ${SERVER_URL}`);
+      savePreferences();
+    };
+
+    // Robust Clipboard Copy Helper
+    async function copyToClipboard(text) {
+      if (navigator.clipboard && window.isSecureContext) {
+        try {
+          await navigator.clipboard.writeText(text);
+          return true;
+        } catch (e) {}
+      }
+      try {
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.style.position = 'fixed';
+        textarea.style.left = '-9999px';
+        textarea.style.top = '-9999px';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.focus();
+        textarea.select();
+        const ok = document.execCommand('copy');
+        document.body.removeChild(textarea);
+        return ok;
+      } catch (e) {
+        return false;
+      }
+    }
 
     // Copy Logs
     termCopy.onclick = async () => {
-      const texts = Array.from(logList.children).map(r => r.innerText).join('\n');
-      try {
-        await navigator.clipboard.writeText(texts);
+      const rows = Array.from(logList.querySelectorAll('.log-row'));
+      const texts = rows.map(r => {
+        const time = r.querySelector('.log-time')?.textContent?.trim() || '';
+        const tag = r.querySelector('.tag')?.textContent?.trim() || '';
+        const text = r.querySelector('.log-text')?.textContent?.trim() || '';
+        return `${time} [${tag}] ${text}`;
+      }).join('\n');
+
+      const ok = await copyToClipboard(texts);
+      if (ok) {
         termCopy.textContent = 'Copied!';
         setTimeout(() => { termCopy.textContent = 'Copy'; }, 1500);
-      } catch (e) {
+      } else {
         termCopy.textContent = 'Error';
         setTimeout(() => { termCopy.textContent = 'Copy'; }, 1500);
       }
@@ -807,11 +1316,11 @@
         }
       } catch (err) {
         addLog('err', 'ERR', `Ping failed: ${err.message}`);
-        setOfflineState('Connection refused at 127.0.0.1:8765');
+        setOfflineState('Connection refused at ' + SERVER_URL);
       }
     };
 
-    // Long Polling Loop
+    // Long Polling Loop (Universal Tool Forwarder)
     async function pollCommands() {
       if (isPolling) return;
       isPolling = true;
@@ -826,54 +1335,35 @@
           const data = await res.json();
           if (data && data.id) {
             const startTime = performance.now();
-            if (data.type === 'SCREENSHOT') {
-              capCount++;
-              mCaps.textContent = capCount;
-              const desc = data.description || 'Canvas Screenshot';
-              setCardState(true, `📸 Capturing (${data.nodeIds || 'Selection'})...`, true);
-              addLog('shot', 'SHOT', `Capture viewport (scale ${data.scale || 1.5}x)`);
+            const desc = data.description || data.type || 'AI Command';
+            const isCap = data.capture === true || data.type === 'SCREENSHOT';
+            if (isCap) { capCount++; mCaps.textContent = capCount; }
+            else { cmdCount++; mCmds.textContent = cmdCount; }
 
-              parent.postMessage({
-                pluginMessage: {
-                  type: 'SCREENSHOT',
-                  id: data.id,
-                  nodeIds: data.nodeIds,
-                  scale: data.scale || 1.5,
-                  description: desc,
-                  autoZoom,
-                  startTime
-                }
-              }, '*');
-            } else if (data.code) {
-              cmdCount++;
-              mCmds.textContent = cmdCount;
-              const desc = data.description || 'Command Execution';
-              const isCap = data.capture === true;
-              if (isCap) { capCount++; mCaps.textContent = capCount; }
+            const msgType = data.type || (data.code ? 'EXECUTE' : 'UNKNOWN');
 
-              setCardState(true, isCap ? `${desc} (+ 📸 Vision)` : desc, isCap);
+            if (isCap) {
+              setCardState(true, `📸 ${desc}...`, true);
+              addLog('shot', 'SHOT', desc);
+            } else {
+              setCardState(true, desc, false);
               addLog('run', 'RUN', `${desc} (#${data.id.slice(0, 5)})`);
-              if (isCap) addLog('shot', 'SHOT', `Visual capture requested by model`);
-
-              parent.postMessage({
-                pluginMessage: {
-                  type: 'EXECUTE',
-                  id: data.id,
-                  code: data.code,
-                  description: desc,
-                  capture: isCap,
-                  scale: data.scale || 1.5,
-                  autoZoom,
-                  startTime
-                }
-              }, '*');
             }
+
+            parent.postMessage({
+              pluginMessage: {
+                ...data,
+                type: msgType,
+                autoZoom,
+                startTime
+              }
+            }, '*');
           }
         } else {
           setOfflineState('Server HTTP Error: ' + res.status);
         }
       } catch (err) {
-        setOfflineState('Cannot connect to 127.0.0.1:8765');
+        setOfflineState('Cannot connect to ' + SERVER_URL);
       } finally {
         isPolling = false;
         setTimeout(pollCommands, 250);
@@ -884,6 +1374,28 @@
     window.onmessage = async (event) => {
       const msg = event.data.pluginMessage;
       if (!msg) return;
+
+      if (msg.type === 'SETTINGS_LOADED') {
+        const s = msg.settings || {};
+        if (s.serverUrl) {
+          SERVER_URL = s.serverUrl;
+          serverUrlInput.value = s.serverUrl;
+        }
+        if (typeof s.autoZoom === 'boolean') {
+          autoZoom = s.autoZoom;
+          toggleZoomTrack.className = autoZoom ? 'toggle-track active' : 'toggle-track';
+          compactFocusBtn.className = autoZoom ? 'icon-btn active' : 'icon-btn';
+        }
+        if (typeof s.smartPlacement === 'boolean') {
+          smartPlacement = s.smartPlacement;
+          togglePlaceTrack.className = smartPlacement ? 'toggle-track active' : 'toggle-track';
+        }
+        if (s.defaultView === 'compact') {
+          segCompact.classList.add('active');
+          segFull.classList.remove('active');
+          switchView('compact');
+        }
+      }
 
       if (msg.type === 'RESULT') {
         setCardState(false);
@@ -919,6 +1431,8 @@
       }
     };
 
+    // Initialize: load stored settings & start polling
+    parent.postMessage({ pluginMessage: { type: 'LOAD_SETTINGS' } }, '*');
     pollCommands();
   </script>
 </body>

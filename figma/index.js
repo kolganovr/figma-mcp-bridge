@@ -76,6 +76,23 @@ const bridgeServer = http.createServer((req, res) => {
     return;
   }
 
+  if (req.url === "/execute" && req.method === "POST") {
+    let body = "";
+    req.on("data", chunk => { body += chunk; });
+    req.on("end", async () => {
+      try {
+        const payload = JSON.parse(body);
+        const result = await sendCommandToPlugin(payload, payload.timeoutMs || 35000);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(result));
+      } catch (err) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ success: false, error: err.message }));
+      }
+    });
+    return;
+  }
+
   if (req.url === "/status") {
     const isOnline = (Date.now() - lastPluginPing) < 15000;
     res.writeHead(200, { "Content-Type": "application/json" });
@@ -86,16 +103,19 @@ const bridgeServer = http.createServer((req, res) => {
   res.end();
 });
 
+let isBridgeMaster = false;
+
 bridgeServer.on("error", (err) => {
   if (err.code === "EADDRINUSE") {
-    console.error(`[Figma MCP Bridge] Port ${BRIDGE_PORT} is already in use. Reusing existing bridge instance.`);
+    isBridgeMaster = false;
+    console.error(`[Figma MCP Bridge] Port ${BRIDGE_PORT} is already in use. Forwarding commands to existing bridge instance.`);
   } else {
     console.error(`[Figma MCP Bridge] Server error:`, err);
   }
 });
 
 bridgeServer.listen(BRIDGE_PORT, "127.0.0.1", () => {
-  // Bridge running on local loopback
+  isBridgeMaster = true;
 });
 
 const cleanup = () => {
@@ -106,11 +126,29 @@ process.on("SIGINT", cleanup);
 process.on("SIGTERM", cleanup);
 process.stdin.on("close", cleanup);
 
-function sendCommandToPlugin(payload, timeoutMs = 35000) {
+async function sendCommandToPlugin(payload, timeoutMs = 35000) {
+  if (!isBridgeMaster) {
+    try {
+      const res = await fetch(`http://127.0.0.1:${BRIDGE_PORT}/execute`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...payload, timeoutMs })
+      });
+      if (!res.ok) {
+        const errText = await res.text();
+        throw new Error(`Bridge proxy error: ${errText}`);
+      }
+      const data = await res.json();
+      if (data.success) return data;
+      throw new Error(data.error || "Execution failed in Figma sandbox");
+    } catch (err) {
+      throw new Error(err.message || "Failed to communicate with Figma Bridge server on :8765");
+    }
+  }
+
   return new Promise((resolve, reject) => {
-    const isOnline = (Date.now() - lastPluginPing) < 20000;
-    if (!isOnline && lastPluginPing === 0) {
-      return reject(new Error("Figma Plugin is not connected. Please open Figma Desktop and start the 'Antigravity Bridge' plugin (Plugins > Development > Antigravity Bridge)."));
+    if (lastPluginPing > 0 && (Date.now() - lastPluginPing) >= 20000) {
+      return reject(new Error("Figma Plugin connection lost. Ensure Figma is active and Antigravity Bridge plugin is running."));
     }
 
     const id = "cmd_" + Math.random().toString(36).substring(2, 9);

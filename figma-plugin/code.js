@@ -1,6 +1,7 @@
-figma.showUI(__html__, { width: 360, height: 480, themeColors: true });
+figma.showUI(__html__, { width: 360, height: 390, themeColors: true });
 
 let autoZoomEnabled = true;
+let smartPlacementEnabled = true;
 
 // Pure JS Base64 encoder for Figma sandbox (QuickJS / V8 safe without btoa)
 function bytesToBase64(bytes) {
@@ -201,6 +202,33 @@ figma.ui.onmessage = async (msg) => {
     return;
   }
 
+  if (msg.type === 'SET_SMART_PLACEMENT') {
+    smartPlacementEnabled = msg.value === true;
+    return;
+  }
+
+  if (msg.type === 'RESIZE_WINDOW') {
+    figma.ui.resize(msg.width, msg.height);
+    return;
+  }
+
+  if (msg.type === 'SAVE_SETTINGS') {
+    try {
+      await figma.clientStorage.setAsync('antigravity_settings', msg.settings);
+    } catch (e) {}
+    return;
+  }
+
+  if (msg.type === 'LOAD_SETTINGS') {
+    try {
+      const settings = await figma.clientStorage.getAsync('antigravity_settings') || {};
+      figma.ui.postMessage({ type: 'SETTINGS_LOADED', settings });
+    } catch (e) {
+      figma.ui.postMessage({ type: 'SETTINGS_LOADED', settings: {} });
+    }
+    return;
+  }
+
   // ==========================================
   // 1. Generic JS Sandbox Execution
   // ==========================================
@@ -244,7 +272,7 @@ figma.ui.onmessage = async (msg) => {
       const selection = figma.currentPage.selection;
       if (selection.length > 0) {
         for (const selNode of selection) {
-          if (selNode.parent === figma.currentPage && selNode.x === 0 && selNode.y === 0) {
+          if (smartPlacementEnabled && selNode.parent === figma.currentPage && selNode.x === 0 && selNode.y === 0) {
             autoPositionIfColliding(selNode, 80);
           }
         }
