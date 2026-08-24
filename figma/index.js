@@ -357,6 +357,87 @@ const TOOLS = [
       required: ["collection_name", "mode_name"]
     }
   },
+  {
+    name: "figma_insert_svg",
+    description: "Insert raw SVG/vector code directly into Figma canvas or target AutoLayout container with automatic scale-proportional resizing, fill/stroke color overrides, optional component creation, and visual PNG screenshot return.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        svg_code: {
+          type: "string",
+          description: "Raw XML/SVG string (e.g. '<svg xmlns=\"...\" viewBox=\"0 0 24 24\">...</svg>')"
+        },
+        name: {
+          type: "string",
+          description: "Optional layer name for the created SVG node (e.g. 'Icon / Shield', 'Brand / Google')"
+        },
+        width: {
+          type: "number",
+          description: "Desired width in pixels (e.g. 24, 32, 48)"
+        },
+        height: {
+          type: "number",
+          description: "Desired height in pixels (e.g. 24, 32, 48)"
+        },
+        fill_override: {
+          type: "string",
+          description: "Specific fill color override (Hex e.g. '#FFFFFF' or RGB) applied to vector shapes with non-empty fills"
+        },
+        stroke_override: {
+          type: "string",
+          description: "Specific stroke color override (Hex e.g. '#6366F1' or RGB) applied to vector paths with non-empty strokes"
+        },
+        color_override: {
+          type: "string",
+          description: "Universal color override (Hex '#6366F1' or RGB) applied to all active fills and strokes"
+        },
+        target_parent_id: {
+          type: "string",
+          description: "Target container/frame node ID to insert the SVG into. If omitted, inserts into current selected frame or active page."
+        },
+        position: {
+          type: "object",
+          properties: {
+            x: { type: "number" },
+            y: { type: "number" },
+            index: { type: "number", description: "Child index in AutoLayout parent" }
+          },
+          description: "Optional placement coordinates or child index in AutoLayout container"
+        },
+        as_component: {
+          type: "boolean",
+          description: "Whether to wrap the resulting SVG node into a reusable master ComponentNode (default: false)"
+        },
+        capture: {
+          type: "boolean",
+          description: "Whether to automatically capture and return a PNG screenshot of the inserted SVG (default: true)"
+        },
+        scale: {
+          type: "number",
+          description: "Screenshot resolution scale factor (default: 2.0)"
+        }
+      },
+      required: ["svg_code"]
+    }
+  },
+  {
+    name: "figma_get_canvas_layout",
+    description: "Inspect top-level frames and artboards on the active Figma page to prevent overlap. Returns all screen coordinates, bounding box, and a calculated 'suggestedNextPosition' for placing new artboards safely.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        direction: {
+          type: "string",
+          enum: ["RIGHT", "BOTTOM"],
+          description: "Placement direction relative to existing screens ('RIGHT' or 'BOTTOM', default: 'RIGHT')"
+        },
+        gap: {
+          type: "number",
+          description: "Spacing in pixels between artboards (default: 80)"
+        }
+      }
+    }
+  },
 
   // 2. Figma REST API Tools (Cloud)
   {
@@ -663,6 +744,9 @@ async function handleCallTool(name, args = {}) {
           ` : ""}
 
           figma.currentPage.appendChild(card);
+          const freePos = getFreePosition(${width}, 200, { gap: 80 });
+          card.x = freePos.x;
+          card.y = freePos.y;
           figma.currentPage.selection = [card];
           figma.viewport.scrollAndZoomIntoView([card]);
           return "Created UI Card with ID: " + card.id;
@@ -783,6 +867,59 @@ async function handleCallTool(name, args = {}) {
         }
 
         return { content };
+      }
+
+      case "figma_insert_svg": {
+        const capture = args.capture !== false;
+        const scale = args.scale || 2.0;
+        const response = await sendCommandToPlugin({
+          type: "INSERT_SVG",
+          svg_code: args.svg_code,
+          name: args.name,
+          width: args.width,
+          height: args.height,
+          fill_override: args.fill_override,
+          stroke_override: args.stroke_override,
+          color_override: args.color_override,
+          target_parent_id: args.target_parent_id,
+          position: args.position,
+          as_component: args.as_component === true,
+          capture: capture,
+          scale: scale
+        }, 40000);
+
+        const content = [];
+        const resText = typeof response.result === "object" ? JSON.stringify(response.result, null, 2) : String(response.result);
+        content.push({
+          type: "text",
+          text: `Figma SVG Vector Inserted: ${resText}`
+        });
+
+        if (response.screenshot) {
+          const cleanB64 = response.screenshot.replace(/^data:image\/\w+;base64,/, "");
+          content.push({
+            type: "image",
+            data: cleanB64,
+            mimeType: "image/png"
+          });
+        }
+
+        return { content };
+      }
+
+      case "figma_get_canvas_layout": {
+        const response = await sendCommandToPlugin({
+          type: "GET_CANVAS_LAYOUT",
+          direction: args.direction || "RIGHT",
+          gap: args.gap || 80
+        }, 30000);
+
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify(response.result, null, 2)
+          }]
+        };
       }
 
       // REST API

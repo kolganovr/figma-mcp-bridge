@@ -81,6 +81,120 @@ async function applyTextOverrides(container, overrides) {
   }
 }
 
+// Color parser for Hex, RGB, and named colors
+function parseColor(colorStr) {
+  if (!colorStr || typeof colorStr !== 'string') return null;
+  const str = colorStr.trim().toLowerCase();
+  
+  if (str === 'white') return { r: 1, g: 1, b: 1 };
+  if (str === 'black') return { r: 0, g: 0, b: 0 };
+  if (str === 'transparent') return null;
+
+  if (str.startsWith('#')) {
+    let hex = str.slice(1);
+    if (hex.length === 3) hex = hex.split('').map(x => x + x).join('');
+    if (hex.length >= 6) {
+      const r = parseInt(hex.substring(0, 2), 16) / 255;
+      const g = parseInt(hex.substring(2, 4), 16) / 255;
+      const b = parseInt(hex.substring(4, 6), 16) / 255;
+      return { r, g, b };
+    }
+  }
+
+  const rgbMatch = str.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+  if (rgbMatch) {
+    return {
+      r: parseInt(rgbMatch[1], 10) / 255,
+      g: parseInt(rgbMatch[2], 10) / 255,
+      b: parseInt(rgbMatch[3], 10) / 255
+    };
+  }
+
+  return null;
+}
+
+function applyScaleConstraints(node) {
+  if ('constraints' in node) {
+    node.constraints = { horizontal: 'SCALE', vertical: 'SCALE' };
+  }
+  if ('children' in node) {
+    for (const child of node.children) {
+      applyScaleConstraints(child);
+    }
+  }
+}
+
+function applyVectorColors(container, { fillColor, strokeColor, universalColor }) {
+  const nodes = container.findAll ? container.findAll(n => 'fills' in n || 'strokes' in n) : [];
+  const allNodes = [container, ...nodes];
+
+  for (const n of allNodes) {
+    const targetFill = universalColor || fillColor;
+    if (targetFill && 'fills' in n && Array.isArray(n.fills) && n.fills.length > 0) {
+      n.fills = [{ type: 'SOLID', color: targetFill }];
+    }
+
+    const targetStroke = universalColor || strokeColor;
+    if (targetStroke && 'strokes' in n && Array.isArray(n.strokes) && n.strokes.length > 0) {
+      n.strokes = [{ type: 'SOLID', color: targetStroke }];
+    }
+  }
+}
+
+// Smart Canvas Placement Engine: Calculate free position on canvas avoiding overlaps
+function getFreeCanvasPosition(width = 400, height = 800, options = {}) {
+  const gap = typeof options.gap === 'number' ? options.gap : 80;
+  const direction = (options.direction || 'RIGHT').toUpperCase();
+  const page = figma.currentPage;
+  const topNodes = page.children.filter(n => n.visible !== false);
+
+  if (topNodes.length === 0) {
+    return { x: 0, y: 0 };
+  }
+
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const n of topNodes) {
+    if (n.x < minX) minX = n.x;
+    if (n.x + n.width > maxX) maxX = n.x + n.width;
+    if (n.y < minY) minY = n.y;
+    if (n.y + n.height > maxY) maxY = n.y + n.height;
+  }
+
+  if (direction === 'BOTTOM') {
+    return {
+      x: isFinite(minX) ? Math.round(minX) : 0,
+      y: isFinite(maxY) ? Math.round(maxY + gap) : 0
+    };
+  }
+
+  return {
+    x: isFinite(maxX) ? Math.round(maxX + gap) : 0,
+    y: isFinite(minY) ? Math.round(minY) : 0
+  };
+}
+
+// Auto-position node if placed at default (0, 0) or overlapping other top-level nodes
+function autoPositionIfColliding(node, gap = 80) {
+  if (!node || node.parent !== figma.currentPage) return;
+  const otherNodes = figma.currentPage.children.filter(n => n !== node && n.visible !== false);
+  if (otherNodes.length === 0) return;
+
+  function isColliding(x, y, w, h) {
+    for (const o of otherNodes) {
+      const overlapX = (x < o.x + o.width) && (x + w > o.x);
+      const overlapY = (y < o.y + o.height) && (y + h > o.y);
+      if (overlapX && overlapY) return true;
+    }
+    return false;
+  }
+
+  if ((node.x === 0 && node.y === 0) || isColliding(node.x, node.y, node.width, node.height)) {
+    const freePos = getFreeCanvasPosition(node.width, node.height, { gap });
+    node.x = freePos.x;
+    node.y = freePos.y;
+  }
+}
+
 figma.ui.onmessage = async (msg) => {
   if (msg.type === 'SET_AUTO_ZOOM') {
     autoZoomEnabled = msg.value === true;
@@ -117,19 +231,26 @@ figma.ui.onmessage = async (msg) => {
       await ensureFont("Inter", "Bold");
 
       const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
-      const fn = new AsyncFunction('figma', 'ensureFont', 'notify', 'log', `
+      const fn = new AsyncFunction('figma', 'ensureFont', 'notify', 'log', 'getFreePosition', 'getFreeCanvasPosition', `
         ${code}
       `);
 
-      const result = await fn(figma, ensureFont, notifyCanvas, logToUi);
+      const result = await fn(figma, ensureFont, notifyCanvas, logToUi, getFreeCanvasPosition, getFreeCanvasPosition);
 
       let screenshot = null;
       let targetName = null;
       let targetId = null;
 
       const selection = figma.currentPage.selection;
-      if (selection.length > 0 && autoZoom && autoZoomEnabled) {
-        figma.viewport.scrollAndZoomIntoView(selection);
+      if (selection.length > 0) {
+        for (const selNode of selection) {
+          if (selNode.parent === figma.currentPage && selNode.x === 0 && selNode.y === 0) {
+            autoPositionIfColliding(selNode, 80);
+          }
+        }
+        if (autoZoom && autoZoomEnabled) {
+          figma.viewport.scrollAndZoomIntoView(selection);
+        }
       }
 
       if (capture) {
@@ -492,6 +613,8 @@ figma.ui.onmessage = async (msg) => {
       if (position && typeof position.x === 'number' && typeof position.y === 'number') {
         instance.x = position.x;
         instance.y = position.y;
+      } else if (parent === figma.currentPage) {
+        autoPositionIfColliding(instance, 80);
       }
 
       // 5. Focus & Selection
@@ -669,6 +792,213 @@ figma.ui.onmessage = async (msg) => {
     } catch (err) {
       figma.notify(`❌ Error: ${err.message || String(err)}`, { error: true, timeout: 6000 });
 
+      figma.ui.postMessage({
+        type: 'RESULT',
+        id: id,
+        success: false,
+        description: actionLabel,
+        error: err.message || String(err),
+        startTime: startTime
+      });
+    }
+  }
+
+  // ==========================================
+  // 7. Direct SVG & Vector Import
+  // ==========================================
+  else if (msg.type === 'INSERT_SVG') {
+    const {
+      id,
+      svg_code,
+      name,
+      width,
+      height,
+      fill_override,
+      stroke_override,
+      color_override,
+      target_parent_id,
+      position,
+      as_component = false,
+      capture = true,
+      scale = 2.0,
+      startTime
+    } = msg;
+
+    const actionLabel = `Insert SVG "${name || 'Vector'}"`;
+    let runningToast = null;
+    try {
+      runningToast = figma.notify(`📐 Inserting vector SVG...`, { timeout: 15000 });
+    } catch (e) {}
+
+    try {
+      if (!svg_code || typeof svg_code !== 'string' || !svg_code.includes('<svg')) {
+        throw new Error("Invalid or empty svg_code. Must be a valid <svg ...>...</svg> XML string.");
+      }
+
+      // 1. Create node from SVG
+      const rawNode = figma.createNodeFromSvg(svg_code);
+      rawNode.name = name || "SVG Vector";
+
+      // 2. Proportional Scaling
+      const origW = rawNode.width;
+      const origH = rawNode.height;
+      if ((width && width !== origW) || (height && height !== origH)) {
+        const targetW = width || ((origW / origH) * height);
+        const targetH = height || ((origH / origW) * width);
+        applyScaleConstraints(rawNode);
+        rawNode.resize(targetW, targetH);
+      }
+
+      // 3. Color Overrides
+      const fillColor = parseColor(fill_override);
+      const strokeColor = parseColor(stroke_override);
+      const universalColor = parseColor(color_override);
+
+      if (fillColor || strokeColor || universalColor) {
+        applyVectorColors(rawNode, { fillColor, strokeColor, universalColor });
+      }
+
+      // 4. Wrap as Component if requested
+      let finalNode = rawNode;
+      if (as_component) {
+        const comp = figma.createComponent();
+        comp.name = name || "Icon / " + (rawNode.name || "Vector");
+        comp.resize(rawNode.width, rawNode.height);
+        for (const child of [...rawNode.children]) {
+          comp.appendChild(child);
+        }
+        rawNode.remove();
+        finalNode = comp;
+      }
+
+      // 5. Attach to Target Container
+      let parent = null;
+      if (target_parent_id) {
+        parent = figma.getNodeById(target_parent_id.replace(/-/g, ":"));
+      }
+
+      if (!parent) {
+        const curSel = figma.currentPage.selection;
+        if (curSel.length > 0 && curSel[0].type === 'FRAME') {
+          parent = curSel[0];
+        } else {
+          parent = figma.currentPage;
+        }
+      }
+
+      if (position && typeof position.index === 'number' && parent.insertChild) {
+        parent.insertChild(position.index, finalNode);
+      } else {
+        parent.appendChild(finalNode);
+      }
+
+      if (position && typeof position.x === 'number' && typeof position.y === 'number') {
+        finalNode.x = position.x;
+        finalNode.y = position.y;
+      } else if (parent === figma.currentPage) {
+        autoPositionIfColliding(finalNode, 60);
+      }
+
+      // 6. Viewport Focus & Capture
+      figma.currentPage.selection = [finalNode];
+      if (autoZoomEnabled) {
+        figma.viewport.scrollAndZoomIntoView([finalNode]);
+      }
+
+      let screenshot = null;
+      if (capture) {
+        screenshot = await exportNodeToPngBase64(finalNode, scale);
+      }
+
+      if (runningToast) runningToast.cancel();
+      figma.notify(`✅ Vector inserted: ${finalNode.name}${capture && screenshot ? ' + 📸 capture' : ''}`, { timeout: 3000 });
+
+      figma.ui.postMessage({
+        type: 'RESULT',
+        id: id,
+        success: true,
+        description: actionLabel,
+        result: {
+          nodeId: finalNode.id,
+          name: finalNode.name,
+          type: finalNode.type,
+          width: finalNode.width,
+          height: finalNode.height,
+          parentContainer: parent.name || parent.id
+        },
+        screenshot: screenshot,
+        targetName: finalNode.name,
+        targetId: finalNode.id,
+        startTime: startTime
+      });
+    } catch (err) {
+      if (runningToast) runningToast.cancel();
+      figma.notify(`❌ Error: ${err.message || String(err)}`, { error: true, timeout: 6000 });
+
+      figma.ui.postMessage({
+        type: 'RESULT',
+        id: id,
+        success: false,
+        description: actionLabel,
+        error: err.message || String(err),
+        startTime: startTime
+      });
+    }
+  }
+
+  // ==========================================
+  // 8. Canvas Layout & Smart Bounds
+  // ==========================================
+  else if (msg.type === 'GET_CANVAS_LAYOUT') {
+    const { id, direction = 'RIGHT', gap = 80, startTime } = msg;
+    const actionLabel = "Get Canvas Layout";
+
+    try {
+      const page = figma.currentPage;
+      const topNodes = page.children.filter(n => n.visible !== false);
+
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+      const artboards = [];
+
+      for (const n of topNodes) {
+        if (n.x < minX) minX = n.x;
+        if (n.x + n.width > maxX) maxX = n.x + n.width;
+        if (n.y < minY) minY = n.y;
+        if (n.y + n.height > maxY) maxY = n.y + n.height;
+
+        artboards.push({
+          id: n.id,
+          name: n.name,
+          type: n.type,
+          x: Math.round(n.x),
+          y: Math.round(n.y),
+          width: Math.round(n.width),
+          height: Math.round(n.height)
+        });
+      }
+
+      const suggestedPos = getFreeCanvasPosition(400, 800, { direction, gap });
+
+      figma.ui.postMessage({
+        type: 'RESULT',
+        id: id,
+        success: true,
+        description: actionLabel,
+        result: {
+          pageName: page.name,
+          totalArtboards: artboards.length,
+          artboards: artboards,
+          canvasBounds: topNodes.length > 0 ? {
+            minX: Math.round(minX),
+            maxX: Math.round(maxX),
+            minY: Math.round(minY),
+            maxY: Math.round(maxY)
+          } : null,
+          suggestedNextPosition: suggestedPos
+        },
+        startTime: startTime
+      });
+    } catch (err) {
       figma.ui.postMessage({
         type: 'RESULT',
         id: id,
