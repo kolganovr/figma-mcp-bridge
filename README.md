@@ -19,7 +19,7 @@ flowchart LR
     end
 
     subgraph Bridge["⚡ MCP Server (Node.js)"]
-        Server["JSON-RPC Engine\n(stdio + HTTP :8765)"]
+        Server["JSON-RPC Engine\n(stdio + WebSocket :8765)"]
     end
 
     subgraph Figma["🎨 Figma Canvas"]
@@ -28,13 +28,14 @@ flowchart LR
     end
 
     LLM -->|"figma_execute_code(JS)"| Server
-    Server -->|"/poll WebSocket"| Plugin
+    Server -->|"Full-Duplex WS (0ms)"| Plugin
     Plugin -->|"Execute in Sandbox"| Canvas
     Canvas -->|"Export PNG (1.5x)"| Plugin
-    Plugin -->|"/result (Base64 PNG)"| Server
+    Plugin -->|"WebSocket Result (PNG)"| Server
     Server -->|"Visual Critique Return"| LLM
 ```
 
+- **⚡ Full-Duplex Native WebSocket:** Zero-dependency RFC 6455 socket engine on port `:8765`. Instant Server-Push (< 1 ms latency), auto-reconnect, and immune to Electron background tab throttling.
 - **🎨 Live Canvas Scripting:** Direct JavaScript execution inside the Figma desktop sandbox. Create and manipulate frames, AutoLayout hierarchies, vectors, component sets, and Figma Variables.
 - **📸 Multimodal Visual Feedback Loop:** AI models execute code with `capture: true` to receive high-res PNG viewport captures directly back into their context window for visual self-critique.
 - **💎 Figma Variables Native:** 100% token binding support (`setBoundVariableForPaint`, `setBoundVariable`) for dark/light themes, typography, radii, and spacing scales.
