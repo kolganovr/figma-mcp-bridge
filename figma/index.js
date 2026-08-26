@@ -2,17 +2,177 @@
 const http = require("http");
 const path = require("path");
 const fs = require("fs");
+const crypto = require("crypto");
 const { optimizeFigmaData } = require("./optimizer");
 
 const FIGMA_TOKEN = process.env.FIGMA_PERSONAL_ACCESS_TOKEN || process.env.FIGMA_API_KEY || "";
 
 // ==========================================
-// Figma Live Plugin Bridge (HTTP Server)
+// Figma Live Plugin Bridge (HTTP + WebSocket Server)
 // ==========================================
-const BRIDGE_PORT = 8765;
+const BRIDGE_PORT = parseInt(process.env.FIGMA_BRIDGE_PORT, 10) || 8765;
 let pendingCommand = null;
 let commandResolvers = new Map();
 let lastPluginPing = 0;
+const wsClients = new Set();
+
+// Encode unmasked text frame (Server -> Client) as per RFC 6455
+function encodeWsFrame(data) {
+  const payload = typeof data === "string" ? Buffer.from(data, "utf8") : Buffer.isBuffer(data) ? data : Buffer.from(JSON.stringify(data), "utf8");
+  const len = payload.length;
+  let header;
+  if (len < 126) {
+    header = Buffer.from([0x81, len]);
+  } else if (len < 65536) {
+    header = Buffer.alloc(4);
+    header[0] = 0x81;
+    header[1] = 126;
+    header.writeUInt16BE(len, 2);
+  } else {
+    header = Buffer.alloc(10);
+    header[0] = 0x81;
+    header[1] = 127;
+    header.writeBigUInt64BE(BigInt(len), 2);
+  }
+  return Buffer.concat([header, payload]);
+}
+
+function handleWsUpgrade(req, socket, head) {
+  const key = req.headers["sec-websocket-key"];
+  if (!key) {
+    socket.destroy();
+    return;
+  }
+
+  const GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+  const accept = crypto.createHash("sha1").update(key + GUID).digest("base64");
+  const responseHeaders = [
+    "HTTP/1.1 101 Switching Protocols",
+    "Upgrade: websocket",
+    "Connection: Upgrade",
+    `Sec-WebSocket-Accept: ${accept}`,
+    "\r\n"
+  ].join("\r\n");
+
+  socket.write(responseHeaders);
+
+  const client = {
+    id: "ws_" + Math.random().toString(36).substring(2, 9),
+    socket,
+    lastSeen: Date.now(),
+    buffer: Buffer.alloc(0),
+    send(msg) {
+      try {
+        if (socket.writable) {
+          socket.write(encodeWsFrame(msg));
+        }
+      } catch (e) {}
+    }
+  };
+
+  wsClients.add(client);
+  lastPluginPing = Date.now();
+
+  // If there is a pending command waiting for connection, dispatch immediately (0ms)
+  if (pendingCommand) {
+    const cmd = pendingCommand;
+    pendingCommand = null;
+    client.send(cmd);
+  }
+
+  socket.on("data", (chunk) => {
+    client.lastSeen = Date.now();
+    lastPluginPing = Date.now();
+    client.buffer = Buffer.concat([client.buffer, chunk]);
+
+    while (client.buffer.length >= 2) {
+      const byte0 = client.buffer[0];
+      const byte1 = client.buffer[1];
+      const opcode = byte0 & 0x0f;
+      const isMasked = (byte1 & 0x80) !== 0;
+      let payloadLen = byte1 & 0x7f;
+      let offset = 2;
+
+      if (payloadLen === 126) {
+        if (client.buffer.length < 4) break;
+        payloadLen = client.buffer.readUInt16BE(2);
+        offset = 4;
+      } else if (payloadLen === 127) {
+        if (client.buffer.length < 10) break;
+        payloadLen = Number(client.buffer.readBigUInt64BE(2));
+        offset = 10;
+      }
+
+      let maskKey = null;
+      if (isMasked) {
+        if (client.buffer.length < offset + 4) break;
+        maskKey = client.buffer.slice(offset, offset + 4);
+        offset += 4;
+      }
+
+      if (client.buffer.length < offset + payloadLen) {
+        break; // Wait for full frame
+      }
+
+      const payload = client.buffer.slice(offset, offset + payloadLen);
+      client.buffer = client.buffer.slice(offset + payloadLen);
+
+      if (maskKey) {
+        for (let i = 0; i < payload.length; i++) {
+          payload[i] ^= maskKey[i % 4];
+        }
+      }
+
+      if (opcode === 0x8) {
+        // Close frame
+        socket.end();
+        wsClients.delete(client);
+        break;
+      } else if (opcode === 0x9) {
+        // Ping frame -> reply with Pong
+        if (socket.writable) {
+          socket.write(Buffer.from([0x8a, 0x00]));
+        }
+      } else if (opcode === 0x1) {
+        // Text frame
+        try {
+          const text = payload.toString("utf8");
+          const data = JSON.parse(text);
+          handleClientMessage(client, data);
+        } catch (err) {}
+      }
+    }
+  });
+
+  const cleanupClient = () => {
+    wsClients.delete(client);
+  };
+  socket.on("close", cleanupClient);
+  socket.on("end", cleanupClient);
+  socket.on("error", cleanupClient);
+}
+
+function handleClientMessage(client, data) {
+  if (!data) return;
+  client.lastSeen = Date.now();
+  lastPluginPing = Date.now();
+
+  if (data.type === "PING") {
+    client.send({ type: "PONG" });
+    return;
+  }
+
+  if (data.type === "CLIENT_FOCUS" || data.type === "CLIENT_READY") {
+    client.lastSeen = Date.now();
+    return;
+  }
+
+  if (data.id && commandResolvers.has(data.id)) {
+    const resolver = commandResolvers.get(data.id);
+    resolver(data);
+    commandResolvers.delete(data.id);
+  }
+}
 
 const bridgeServer = http.createServer((req, res) => {
   // Enable CORS for Figma plugin UI
@@ -25,6 +185,7 @@ const bridgeServer = http.createServer((req, res) => {
     return res.end();
   }
 
+  // HTTP Long-Polling Fallback
   if (req.url === "/poll" && req.method === "GET") {
     lastPluginPing = Date.now();
     if (pendingCommand) {
@@ -34,7 +195,6 @@ const bridgeServer = http.createServer((req, res) => {
       return res.end(JSON.stringify(cmd));
     }
 
-    // Long poll wait up to 10 seconds
     const checkInterval = setInterval(() => {
       if (pendingCommand) {
         clearInterval(checkInterval);
@@ -82,7 +242,7 @@ const bridgeServer = http.createServer((req, res) => {
     req.on("end", async () => {
       try {
         const payload = JSON.parse(body);
-        const result = await sendCommandToPlugin(payload, payload.timeoutMs || 35000);
+        const result = await sendCommandToPlugin(payload, payload.timeoutMs || 45000);
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(result));
       } catch (err) {
@@ -94,13 +254,27 @@ const bridgeServer = http.createServer((req, res) => {
   }
 
   if (req.url === "/status") {
-    const isOnline = (Date.now() - lastPluginPing) < 60000;
+    const isOnline = wsClients.size > 0 || (Date.now() - lastPluginPing) < 60000;
     res.writeHead(200, { "Content-Type": "application/json" });
-    return res.end(JSON.stringify({ connected: isOnline, lastPing: lastPluginPing }));
+    return res.end(JSON.stringify({
+      connected: isOnline,
+      wsClients: wsClients.size,
+      lastPing: lastPluginPing
+    }));
   }
 
   res.writeHead(404);
   res.end();
+});
+
+// Attach WebSocket Upgrade Handler
+bridgeServer.on("upgrade", (req, socket, head) => {
+  const upgradeHeader = (req.headers["upgrade"] || "").toLowerCase();
+  if (upgradeHeader === "websocket") {
+    handleWsUpgrade(req, socket, head);
+  } else {
+    socket.destroy();
+  }
 });
 
 let isBridgeMaster = false;
@@ -149,7 +323,6 @@ async function sendCommandToPlugin(payload, timeoutMs = 45000) {
   return new Promise((resolve, reject) => {
     const id = "cmd_" + Math.random().toString(36).substring(2, 9);
     const cmd = { id, ...payload };
-    pendingCommand = cmd;
 
     const timer = setTimeout(() => {
       commandResolvers.delete(id);
@@ -167,6 +340,15 @@ async function sendCommandToPlugin(payload, timeoutMs = 45000) {
         reject(new Error(response.error || "Execution failed in Figma sandbox"));
       }
     });
+
+    // 1. Direct WebSocket Push (0ms latency)
+    if (wsClients.size > 0) {
+      const activeClient = [...wsClients].sort((a, b) => b.lastSeen - a.lastSeen)[0];
+      activeClient.send(cmd);
+    } else {
+      // 2. Queue for incoming WebSocket connection or HTTP long-poll
+      pendingCommand = cmd;
+    }
   });
 }
 
