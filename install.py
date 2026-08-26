@@ -30,16 +30,16 @@ def get_config_targets(home: Path):
     targets = []
     
     # 1. Antigravity IDE Global Config
-    antigravity_config = home / ".gemini" / "config" / "mcp_config.json"
-    if antigravity_config.parent.exists():
-        targets.append(antigravity_config)
-        
-    # 2. Antigravity Legacy Config
-    antigravity_legacy = home / ".gemini" / "antigravity" / "mcp_config.json"
-    if antigravity_legacy.parent.exists():
-        targets.append(antigravity_legacy)
+    for cfg in [
+        home / ".gemini" / "config" / "mcp_config.json",
+        home / ".gemini" / "antigravity-ide" / "mcp_config.json",
+        home / ".gemini" / "antigravity" / "mcp_config.json",
+        home / ".gemini" / "antigravity-cli" / "mcp_config.json"
+    ]:
+        if cfg.parent.exists():
+            targets.append(cfg)
 
-    # 3. Claude Desktop (Windows / macOS)
+    # 2. Claude Desktop (Windows / macOS)
     if sys.platform == "win32":
         appdata = os.environ.get("APPDATA")
         if appdata:
@@ -67,11 +67,23 @@ def install_or_update(token="", is_update=False):
     action_str = "updated" if is_update else "installed"
     print(f"[✓] MCP Server {action_str}: {target_figma}")
 
+    # Also copy to antigravity-ide if it exists
+    ide_mcp = home / ".gemini" / "antigravity-ide" / "mcp"
+    if ide_mcp.parent.exists():
+        ide_figma = ide_mcp / "figma"
+        ide_figma.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(pkg_root / "figma", ide_figma, dirs_exist_ok=True)
+
     # 2. Copy Plugin files
     target_plugin = antigravity_mcp / "figma-plugin"
     target_plugin.mkdir(parents=True, exist_ok=True)
     shutil.copytree(pkg_root / "figma-plugin", target_plugin, dirs_exist_ok=True)
     print(f"[✓] Figma Plugin {action_str}: {target_plugin}")
+
+    if ide_mcp.parent.exists():
+        ide_plugin = ide_mcp / "figma-plugin"
+        ide_plugin.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(pkg_root / "figma-plugin", ide_plugin, dirs_exist_ok=True)
 
     index_js_path = str(target_figma / "index.js").replace("\\", "/")
 
