@@ -328,8 +328,8 @@
     }
 
     .terminal-box {
-      height: 140px;
-      flex-shrink: 0;
+      flex: 1;
+      min-height: 130px;
       background: var(--bg-terminal);
       border: 1px solid var(--border-subtle);
       border-radius: var(--radius-lg);
@@ -385,14 +385,16 @@
 
     .log-list {
       flex: 1;
+      min-height: 0;
       overflow-y: auto;
+      overflow-x: hidden;
       font-family: 'Roboto Mono', ui-monospace, Consolas, monospace;
       font-size: 9px;
-      line-height: 1.4;
+      line-height: 18px;
       display: flex;
       flex-direction: column;
       gap: 3px;
-      padding-top: 2px;
+      padding: 2px 0;
       user-select: text;
       -webkit-user-select: text;
       cursor: text;
@@ -410,36 +412,50 @@
     .log-list::-webkit-scrollbar-thumb { background: var(--border-subtle); border-radius: 4px; }
 
     .log-row {
-      display: block;
+      display: flex;
+      align-items: center;
+      flex-shrink: 0;
+      min-height: 18px;
+      height: 18px;
       white-space: nowrap;
-      line-height: 1.5;
       overflow: hidden;
       text-overflow: ellipsis;
+      width: 100%;
     }
     .log-time {
-      display: inline;
+      flex-shrink: 0;
       color: #52525b;
       font-size: 8px;
+      font-family: 'Roboto Mono', monospace;
+      margin-right: 4px;
     }
     .tag {
-      display: inline-block;
+      flex-shrink: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
       font-size: 7px;
       font-weight: 700;
       padding: 0 4px;
+      height: 13px;
       border-radius: var(--radius-xs);
       letter-spacing: 0.3px;
-      margin: 0 4px;
-      vertical-align: 1px;
-      line-height: 13px;
+      margin-right: 6px;
     }
     .tag.run { background: #172554; color: #60a5fa; }
     .tag.shot { background: #2e1065; color: #c084fc; }
     .tag.ok { background: #0f291e; color: #4ade80; }
     .tag.err { background: #450a0a; color: #f87171; }
     .tag.sys { background: #27272a; color: #a1a1aa; }
+    .tag.ws { background: #0f291e; color: #4ade80; }
+    .tag.ai { background: #2e1065; color: #c084fc; }
     .log-text {
-      display: inline;
+      flex: 1;
+      min-width: 0;
       color: #d4d4d8;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
     .term-footer {
@@ -1043,7 +1059,12 @@
       row.className = 'log-row';
       row.innerHTML = `<span class="log-time">${getTime()}</span><span class="tag ${tagType}">${tagText}</span><span class="log-text">${escapeHtml(msg)}</span>`;
       logList.appendChild(row);
-      logList.scrollTop = logList.scrollHeight;
+      if (logList.children.length > 100) {
+        logList.removeChild(logList.firstChild);
+      }
+      requestAnimationFrame(() => {
+        logList.scrollTop = logList.scrollHeight;
+      });
       termCount.textContent = `● ${totalLogs} events logged`;
     }
 
