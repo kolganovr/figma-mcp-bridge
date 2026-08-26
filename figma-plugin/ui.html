@@ -1041,7 +1041,7 @@
       totalLogs++;
       const row = document.createElement('div');
       row.className = 'log-row';
-      row.innerHTML = `<span class="log-time">${getTime()}</span> <span class="tag ${tagType}">${tagText}</span> <span class="log-text">${escapeHtml(msg)}</span>`;
+      row.innerHTML = `<span class="log-time">${getTime()}</span><span class="tag ${tagType}">${tagText}</span><span class="log-text">${escapeHtml(msg)}</span>`;
       logList.appendChild(row);
       logList.scrollTop = logList.scrollHeight;
       termCount.textContent = `● ${totalLogs} events logged`;
@@ -1320,10 +1320,13 @@
       }
     };
 
-    // Long Polling Loop (Universal Tool Forwarder)
+    let lastPollTime = Date.now();
+
+    // Long Polling Loop (Universal Tool Forwarder) with Anti-Throttling
     async function pollCommands() {
       if (isPolling) return;
       isPolling = true;
+      lastPollTime = Date.now();
 
       try {
         const res = await fetch(`${SERVER_URL}/poll`, { method: 'GET' });
@@ -1359,6 +1362,12 @@
               }
             }, '*');
           }
+
+          // Immediate re-poll without setTimeout delay to prevent Electron background throttling
+          isPolling = false;
+          lastPollTime = Date.now();
+          pollCommands();
+          return;
         } else {
           setOfflineState('Server HTTP Error: ' + res.status);
         }
@@ -1366,8 +1375,40 @@
         setOfflineState('Cannot connect to ' + SERVER_URL);
       } finally {
         isPolling = false;
-        setTimeout(pollCommands, 250);
+        setTimeout(pollCommands, 1000);
       }
+    }
+
+    // Wake up immediately on window focus or visibility change
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden && !isPolling) {
+        pollCommands();
+      }
+    });
+    window.addEventListener('focus', () => {
+      if (!isPolling) {
+        pollCommands();
+      }
+    });
+
+    // Anti-Throttle Web Worker Keeper (Web Workers are not throttled by Electron/Chromium in background)
+    try {
+      const workerBlob = new Blob([
+        'setInterval(function() { postMessage("tick"); }, 1000);'
+      ], { type: 'application/javascript' });
+      const keeperWorker = new Worker(URL.createObjectURL(workerBlob));
+      keeperWorker.onmessage = function() {
+        if (!isPolling && (Date.now() - lastPollTime >= 2000)) {
+          pollCommands();
+        }
+      };
+    } catch (e) {
+      // Fallback interval if Blob Worker is restricted by CSP
+      setInterval(() => {
+        if (!isPolling && (Date.now() - lastPollTime >= 3000)) {
+          pollCommands();
+        }
+      }, 2000);
     }
 
     // Message from Figma Backend

@@ -94,7 +94,7 @@ const bridgeServer = http.createServer((req, res) => {
   }
 
   if (req.url === "/status") {
-    const isOnline = (Date.now() - lastPluginPing) < 15000;
+    const isOnline = (Date.now() - lastPluginPing) < 60000;
     res.writeHead(200, { "Content-Type": "application/json" });
     return res.end(JSON.stringify({ connected: isOnline, lastPing: lastPluginPing }));
   }
@@ -126,7 +126,7 @@ process.on("SIGINT", cleanup);
 process.on("SIGTERM", cleanup);
 process.stdin.on("close", cleanup);
 
-async function sendCommandToPlugin(payload, timeoutMs = 35000) {
+async function sendCommandToPlugin(payload, timeoutMs = 45000) {
   if (!isBridgeMaster) {
     try {
       const res = await fetch(`http://127.0.0.1:${BRIDGE_PORT}/execute`, {
@@ -147,16 +147,15 @@ async function sendCommandToPlugin(payload, timeoutMs = 35000) {
   }
 
   return new Promise((resolve, reject) => {
-    if (lastPluginPing > 0 && (Date.now() - lastPluginPing) >= 20000) {
-      return reject(new Error("Figma Plugin connection lost. Ensure Figma is active and Antigravity Bridge plugin is running."));
-    }
-
     const id = "cmd_" + Math.random().toString(36).substring(2, 9);
     const cmd = { id, ...payload };
     pendingCommand = cmd;
 
     const timer = setTimeout(() => {
       commandResolvers.delete(id);
+      if (pendingCommand && pendingCommand.id === id) {
+        pendingCommand = null;
+      }
       reject(new Error("Timeout waiting for Figma Plugin response. Ensure Figma is active and Antigravity Bridge plugin is running."));
     }, timeoutMs);
 
