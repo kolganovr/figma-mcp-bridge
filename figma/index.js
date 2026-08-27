@@ -1293,9 +1293,7 @@ function startUniversalStdioServer() {
   let buffer = "";
 
   const sendResponse = (response) => {
-    const json = JSON.stringify(response);
-    const message = `Content-Length: ${Buffer.byteLength(json, "utf8")}\r\n\r\n${json}`;
-    process.stdout.write(message);
+    process.stdout.write(JSON.stringify(response) + "\n");
   };
 
   const processMessage = async (msg) => {
