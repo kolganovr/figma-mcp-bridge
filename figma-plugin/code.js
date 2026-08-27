@@ -36,6 +36,286 @@ async function ensureFont(family = "Inter", style = "Regular") {
   }
 }
 
+// ==========================================================================
+// Bridge Runtime — persistent state, code modules, actionable error hints
+// --------------------------------------------------------------------------
+// WHY THIS EXISTS
+// Every figma_execute_code call is compiled into a FRESH AsyncFunction, so
+// top-level const/let/var/function declarations die with the call. And `eval`
+// inside the Figma plugin sandbox is a BOUND function, which by spec makes
+// every eval() an INDIRECT eval: it cannot see the caller's locals and its
+// declarations never reach the caller or globalThis. So the classic "stash
+// source in pluginData, eval it next call" trick silently produces nothing.
+// `new Function(...)` bodies, in contrast, are ordinary function scopes where
+// declarations behave normally, and they share the same globalThis. The module
+// loader below is built on that.
+// ==========================================================================
+
+const BRIDGE_STATE = {};          // survives calls, cleared on plugin reload
+const BRIDGE_MODULES = {};        // name -> compiled exports (in-memory cache)
+const BRIDGE_KEY = "abridge:";    // pluginData namespace on figma.root
+const BRIDGE_CHUNK = 60000;       // pluginData is capped around 100KB per entry
+
+function bridgeWrite(key, value) {
+  const str = String(value == null ? "" : value);
+  const full = BRIDGE_KEY + key;
+  // wipe any previous chunk tail before rewriting
+  const prev = parseInt(figma.root.getPluginData(full + ":n") || "0", 10);
+  for (let i = 0; i < prev; i++) figma.root.setPluginData(full + ":" + i, "");
+
+  if (str.length <= BRIDGE_CHUNK) {
+    figma.root.setPluginData(full, str);
+    figma.root.setPluginData(full + ":n", "");
+    return str.length;
+  }
+  const parts = [];
+  for (let i = 0; i < str.length; i += BRIDGE_CHUNK) parts.push(str.slice(i, i + BRIDGE_CHUNK));
+  parts.forEach((p, i) => figma.root.setPluginData(full + ":" + i, p));
+  figma.root.setPluginData(full, "");
+  figma.root.setPluginData(full + ":n", String(parts.length));
+  return str.length;
+}
+
+function bridgeRead(key) {
+  const full = BRIDGE_KEY + key;
+  const n = parseInt(figma.root.getPluginData(full + ":n") || "0", 10);
+  if (!n) return figma.root.getPluginData(full);
+  let out = "";
+  for (let i = 0; i < n; i++) out += figma.root.getPluginData(full + ":" + i);
+  return out;
+}
+
+function bridgeIndex(kind) {
+  try {
+    const raw = bridgeRead("index:" + kind);
+    return raw ? JSON.parse(raw) : [];
+  } catch (e) { return []; }
+}
+
+function bridgeIndexAdd(kind, name) {
+  const list = bridgeIndex(kind);
+  if (list.indexOf(name) === -1) {
+    list.push(name);
+    bridgeWrite("index:" + kind, JSON.stringify(list));
+  }
+}
+
+function bridgeIndexRemove(kind, name) {
+  bridgeWrite("index:" + kind, JSON.stringify(bridgeIndex(kind).filter(n => n !== name)));
+}
+
+function bridgeCompile(name, source, bridgeApi) {
+  // Ordinary function scope: `function foo(){}` and `const x = 1` inside
+  // `source` are real declarations here, unlike anything declared via eval().
+  let factory;
+  try {
+    factory = new Function(
+      "exports", "module", "figma", "ensureFont", "bridge",
+      source + "\n;return module.exports;"
+    );
+  } catch (err) {
+    throw new Error(
+      "Module \"" + name + "\" failed to compile: " + err.message +
+      ". The module body is a SYNCHRONOUS function body — top-level await is not allowed; " +
+      "export an async function instead."
+    );
+  }
+  const mod = { exports: {} };
+  const exported = factory(mod.exports, mod, figma, ensureFont, bridgeApi);
+  const empty = !exported ||
+    (typeof exported !== "function" &&
+     (typeof exported !== "object" || Object.keys(exported).length === 0));
+  if (empty) {
+    throw new Error(
+      "Module \"" + name + "\" exported nothing. End the module source with " +
+      "module.exports = { ... } listing the helpers you want back."
+    );
+  }
+  BRIDGE_MODULES[name] = exported;
+  return exported;
+}
+
+function createBridgeApi() {
+  const api = {};
+
+  // --- ephemeral scratch: survives calls, dies on plugin reload ------------
+  api.state = BRIDGE_STATE;
+
+  // --- durable key/value stored inside the .fig document -------------------
+  api.store = {
+    set(key, value) {
+      bridgeWrite("kv:" + key, JSON.stringify(value === undefined ? null : value));
+      bridgeIndexAdd("kv", key);
+      return value;
+    },
+    get(key, fallback) {
+      const raw = bridgeRead("kv:" + key);
+      if (!raw) return fallback;
+      try { return JSON.parse(raw); } catch (e) { return fallback; }
+    },
+    remove(key) {
+      bridgeWrite("kv:" + key, "");
+      bridgeIndexRemove("kv", key);
+    },
+    keys() { return bridgeIndex("kv"); }
+  };
+
+  // --- reusable code modules ----------------------------------------------
+  api.define = function (name, source) {
+    const exported = bridgeCompile(name, source, api);   // fail fast before saving
+    bridgeWrite("mod:" + name, source);
+    bridgeIndexAdd("mod", name);
+    return exported;
+  };
+
+  api.require = function (name) {
+    if (BRIDGE_MODULES[name]) return BRIDGE_MODULES[name];
+    const source = bridgeRead("mod:" + name);
+    if (!source) {
+      throw new Error(
+        "Module \"" + name + "\" is not defined. Available: [" + api.list().join(", ") + "]. " +
+        "Create it with bridge.define(\"" + name + "\", \"...source ending in module.exports = {...}...\")."
+      );
+    }
+    return bridgeCompile(name, source, api);
+  };
+
+  api.list = function () {
+    const saved = bridgeIndex("mod");
+    Object.keys(BRIDGE_MODULES).forEach(n => { if (saved.indexOf(n) === -1) saved.push(n); });
+    return saved;
+  };
+
+  api.source = function (name) { return bridgeRead("mod:" + name); };
+
+  api.remove = function (name) {
+    delete BRIDGE_MODULES[name];
+    bridgeWrite("mod:" + name, "");
+    bridgeIndexRemove("mod", name);
+  };
+
+  // --- platform workarounds ------------------------------------------------
+  // figma.createComponentFromNode() can force every AutoLayout frame in the
+  // subtree to FIXED sizing at whatever size it happened to have mid-convert.
+  // Node ids change during conversion, so positions in the tree map them back.
+  api.componentize = function (node) {
+    const saved = [];
+    (function walk(n, path) {
+      if ("layoutMode" in n && n.layoutMode !== "NONE") {
+        saved.push({ path: path.slice(), p: n.primaryAxisSizingMode, c: n.counterAxisSizingMode });
+      }
+      if ("children" in n) n.children.forEach((ch, i) => walk(ch, path.concat(i)));
+    })(node, []);
+
+    const comp = figma.createComponentFromNode(node);
+
+    for (const s of saved) {
+      let n = comp;
+      for (let i = 0; i < s.path.length && n; i++) n = n.children ? n.children[s.path[i]] : null;
+      if (!n || !("layoutMode" in n)) continue;
+      if (s.p) n.primaryAxisSizingMode = s.p;
+      if (s.c) n.counterAxisSizingMode = s.c;
+    }
+    if ("resize" in comp) comp.resize(comp.width, comp.height); // force relayout
+    return comp;
+  };
+
+  // Figma forbids overriding relative-transform inside an INSTANCE. Fail with
+  // the actual remedy instead of the raw platform error.
+  api.setPosition = function (node, x, y) {
+    let p = node.parent;
+    while (p) {
+      if (p.type === "INSTANCE") {
+        throw new Error(
+          "Cannot set x/y on \"" + node.name + "\": it lives inside INSTANCE \"" + p.name +
+          "\" and relative-transform cannot be overridden there. Position it through layout instead — " +
+          "itemSpacing / primaryAxisAlignItems / counterAxisAlignItems on the parent AutoLayout, or " +
+          "layoutPositioning = \"ABSOLUTE\" plus constraints set on the MASTER COMPONENT, not the instance."
+        );
+      }
+      p = p.parent;
+    }
+    node.x = x; node.y = y;
+    return node;
+  };
+
+  // --- self-description, so an agent can ask instead of guessing -----------
+  api.info = function () {
+    return {
+      executionModel:
+        "Each figma_execute_code call runs as a fresh async function body. Top-level " +
+        "const/let/var/function declarations do NOT survive into the next call. " +
+        "Top-level await and return are supported; import/export are not.",
+      evalWarning:
+        "eval() is a bound function in the Figma sandbox, so every eval is an INDIRECT eval: " +
+        "it cannot read the caller's locals and its declarations vanish. Never build helpers " +
+        "with eval — use bridge.define / bridge.require.",
+      persistence: {
+        "bridge.state": "in-memory object, survives calls, cleared on plugin reload",
+        "bridge.store": "JSON key/value inside the .fig document, survives everything",
+        "bridge.define/require": "reusable code modules stored in the document",
+        "globalThis": "shared and persists between calls, but prefer bridge.state"
+      },
+      injected: ["figma", "ensureFont", "bridge", "getFreePosition", "notify", "log"],
+      modules: api.list(),
+      storeKeys: api.store.keys(),
+      editorType: figma.editorType,
+      pluginApiVersion: typeof figma.apiVersion !== "undefined" ? figma.apiVersion : "n/a"
+    };
+  };
+
+  return api;
+}
+
+// Rewrites raw sandbox/platform errors into messages that tell an agent what
+// to do differently.
+const BRIDGE_ERROR_HINTS = [
+  {
+    test: /cannot be overridden in an instance|relative-transform/i,
+    hint: "Children of an INSTANCE cannot have x/y (and other override-forbidden props) set directly. " +
+          "Position via AutoLayout on the parent (itemSpacing, primaryAxisAlignItems, counterAxisAlignItems), " +
+          "or edit the master COMPONENT instead of the instance. bridge.setPosition(node, x, y) checks this for you."
+  },
+  {
+    test: /unloaded font|font.*(not loaded|must be loaded)|loadFontAsync/i,
+    hint: "Load the font first: await ensureFont(family, style) before touching characters / fontName / fontSize."
+  },
+  {
+    test: /await is only valid|Unexpected token|Unexpected identifier|Invalid or unexpected|Unexpected end of input/i,
+    hint: "Your code is compiled as an async function body: top-level await and return are allowed, " +
+          "import/export are not. Check for unbalanced braces or quotes in the code string."
+  },
+  {
+    test: /removed node|does not exist|has been removed/i,
+    hint: "The node was deleted or replaced — createComponentFromNode, flatten and boolean ops return NEW nodes " +
+          "with new ids. Keep the returned reference or re-fetch with figma.getNodeById."
+  },
+  {
+    test: /in set_(width|height)|Cannot resize|fixed dimensions/i,
+    hint: "AutoLayout frames ignore resize on axes set to AUTO (hug). Set primaryAxisSizingMode / " +
+          "counterAxisSizingMode to \"FIXED\" before resizing, or resize the child that drives the layout."
+  },
+  {
+    test: /pluginData|exceeds|too large/i,
+    hint: "pluginData entries are capped around 100KB. bridge.store and bridge.define chunk automatically — " +
+          "use them instead of raw figma.root.setPluginData for large payloads."
+  },
+  {
+    test: /is not defined|is not a function|Cannot read propert/i,
+    hint: "Every call runs in a fresh scope, so helpers from a previous figma_execute_code call are gone, and " +
+          "anything declared through eval() never existed at all. Persist reusable code with " +
+          "bridge.define(\"kit\", \"...; module.exports = { helper }\") and reload it via bridge.require(\"kit\")."
+  }
+];
+
+function enrichBridgeError(err) {
+  const message = (err && err.message) ? err.message : String(err);
+  for (const rule of BRIDGE_ERROR_HINTS) {
+    if (rule.test.test(message)) return { message, hint: rule.hint };
+  }
+  return { message, hint: null };
+}
+
 async function exportNodeToPngBase64(node, scale = 1.5) {
   if (!node) return null;
   try {
@@ -259,11 +539,18 @@ figma.ui.onmessage = async (msg) => {
       await ensureFont("Inter", "Bold");
 
       const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
-      const fn = new AsyncFunction('figma', 'ensureFont', 'notify', 'log', 'getFreePosition', 'getFreeCanvasPosition', `
-        ${code}
-      `);
+      // No wrapper newline/indent: keeps reported error line numbers aligned
+      // with the code the agent actually sent.
+      const bridgeApi = createBridgeApi();
+      const fn = new AsyncFunction(
+        'figma', 'ensureFont', 'notify', 'log', 'getFreePosition', 'getFreeCanvasPosition', 'bridge',
+        code
+      );
 
-      const result = await fn(figma, ensureFont, notifyCanvas, logToUi, getFreeCanvasPosition, getFreeCanvasPosition);
+      const result = await fn(
+        figma, ensureFont, notifyCanvas, logToUi,
+        getFreeCanvasPosition, getFreeCanvasPosition, bridgeApi
+      );
 
       let screenshot = null;
       let targetName = null;
@@ -308,14 +595,15 @@ figma.ui.onmessage = async (msg) => {
       });
     } catch (err) {
       if (runningToast) runningToast.cancel();
-      figma.notify(`❌ Error: ${err.message || String(err)}`, { error: true, timeout: 6000 });
+      const enriched = enrichBridgeError(err);
+      figma.notify(`❌ Error: ${enriched.message}`, { error: true, timeout: 6000 });
 
       figma.ui.postMessage({
         type: 'RESULT',
         id: id,
         success: false,
         description: actionLabel,
-        error: err.message || String(err),
+        error: enriched.hint ? `${enriched.message}\n\nHINT: ${enriched.hint}` : enriched.message,
         startTime: startTime
       });
     }

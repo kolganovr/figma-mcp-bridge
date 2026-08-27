@@ -41,6 +41,42 @@ flowchart LR
 - **💎 Figma Variables Native:** 100% token binding support (`setBoundVariableForPaint`, `setBoundVariable`) for dark/light themes, typography, radii, and spacing scales.
 - **⚡ Zero External Dependencies:** Built with pure Node.js stdio JSON-RPC 2.0 and native browser APIs. Works on Windows, macOS, and Linux out of the box without `npm install`.
 - **🛠 Comprehensive Tool Suite:** Dual-mode architecture supporting both local live canvas scripting and Figma Cloud REST API queries.
+- **📦 Persistent Sandbox Runtime (`bridge`):** Reusable code modules and durable key/value storage that survive across calls and Figma restarts, plus wrappers for the Figma Plugin API's sharpest edges and error messages that tell the agent what to do instead.
+
+---
+
+## 📦 The `bridge` Runtime (inside `figma_execute_code`)
+
+Every call to `figma_execute_code` is compiled as a **fresh async function body**, so top-level declarations vanish when the call ends — and `eval` cannot be used to work around it, because `eval` is a *bound* function inside the Figma sandbox and therefore always an **indirect eval**: declarations made inside it reach neither the caller nor `globalThis`, silently. The `bridge` object, injected into every call, is the supported way to carry things across calls:
+
+```js
+// call 1 — compile, validate and save into the .fig document
+bridge.define("kit", `
+  async function label(parent, text) {
+    await ensureFont("Inter", "Medium");
+    const t = figma.createText();
+    t.fontName = { family: "Inter", style: "Medium" };
+    t.characters = text;
+    parent.appendChild(t);
+    return t;
+  }
+  module.exports = { label };
+`);
+
+// call 2 (or next week, after a Figma restart)
+const { label } = bridge.require("kit");
+```
+
+| API | What it is |
+|-----|------------|
+| `bridge.define(name, src)` / `require` / `list` / `source` / `remove` | reusable code modules, stored in the document, chunked past 60 KB |
+| `bridge.store.set/get/remove/keys` | durable JSON key/value inside the `.fig` file |
+| `bridge.state` | scratch object, survives calls, cleared on plugin reload |
+| `bridge.componentize(node)` | `createComponentFromNode` without losing AutoLayout sizing modes |
+| `bridge.setPosition(node, x, y)` | refuses `x`/`y` inside an `INSTANCE` early, naming the layout-based remedy |
+| `bridge.info()` | the live runtime contract: execution model, injected globals, modules, stored keys |
+
+Failed executions come back with a `HINT:` line whenever the bridge recognises the failure mode (unloaded font, instance override, stale node id after conversion, resizing a hugging AutoLayout frame, `pluginData` size limits, or a helper that no longer exists because the scope was fresh). Full details in [`figma/instructions.md`](figma/instructions.md) §0 and [`AGENTS.md`](AGENTS.md).
 
 ---
 
@@ -133,8 +169,10 @@ figma-mcp-bridge/
 │   └── ... (Cloud REST schemas)
 ├── figma-plugin/               # Figma Desktop Extension
 │   ├── manifest.json           # Figma plugin manifest
-│   ├── code.js                 # Sandbox execution runtime + Base64 PNG encoder
+│   ├── code.js                 # Sandbox executor + bridge runtime + Base64 PNG encoder
 │   └── ui.html                 # Dark HUD Cockpit UI + live event stream
+├── tests/
+│   └── bridge-runtime.test.js  # Contract test for the sandbox runtime (node, no deps)
 ├── install.py                  # Cross-platform installer, updater & doctor
 ├── LICENSE                     # MIT License
 ├── AGENTS.md                   # AI Agent onboarding instructions

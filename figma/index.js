@@ -395,13 +395,13 @@ const TOOLS = [
   // 1. Live Canvas Tools
   {
     name: "figma_execute_code",
-    description: "EXECUTE LIVE JAVASCRIPT inside the open Figma document to create, edit, move, style, color, or delete any canvas elements (requires 'Antigravity Bridge' plugin running in Figma Desktop). Provides full access to `figma` API and `ensureFont(family, style)`. Set 'capture: true' to automatically capture a PNG screenshot of the resulting UI elements for visual feedback loop.",
+    description: "EXECUTE LIVE JAVASCRIPT inside the open Figma document to create, edit, move, style, color, or delete any canvas elements (requires 'Antigravity Bridge' plugin running in Figma Desktop). Injected globals: `figma`, `await ensureFont(family, style)`, `getFreePosition(w, h)`, `bridge`. EXECUTION MODEL: each call is compiled as a FRESH async function body - top-level `await` and `return` work, but `const`/`let`/`var`/`function` declarations DO NOT survive into the next call, and `eval()` is bound inside the Figma sandbox (always an indirect eval), so anything declared inside an eval string is invisible everywhere - never build helpers with eval. To reuse code across calls: `bridge.define(\'kit\', \'function mk(){...}; module.exports = { mk }\')` once, then `const kit = bridge.require(\'kit\')` later; `bridge.store.set/get(key, value)` for durable JSON in the document, `bridge.state` for scratch. Platform helpers: `bridge.componentize(node)` (createComponentFromNode without losing AutoLayout sizing), `bridge.setPosition(node, x, y)` (Figma forbids x/y on children of an INSTANCE - use AutoLayout alignment instead). Run `return bridge.info()` to read the full runtime contract. Set 'capture: true' to automatically capture a PNG screenshot of the resulting UI elements for visual feedback loop.",
     inputSchema: {
       type: "object",
       properties: {
         code: {
           type: "string",
-          description: "JavaScript code to execute in Figma sandbox. Example: const frame = figma.createFrame(); frame.resize(400, 600); frame.name = 'Card'; figma.currentPage.appendChild(frame); figma.currentPage.selection = [frame]; figma.viewport.scrollAndZoomIntoView([frame]); return 'Created frame';"
+          description: "JavaScript code to execute in Figma sandbox, compiled as an async function body (top-level await and return allowed; import/export are not). Example: const frame = figma.createFrame(); frame.resize(400, 600); frame.name = 'Card'; figma.currentPage.appendChild(frame); figma.currentPage.selection = [frame]; figma.viewport.scrollAndZoomIntoView([frame]); return 'Created frame'; — Helpers you declare here are gone on the next call: persist them with bridge.define(name, source) and reload with bridge.require(name)."
         },
         description: {
           type: "string",
@@ -776,6 +776,52 @@ const TOOLS = [
     }
   }
 ];
+
+// ==========================================================================
+// Server-level instructions handed to the MCP client on initialize, plus
+// hints appended to failures that never reach the Figma sandbox.
+// ==========================================================================
+const SERVER_INSTRUCTIONS = [
+  "Figma MCP Bridge — two modes: LIVE (read/write on the open Figma Desktop document via the Antigravity Bridge plugin) and REST (read-only cloud access to files/nodes/styles with a token optimizer).",
+  "",
+  "figma_execute_code execution model (read before writing any code):",
+  "1. Each call is compiled as a FRESH async function body. Top-level `await` and `return` work; `import`/`export` do not.",
+  "2. Top-level `const`/`let`/`var`/`function` declarations DO NOT survive into the next call.",
+  "3. `eval()` is a bound function in the Figma sandbox, so every eval is an INDIRECT eval: it cannot see the caller's locals and its declarations reach neither the caller nor globalThis. Never use eval to build reusable helpers — it fails silently.",
+  "4. Persist code with `bridge.define(name, source)` (source must end in `module.exports = { ... }`) and reload it in later calls with `bridge.require(name)`. Persist data with `bridge.store.set/get` (durable, lives in the .fig file) or `bridge.state` (scratch, cleared on plugin reload).",
+  "5. `return bridge.info()` reports the live runtime contract, injected globals, defined modules and stored keys.",
+  "",
+  "Known Figma platform limits the bridge wraps for you:",
+  "- x/y of a node inside an INSTANCE cannot be set (relative-transform is not overridable). Position through AutoLayout, or edit the master component. `bridge.setPosition(node, x, y)` raises this early with the remedy.",
+  "- `figma.createComponentFromNode()` can freeze AutoLayout sizing modes to FIXED across the whole subtree and changes node ids. Use `bridge.componentize(node)` instead.",
+  "- Fonts must be loaded before touching text: `await ensureFont(family, style)`.",
+  "- Colors are floats in 0..1, not 0..255.",
+  "",
+  "Always close the visual loop: pass `capture: true` or call figma_screenshot after changing the canvas, and inspect the returned PNG before declaring the task done."
+].join("\n");
+
+const SERVER_ERROR_HINTS = [
+  {
+    test: /timeout|not connected|8765|bridge/i,
+    hint: "The Figma plugin did not answer. Ask the user to open Figma DESKTOP (not the browser) and launch the Antigravity Bridge plugin (Ctrl+Alt+P / Cmd+Option+P) until the status shows CONNECTED, then retry."
+  },
+  {
+    test: /FIGMA_PERSONAL_ACCESS_TOKEN|401|403|Unauthorized/i,
+    hint: "REST tools need FIGMA_PERSONAL_ACCESS_TOKEN in the MCP server environment. Live tools (figma_execute_code, figma_screenshot, ...) work without a token — prefer them when the file is open in Figma Desktop."
+  },
+  {
+    test: /Unknown tool/i,
+    hint: "Call tools/list to see the tools this bridge actually exposes."
+  }
+];
+
+function withServerHint(message) {
+  if (/\bHINT:/.test(message)) return message; // plugin already explained it
+  for (const rule of SERVER_ERROR_HINTS) {
+    if (rule.test.test(message)) return message + "\n\nHINT: " + rule.hint;
+  }
+  return message;
+}
 
 async function handleCallTool(name, args = {}) {
   try {
@@ -1241,7 +1287,7 @@ async function handleCallTool(name, args = {}) {
   } catch (error) {
     return {
       isError: true,
-      content: [{ type: "text", text: `Figma Error: ${error.message}` }]
+      content: [{ type: "text", text: `Figma Error: ${withServerHint(error.message || String(error))}` }]
     };
   }
 }
@@ -1265,9 +1311,10 @@ function startOfficialSdkServer() {
 
       const server = new Server({
         name: "figma-mcp",
-        version: "2.1.0"
+        version: "2.2.0"
       }, {
-        capabilities: { tools: {} }
+        capabilities: { tools: {} },
+        instructions: SERVER_INSTRUCTIONS
       });
 
       server.setRequestHandler(types.ListToolsRequestSchema, async () => {
@@ -1307,7 +1354,8 @@ function startUniversalStdioServer() {
         result: {
           protocolVersion: "2024-11-05",
           capabilities: { tools: {} },
-          serverInfo: { name: "figma-mcp", version: "2.1.0" }
+          serverInfo: { name: "figma-mcp", version: "2.2.0" },
+          instructions: SERVER_INSTRUCTIONS
         }
       });
       return;

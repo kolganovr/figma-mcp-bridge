@@ -48,6 +48,32 @@ When interacting with the Figma canvas:
 
 ---
 
+## 🧠 Execution Model of `figma_execute_code` (Non-Obvious — Read Before Scripting)
+
+Your code is compiled by the plugin as `new AsyncFunction('figma', 'ensureFont', 'notify', 'log', 'getFreePosition', 'bridge', yourCode)`. Four consequences:
+
+1. **Every call is a fresh scope.** Top-level `const` / `let` / `var` / `function` do **not** survive into the next call. Top-level `await` and `return` do work; `import` / `export` do not.
+2. **Never use `eval` to carry helpers between calls.** `eval` is a *bound* function inside the Figma sandbox, so every call to it is an **indirect eval** by spec: it cannot read your locals, and declarations inside the string reach neither the caller nor `globalThis`. The pattern "save source in `pluginData`, `eval` it next call" fails *silently* — nothing is declared and nothing is thrown.
+3. **Persist code with the `bridge` module loader** (built on `new Function`, whose bodies are ordinary scopes):
+   ```js
+   bridge.define("kit", "function mk(){ /* ... */ }; module.exports = { mk };"); // once, saved into the .fig file
+   const { mk } = bridge.require("kit");                                          // in any later call
+   ```
+   Persist data with `bridge.store.set/get(key, value)` (durable, lives in the document) or `bridge.state` (scratch, cleared on plugin reload).
+4. **Ask instead of guessing:** `return bridge.info()` reports the live execution model, injected globals, defined modules and stored keys.
+
+### Platform limits the bridge wraps for you
+- `bridge.componentize(node)` — `figma.createComponentFromNode()` can force every nested AutoLayout frame to `FIXED` sizing and returns nodes with **new ids**; this wrapper restores the sizing modes.
+- `bridge.setPosition(node, x, y)` — `x`/`y` of a node inside an `INSTANCE` cannot be set (`relative-transform` is not overridable). The wrapper fails early and names the remedy: position through AutoLayout alignment, or edit the master component.
+
+### When failures come back
+Errors carry a `HINT:` line whenever the bridge recognises the failure mode (unloaded font, instance override, stale node id, hugging AutoLayout resize, `pluginData` limits, "helper from my last call is not defined"). Read the hint before retrying.
+
+### Changing the runtime
+`node tests/bridge-runtime.test.js` is a contract test that pins this behaviour (module persistence, chunking, store, `componentize`, `setPosition`, error hints). Run it after touching `figma-plugin/code.js`.
+
+---
+
 ## 🩺 Troubleshooting for Agents
 
 - **If tool calls time out:**
