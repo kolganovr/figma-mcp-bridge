@@ -1,0 +1,21 @@
+{
+  "name": "figma_screenshot",
+  "description": "Capture a visual PNG screenshot of specific nodes or the current selection in Figma. ALWAYS use this or 'capture: true' in figma_execute_code to visually inspect and critique your design output, verify layout alignment, colors, padding, and font rendering.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "node_ids": {
+        "type": "string",
+        "description": "Optional comma-separated list of Figma node IDs to screenshot (e.g. '123:456, 123:457'). If omitted, captures current selection or current page."
+      },
+      "scale": {
+        "type": "number",
+        "description": "Export resolution scale factor 1 to 3 (default: 1.5)."
+      },
+      "description": {
+        "type": "string",
+        "description": "Optional action description for Figma toast and logs."
+      }
+    }
+  }
+}

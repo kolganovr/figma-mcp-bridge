@@ -1,0 +1,1 @@
+{"name":"get_me","description":"Verify authenticated user and token validity in Figma","parameters":{"properties":{},"type":"object"}}

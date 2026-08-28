@@ -1,0 +1,1 @@
+{"name":"post_comment","description":"Post a comment to a Figma file or specific node","parameters":{"properties":{"file_key":{"description":"Figma file key or complete Figma URL","type":"string"},"message":{"description":"Comment text message","type":"string"},"node_id":{"description":"Optional node ID","type":"string"}},"required":["file_key","message"],"type":"object"}}

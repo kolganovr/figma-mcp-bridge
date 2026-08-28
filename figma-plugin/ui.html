@@ -1,0 +1,1560 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Antigravity Bridge</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Roboto+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <style>
+    /* =========================================================
+       DESIGN TOKENS (Antigravity DS Tokens 1:1)
+       ========================================================= */
+    :root {
+      --bg-app: #121215;
+      --bg-surface: #18181b;
+      --bg-elevated: #202024;
+      --bg-terminal: #09090b;
+
+      --border-subtle: #27272a;
+      --border-contrast: #3f3f46;
+      --border-focus: #6366f1;
+
+      --text-primary: #f4f4f5;
+      --text-secondary: #a1a1aa;
+      --text-muted: #71717a;
+
+      --status-online: #4ade80;
+      --status-online-bg: #0f291e;
+      --status-online-border: #166534;
+
+      --status-busy: #60a5fa;
+      --status-busy-bg: #172554;
+      --status-busy-border: #1e40af;
+
+      --status-capture: #c084fc;
+      --status-capture-bg: #2e1065;
+      --status-capture-border: #6b21a8;
+
+      --status-error: #f87171;
+      --status-error-bg: #450a0a;
+      --status-error-border: #991b1b;
+
+      --radius-xs: 3px;
+      --radius-sm: 6px;
+      --radius-md: 8px;
+      --radius-lg: 10px;
+      --radius-pill: 9999px;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      font-size: 11px;
+      background: var(--bg-app);
+      color: var(--text-primary);
+      user-select: none;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    /* =========================================================
+       VIEW 1: FULL DASHBOARD VIEW (360 x 480)
+       ========================================================= */
+    #view-full {
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      gap: 8px;
+    }
+
+    #view-full.hidden {
+      display: none !important;
+    }
+
+    /* 01. HEADER UNIT */
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-shrink: 0;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-md);
+      padding: 7px 10px;
+      transition: all 0.25s ease;
+    }
+
+    .brand-group {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .logo-container {
+      width: 24px;
+      height: 24px;
+      border-radius: 6px;
+      background: var(--status-online-bg);
+      border: 1px solid var(--status-online-border);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      transition: all 0.25s ease;
+    }
+    .logo-container.busy {
+      background: var(--status-busy-bg);
+      border-color: var(--status-busy-border);
+    }
+    .logo-container.capture {
+      background: var(--status-capture-bg);
+      border-color: var(--status-capture-border);
+    }
+    .logo-container.offline {
+      background: var(--status-error-bg);
+      border-color: var(--status-error-border);
+    }
+
+    .logo-iso {
+      width: 16px;
+      height: 16px;
+    }
+
+    .titles {
+      display: flex;
+      flex-direction: column;
+      gap: 1px;
+    }
+    .brand-title {
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--text-primary);
+      line-height: 13px;
+    }
+    .brand-sub {
+      font-size: 8px;
+      color: var(--text-muted);
+      line-height: 10px;
+      font-family: 'Roboto Mono', monospace;
+    }
+
+    .status-pill {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 0.4px;
+      padding: 4px 8px;
+      border-radius: var(--radius-pill);
+      background: var(--status-online-bg);
+      color: var(--status-online);
+      border: 1px solid var(--status-online-border);
+      transition: all 0.25s ease;
+    }
+    .status-pill.busy {
+      background: var(--status-busy-bg);
+      color: var(--status-busy);
+      border-color: var(--status-busy-border);
+    }
+    .status-pill.capture {
+      background: var(--status-capture-bg);
+      color: var(--status-capture);
+      border-color: var(--status-capture-border);
+    }
+    .status-pill.offline {
+      background: var(--status-error-bg);
+      color: var(--status-error);
+      border-color: var(--status-error-border);
+    }
+
+    .status-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--status-online);
+      box-shadow: 0 0 6px rgba(74, 222, 128, 0.6);
+      transition: all 0.25s ease;
+    }
+    .status-dot.busy {
+      background: var(--status-busy);
+      box-shadow: 0 0 6px rgba(96, 165, 250, 0.8);
+      animation: pulseDot 0.8s infinite alternate;
+    }
+    .status-dot.capture {
+      background: var(--status-capture);
+      box-shadow: 0 0 6px rgba(192, 132, 252, 0.8);
+      animation: pulseDot 0.6s infinite alternate;
+    }
+    .status-dot.offline {
+      background: var(--status-error);
+      box-shadow: none;
+      animation: none;
+    }
+
+    @keyframes pulseDot {
+      from { opacity: 0.4; transform: scale(0.9); }
+      to { opacity: 1; transform: scale(1.1); }
+    }
+
+    /* 02. TAB CONTENT CONTAINERS */
+    .tab-content {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      min-height: 0;
+      overflow-y: auto;
+    }
+    .tab-content.hidden {
+      display: none !important;
+    }
+
+    /* STREAM TAB STYLES */
+    .activity-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-lg);
+      padding: 8px 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      flex-shrink: 0;
+      transition: border-color 0.25s ease, box-shadow 0.25s ease;
+    }
+    .activity-card.busy {
+      border-color: #1e3a8a;
+      box-shadow: 0 0 12px rgba(59, 130, 246, 0.08);
+    }
+    .activity-card.capture {
+      border-color: #4c1d95;
+      box-shadow: 0 0 12px rgba(168, 85, 247, 0.08);
+    }
+    .activity-card.error {
+      border-color: #7f1d1d;
+      box-shadow: 0 0 12px rgba(239, 68, 68, 0.08);
+    }
+
+    .card-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .card-tag {
+      font-size: 8px;
+      font-weight: 700;
+      color: var(--text-muted);
+      letter-spacing: 0.5px;
+    }
+    .card-tag.busy { color: var(--status-busy); }
+    .card-tag.capture { color: var(--status-capture); }
+    .card-tag.error { color: var(--status-error); }
+
+    .card-badge {
+      font-size: 8px;
+      font-weight: 500;
+      color: var(--status-online);
+    }
+    .card-badge.busy { color: var(--status-busy); }
+    .card-badge.capture { color: var(--status-capture); }
+    .card-badge.error { color: var(--status-error); }
+
+    .task-desc {
+      font-family: 'Roboto Mono', monospace;
+      font-size: 9px;
+      font-weight: 400;
+      color: var(--text-secondary);
+      line-height: 13px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      user-select: text;
+      -webkit-user-select: text;
+      cursor: text;
+    }
+    .task-desc.busy { color: var(--text-primary); }
+    .task-desc.error { color: #fca5a5; }
+
+    .progress-bar {
+      height: 3px;
+      width: 100%;
+      background: var(--border-subtle);
+      border-radius: var(--radius-pill);
+      overflow: hidden;
+      display: none;
+    }
+    .progress-bar.active { display: block; }
+    .progress-fill {
+      height: 100%;
+      width: 70%;
+      background: linear-gradient(90deg, #3b82f6, #60a5fa);
+      border-radius: var(--radius-pill);
+      animation: progressShift 1.4s infinite ease-in-out alternate;
+    }
+    .progress-fill.capture {
+      background: linear-gradient(90deg, #8b5cf6, #c084fc);
+    }
+
+    .metrics-bar {
+      display: flex;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+    .metric-box {
+      flex: 1;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-md);
+      padding: 4px 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 1px;
+    }
+    .metric-val {
+      font-size: 13px;
+      font-weight: 700;
+      line-height: 15px;
+      font-family: 'Roboto Mono', monospace;
+    }
+    .metric-val.blue { color: var(--status-busy); }
+    .metric-val.purple { color: var(--status-capture); }
+    .metric-val.green { color: var(--status-online); }
+    .metric-label {
+      font-size: 8px;
+      color: var(--text-muted);
+    }
+
+    .terminal-box {
+      flex: 1;
+      min-height: 130px;
+      background: var(--bg-terminal);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-lg);
+      padding: 8px 10px;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      gap: 4px;
+    }
+    .term-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-shrink: 0;
+      padding-bottom: 4px;
+      border-bottom: 1px solid #1f1f23;
+    }
+    .term-title-group {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+    .term-prompt {
+      font-family: 'Roboto Mono', monospace;
+      font-size: 9px;
+      font-weight: 700;
+      color: #38bdf8;
+    }
+    .term-title {
+      font-family: 'Roboto Mono', monospace;
+      font-size: 8px;
+      font-weight: 700;
+      color: var(--text-secondary);
+      letter-spacing: 0.5px;
+    }
+    .term-actions {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .term-btn {
+      font-size: 8px;
+      font-weight: 500;
+      color: var(--text-muted);
+      cursor: pointer;
+      padding: 1px 4px;
+      border-radius: var(--radius-xs);
+      transition: all 0.15s ease;
+    }
+    .term-btn:hover { background: var(--border-subtle); color: var(--text-primary); }
+    .term-btn.accent { color: #38bdf8; }
+    .term-btn.accent:hover { background: rgba(56, 189, 248, 0.15); color: #7dd3fc; }
+
+    .log-list {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      overflow-x: hidden;
+      font-family: 'Roboto Mono', ui-monospace, Consolas, monospace;
+      font-size: 9px;
+      line-height: 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      padding: 2px 0;
+      user-select: text;
+      -webkit-user-select: text;
+      cursor: text;
+    }
+    .log-list * {
+      user-select: text;
+      -webkit-user-select: text;
+    }
+    .log-list ::selection,
+    .log-list *::selection {
+      background: rgba(99, 102, 241, 0.45);
+      color: #ffffff;
+    }
+    .log-list::-webkit-scrollbar { width: 4px; }
+    .log-list::-webkit-scrollbar-thumb { background: var(--border-subtle); border-radius: 4px; }
+
+    .log-row {
+      display: flex;
+      align-items: center;
+      flex-shrink: 0;
+      min-height: 18px;
+      height: 18px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      width: 100%;
+    }
+    .log-time {
+      flex-shrink: 0;
+      color: #52525b;
+      font-size: 8px;
+      font-family: 'Roboto Mono', monospace;
+      margin-right: 4px;
+    }
+    .tag {
+      flex-shrink: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 7px;
+      font-weight: 700;
+      padding: 0 4px;
+      height: 13px;
+      border-radius: var(--radius-xs);
+      letter-spacing: 0.3px;
+      margin-right: 6px;
+    }
+    .tag.run { background: #172554; color: #60a5fa; }
+    .tag.shot { background: #2e1065; color: #c084fc; }
+    .tag.ok { background: #0f291e; color: #4ade80; }
+    .tag.err { background: #450a0a; color: #f87171; }
+    .tag.sys { background: #27272a; color: #a1a1aa; }
+    .tag.ws { background: #0f291e; color: #4ade80; }
+    .tag.ai { background: #2e1065; color: #c084fc; }
+    .log-text {
+      flex: 1;
+      min-width: 0;
+      color: #d4d4d8;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .term-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding-top: 3px;
+      border-top: 1px solid #18181b;
+      font-family: 'Roboto Mono', monospace;
+      font-size: 7px;
+      color: var(--text-muted);
+      flex-shrink: 0;
+    }
+    .term-count { color: var(--status-online); }
+
+    /* SETTINGS TAB STYLES */
+    .settings-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-md);
+      padding: 8px 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+    .settings-card-title {
+      font-size: 8px;
+      font-weight: 700;
+      color: var(--text-muted);
+      letter-spacing: 0.5px;
+    }
+
+    .segmented-control {
+      display: flex;
+      background: var(--bg-app);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-sm);
+      padding: 2px;
+      gap: 2px;
+      height: 30px;
+    }
+    .segmented-opt {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 10px;
+      font-weight: 500;
+      color: var(--text-muted);
+      border-radius: 4px;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+    .segmented-opt.active {
+      background: var(--bg-elevated);
+      color: var(--text-primary);
+      border: 1px solid var(--border-contrast);
+      font-weight: 600;
+    }
+
+    .setting-toggle-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 2px 0;
+    }
+    .setting-label-group {
+      display: flex;
+      flex-direction: column;
+      gap: 1px;
+    }
+    .setting-title {
+      font-size: 10px;
+      font-weight: 500;
+      color: var(--text-primary);
+    }
+    .setting-desc {
+      font-size: 8px;
+      color: var(--text-muted);
+    }
+
+    .input-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .server-input {
+      flex: 1;
+      height: 28px;
+      background: var(--bg-app);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-sm);
+      padding: 0 8px;
+      color: var(--text-primary);
+      font-family: 'Roboto Mono', monospace;
+      font-size: 10px;
+      outline: none;
+      transition: border-color 0.15s ease;
+    }
+    .server-input:focus {
+      border-color: var(--border-contrast);
+    }
+
+    /* 03. BOTTOM NAVIGATION BAR (NavTabs 1:1) */
+    .nav-tabs-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-shrink: 0;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-md);
+      padding: 4px;
+      height: 34px;
+    }
+
+    .nav-pills {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .nav-pill {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 4px 10px;
+      border-radius: 5px;
+      font-size: 10px;
+      font-weight: 500;
+      color: var(--text-muted);
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+    .nav-pill:hover {
+      color: var(--text-primary);
+    }
+    .nav-pill.active {
+      background: var(--bg-elevated);
+      color: var(--text-primary);
+      border: 1px solid var(--border-contrast);
+      font-weight: 600;
+    }
+
+    .btn-icon-styled {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border-subtle);
+      border-radius: 6px;
+      padding: 4px 8px;
+      color: var(--text-secondary);
+      font-size: 10px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+    .btn-icon-styled:hover {
+      background: #27272e;
+      border-color: var(--border-contrast);
+      color: var(--text-primary);
+    }
+    .btn-icon-styled:active {
+      transform: scale(0.97);
+    }
+
+    /* =========================================================
+       VIEW 2: COMPACT FLOATING MINI-BAR (260 x 44)
+       ========================================================= */
+    #view-compact {
+      width: 260px;
+      height: 44px;
+      padding: 6px 10px;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+      transition: border-color 0.25s ease;
+    }
+
+    #view-compact.hidden {
+      display: none !important;
+    }
+
+    #view-compact.busy {
+      border-color: var(--status-busy);
+    }
+    #view-compact.capture {
+      border-color: var(--status-capture);
+    }
+    #view-compact.offline {
+      border-color: var(--status-error);
+    }
+
+    .compact-left {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .compact-status-pill {
+      width: 24px;
+      height: 24px;
+      border-radius: 6px;
+      background: var(--status-online-bg);
+      border: 1px solid var(--status-online-border);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      transition: all 0.25s ease;
+    }
+    .compact-status-pill.busy {
+      background: var(--status-busy-bg);
+      border-color: var(--status-busy-border);
+    }
+    .compact-status-pill.capture {
+      background: var(--status-capture-bg);
+      border-color: var(--status-capture-border);
+    }
+    .compact-status-pill.offline {
+      background: var(--status-error-bg);
+      border-color: var(--status-error-border);
+    }
+
+    .compact-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--status-online);
+      box-shadow: 0 0 5px rgba(74, 222, 128, 0.6);
+      transition: all 0.25s ease;
+    }
+    .compact-dot.busy {
+      background: var(--status-busy);
+      box-shadow: 0 0 5px rgba(96, 165, 250, 0.8);
+      animation: pulseDot 0.8s infinite alternate;
+    }
+    .compact-dot.capture {
+      background: var(--status-capture);
+      box-shadow: 0 0 5px rgba(192, 132, 252, 0.8);
+      animation: pulseDot 0.6s infinite alternate;
+    }
+    .compact-dot.offline {
+      background: var(--status-error);
+      box-shadow: none;
+      animation: none;
+    }
+
+    .compact-label {
+      font-size: 10px;
+      font-weight: 500;
+      color: var(--text-primary);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .compact-label.offline {
+      color: var(--status-error);
+    }
+
+    .compact-right {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+
+    .icon-btn {
+      width: 24px;
+      height: 24px;
+      border-radius: 6px;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border-subtle);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      color: var(--text-secondary);
+    }
+    .icon-btn:hover {
+      background: #2b2b32;
+      border-color: var(--border-contrast);
+      color: var(--text-primary);
+    }
+    .icon-btn:active {
+      transform: scale(0.95);
+    }
+    .icon-btn.active {
+      border-color: #8b5cf6;
+      color: #c084fc;
+    }
+
+    /* TOGGLE SWITCH ATOM */
+    .toggle-row {
+      display: flex;
+      align-items: center;
+      cursor: pointer;
+    }
+    .toggle-track {
+      width: 28px;
+      height: 16px;
+      border-radius: var(--radius-pill);
+      background: var(--border-subtle);
+      border: 1px solid var(--border-contrast);
+      position: relative;
+      transition: all 0.2s ease;
+      flex-shrink: 0;
+    }
+    .toggle-track.active {
+      background: #8b5cf6;
+      border-color: #a855f7;
+    }
+    .toggle-knob {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: #a1a1aa;
+      position: absolute;
+      top: 1px;
+      left: 1px;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.25);
+      transition: transform 0.2s ease, background 0.2s ease;
+    }
+    .toggle-track.active .toggle-knob {
+      background: #ffffff;
+      transform: translateX(12px);
+    }
+  </style>
+</head>
+<body>
+
+  <!-- =========================================================
+       VIEW A: FULL DASHBOARD (360 x 480)
+       ========================================================= -->
+  <div id="view-full">
+
+    <!-- 01. MASTER HEADER -->
+    <div class="header">
+      <div class="brand-group">
+        <div id="logo-box" class="logo-container">
+          <svg class="logo-iso" viewBox="0 0 24 24" fill="none">
+            <path id="iso-mesh-1" d="M12 3L19.5 7.5V16.5L12 21L4.5 16.5V7.5L12 3Z" stroke="#4ADE80" stroke-width="1.6" stroke-linejoin="round"/>
+            <path id="iso-mesh-2" d="M12 3V12M12 12L4.5 7.5M12 12L19.5 7.5" stroke="#4ADE80" stroke-width="1.6" stroke-linejoin="round"/>
+            <path id="iso-mesh-3" d="M12 12V21M12 12L19.5 16.5M12 12L4.5 16.5" stroke="#4ADE80" stroke-width="1.6" stroke-opacity="0.4" stroke-linejoin="round"/>
+            <circle id="iso-glow" cx="12" cy="12" r="3.5" fill="#22C55E" fill-opacity="0.35"/>
+            <circle cx="12" cy="12" r="2" fill="#FFFFFF"/>
+          </svg>
+        </div>
+        <div class="titles">
+          <span class="brand-title">Antigravity Bridge</span>
+          <span id="header-sub" class="brand-sub">Local :8765 • v3.1</span>
+        </div>
+      </div>
+      <div id="status-pill" class="status-pill">
+        <div id="status-dot" class="status-dot"></div>
+        <span id="status-text">CONNECTED</span>
+      </div>
+    </div>
+
+    <!-- 02. STREAM TAB -->
+    <div id="tab-stream" class="tab-content">
+      <!-- Activity Card -->
+      <div id="act-card" class="activity-card">
+        <div class="card-top">
+          <span id="card-tag" class="card-tag">AI ASSISTANT STATUS</span>
+          <span id="card-badge" class="card-badge">⚡ Ready</span>
+        </div>
+        <div id="task-desc" class="task-desc">Listening on 127.0.0.1:8765. Ready for commands.</div>
+        <div id="progress-bar" class="progress-bar">
+          <div id="progress-fill" class="progress-fill"></div>
+        </div>
+      </div>
+
+      <!-- Metrics Row -->
+      <div class="metrics-bar">
+        <div class="metric-box">
+          <span id="m-cmds" class="metric-val blue">0</span>
+          <span class="metric-label">Commands</span>
+        </div>
+        <div class="metric-box">
+          <span id="m-caps" class="metric-val purple">0</span>
+          <span class="metric-label">Captures</span>
+        </div>
+        <div class="metric-box">
+          <span id="m-lat" class="metric-val green">—</span>
+          <span class="metric-label">Latency</span>
+        </div>
+      </div>
+
+      <!-- Terminal Stream -->
+      <div class="terminal-box">
+        <div class="term-head">
+          <div class="term-title-group">
+            <span class="term-prompt">&gt;_</span>
+            <span class="term-title">EVENT STREAM</span>
+          </div>
+          <div class="term-actions">
+            <span id="term-copy" class="term-btn">Copy</span>
+            <span id="term-clear" class="term-btn accent">Clear</span>
+          </div>
+        </div>
+        <div id="log-list" class="log-list">
+          <div class="log-row"><span class="log-time">[Init]</span> <span class="tag sys">SYS</span> <span class="log-text">Bridge v3.1 initialized on :8765</span></div>
+        </div>
+        <div class="term-footer">
+          <span id="term-count" class="term-count">● 1 event logged</span>
+          <span id="term-latency">Latency: --</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 03. SETTINGS TAB -->
+    <div id="tab-settings" class="tab-content hidden">
+      <!-- Section 1: Display & Appearance -->
+      <div class="settings-card">
+        <span class="settings-card-title">DISPLAY & APPEARANCE</span>
+        <div class="segmented-control">
+          <div id="seg-full" class="segmented-opt active">Full Dashboard</div>
+          <div id="seg-compact" class="segmented-opt">Compact Mini-Bar</div>
+        </div>
+      </div>
+
+      <!-- Section 2: Canvas & AI Automation -->
+      <div class="settings-card">
+        <span class="settings-card-title">CANVAS & AI AUTOMATION</span>
+        <div class="setting-toggle-row">
+          <div class="setting-label-group">
+            <span class="setting-title">Auto-zoom canvas</span>
+            <span class="setting-desc">Focus camera on generated UI frames</span>
+          </div>
+          <div id="toggle-zoom-set" class="toggle-row">
+            <div id="toggle-zoom-track" class="toggle-track active">
+              <div class="toggle-knob"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="setting-toggle-row">
+          <div class="setting-label-group">
+            <span class="setting-title">Smart Placement</span>
+            <span class="setting-desc">Auto-offset new frames to free canvas area</span>
+          </div>
+          <div id="toggle-place-set" class="toggle-row">
+            <div id="toggle-place-track" class="toggle-track active">
+              <div class="toggle-knob"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Section 3: Local Bridge Server -->
+      <div class="settings-card">
+        <span class="settings-card-title">LOCAL BRIDGE SERVER</span>
+        <div class="input-row">
+          <input id="server-url-input" class="server-input" type="text" value="http://127.0.0.1:8765" spellcheck="false" />
+          <button id="ping-btn" class="btn-icon-styled">
+            <span>⚡</span>
+            <span>Ping</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 04. BOTTOM NAVIGATION BAR (NavTabs) -->
+    <div class="nav-tabs-bar">
+      <div class="nav-pills">
+        <div id="nav-btn-stream" class="nav-pill active">
+          <span>⚡</span>
+          <span>Stream</span>
+        </div>
+        <div id="nav-btn-settings" class="nav-pill">
+          <span>⚙️</span>
+          <span>Settings</span>
+        </div>
+      </div>
+      <button id="btn-mini-mode" class="btn-icon-styled">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 14H10V20"/><path d="M20 10H14V4"/><path d="M14 10L21 3"/><path d="M10 14L3 21"/>
+        </svg>
+        <span>Mini Mode</span>
+      </button>
+    </div>
+
+  </div>
+
+  <!-- =========================================================
+       VIEW B: COMPACT FLOATING MINI-BAR (260 x 44)
+       ========================================================= -->
+  <div id="view-compact" class="hidden">
+    <div class="compact-left">
+      <div id="compact-pill" class="compact-status-pill">
+        <div id="compact-dot" class="compact-dot"></div>
+      </div>
+      <span id="compact-text" class="compact-label">Bridge Ready</span>
+    </div>
+
+    <div class="compact-right">
+      <!-- Target / Focus button (Auto-zoom toggle) -->
+      <div id="compact-focus-btn" class="icon-btn active" title="Toggle Auto-Zoom">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="7"/>
+          <path d="M12 2V5M12 19V22M2 12H5M19 12H22"/>
+        </svg>
+      </div>
+
+      <!-- Expand button (Open Full Dashboard) -->
+      <div id="compact-expand-btn" class="icon-btn" title="Expand Full Dashboard">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M15 3H21V9M9 21H3V15M21 3L14 10M3 21L10 14"/>
+        </svg>
+      </div>
+    </div>
+  </div>
+
+  <!-- JAVASCRIPT ENGINE -->
+  <script>
+    let SERVER_URL = 'http://127.0.0.1:8765';
+    // Replaced with a real value by install.py when it copies this file into
+    // place. Left blank, the bridge server still rejects any non-Figma Origin,
+    // but the token closes the remaining gap for a sandboxed-iframe page that
+    // can also present Origin: "null". Keep this exact literal — install.py
+    // matches it verbatim to know where to inject the token.
+    const BRIDGE_TOKEN = "";
+
+    // State
+    let cmdCount = 0;
+    let capCount = 0;
+    let totalLogs = 1;
+    let autoZoom = true;
+    let smartPlacement = true;
+    let currentView = 'full'; // 'full' | 'compact'
+    let currentTab = 'stream'; // 'stream' | 'settings'
+    let isPolling = false;
+
+    // Elements - Full View
+    const viewFull = document.getElementById('view-full');
+    const viewCompact = document.getElementById('view-compact');
+
+    const logoBox = document.getElementById('logo-box');
+    const isoMesh1 = document.getElementById('iso-mesh-1');
+    const isoMesh2 = document.getElementById('iso-mesh-2');
+    const isoMesh3 = document.getElementById('iso-mesh-3');
+    const isoGlow = document.getElementById('iso-glow');
+    const headerSub = document.getElementById('header-sub');
+
+    const statusPill = document.getElementById('status-pill');
+    const statusDot = document.getElementById('status-dot');
+    const statusText = document.getElementById('status-text');
+
+    const tabStream = document.getElementById('tab-stream');
+    const tabSettings = document.getElementById('tab-settings');
+
+    const actCard = document.getElementById('act-card');
+    const cardTag = document.getElementById('card-tag');
+    const cardBadge = document.getElementById('card-badge');
+    const taskDesc = document.getElementById('task-desc');
+    const progressBar = document.getElementById('progress-bar');
+    const progressFill = document.getElementById('progress-fill');
+
+    const mCmds = document.getElementById('m-cmds');
+    const mCaps = document.getElementById('m-caps');
+    const mLat = document.getElementById('m-lat');
+
+    const logList = document.getElementById('log-list');
+    const termCopy = document.getElementById('term-copy');
+    const termClear = document.getElementById('term-clear');
+    const termCount = document.getElementById('term-count');
+    const termLatency = document.getElementById('term-latency');
+
+    // Settings elements
+    const segFull = document.getElementById('seg-full');
+    const segCompact = document.getElementById('seg-compact');
+    const toggleZoomTrack = document.getElementById('toggle-zoom-track');
+    const toggleZoomSet = document.getElementById('toggle-zoom-set');
+    const togglePlaceTrack = document.getElementById('toggle-place-track');
+    const togglePlaceSet = document.getElementById('toggle-place-set');
+    const serverUrlInput = document.getElementById('server-url-input');
+    const pingBtn = document.getElementById('ping-btn');
+
+    // Navigation elements
+    const navBtnStream = document.getElementById('nav-btn-stream');
+    const navBtnSettings = document.getElementById('nav-btn-settings');
+    const btnMiniMode = document.getElementById('btn-mini-mode');
+
+    // Compact elements
+    const compactPill = document.getElementById('compact-pill');
+    const compactDot = document.getElementById('compact-dot');
+    const compactText = document.getElementById('compact-text');
+    const compactFocusBtn = document.getElementById('compact-focus-btn');
+    const compactExpandBtn = document.getElementById('compact-expand-btn');
+
+    function getTime() {
+      const now = new Date();
+      return now.toTimeString().split(' ')[0];
+    }
+
+    function addLog(tagType, tagText, msg) {
+      totalLogs++;
+      const row = document.createElement('div');
+      row.className = 'log-row';
+      row.innerHTML = `<span class="log-time">${getTime()}</span><span class="tag ${tagType}">${tagText}</span><span class="log-text">${escapeHtml(msg)}</span>`;
+      logList.appendChild(row);
+      if (logList.children.length > 100) {
+        logList.removeChild(logList.firstChild);
+      }
+      requestAnimationFrame(() => {
+        logList.scrollTop = logList.scrollHeight;
+      });
+      termCount.textContent = `● ${totalLogs} events logged`;
+    }
+
+    function escapeHtml(str) {
+      return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    function setLogoColors(stroke, glow) {
+      isoMesh1.setAttribute('stroke', stroke);
+      isoMesh2.setAttribute('stroke', stroke);
+      isoMesh3.setAttribute('stroke', stroke);
+      isoGlow.setAttribute('fill', glow);
+    }
+
+    // Update Status across BOTH views (Full & Compact)
+    function setCardState(isBusy, text, isCapture = false) {
+      if (isBusy) {
+        if (isCapture) {
+          actCard.className = 'activity-card capture';
+          cardTag.className = 'card-tag capture';
+          cardTag.textContent = 'VISUAL FEEDBACK LOOP';
+          cardBadge.className = 'card-badge capture';
+          cardBadge.textContent = '📸 1.5x Vision';
+          taskDesc.className = 'task-desc busy';
+          taskDesc.textContent = text || 'Exporting canvas viewport PNG to AI context...';
+          progressBar.className = 'progress-bar active';
+          progressFill.className = 'progress-fill capture';
+
+          logoBox.className = 'logo-container capture';
+          setLogoColors('#C084FC', '#A855F7');
+
+          statusPill.className = 'status-pill capture';
+          statusDot.className = 'status-dot capture';
+          statusText.textContent = 'CAPTURE';
+
+          viewCompact.className = 'capture';
+          compactPill.className = 'compact-status-pill capture';
+          compactDot.className = 'compact-dot capture';
+          compactText.className = 'compact-label';
+          compactText.textContent = 'Capturing...';
+        } else {
+          actCard.className = 'activity-card busy';
+          cardTag.className = 'card-tag busy';
+          cardTag.textContent = 'CURRENT EXECUTION';
+          cardBadge.className = 'card-badge busy';
+          cardBadge.textContent = '🔮 Multi-Step Script';
+          taskDesc.className = 'task-desc busy';
+          taskDesc.textContent = text || 'Executing code in Figma sandbox...';
+          progressBar.className = 'progress-bar active';
+          progressFill.className = 'progress-fill';
+
+          logoBox.className = 'logo-container busy';
+          setLogoColors('#60A5FA', '#3B82F6');
+
+          statusPill.className = 'status-pill busy';
+          statusDot.className = 'status-dot busy';
+          statusText.textContent = 'BUSY';
+
+          viewCompact.className = 'busy';
+          compactPill.className = 'compact-status-pill busy';
+          compactDot.className = 'compact-dot busy';
+          compactText.className = 'compact-label';
+          compactText.textContent = 'Executing...';
+        }
+      } else {
+        actCard.className = 'activity-card';
+        cardTag.className = 'card-tag';
+        cardTag.textContent = 'AI ASSISTANT STATUS';
+        cardBadge.className = 'card-badge';
+        cardBadge.textContent = '⚡ Ready';
+        taskDesc.className = 'task-desc';
+        taskDesc.textContent = 'Listening on 127.0.0.1:8765. Ready for commands.';
+        progressBar.className = 'progress-bar';
+
+        logoBox.className = 'logo-container';
+        setLogoColors('#4ADE80', '#22C55E');
+
+        statusPill.className = 'status-pill';
+        statusDot.className = 'status-dot';
+        statusText.textContent = 'CONNECTED';
+
+        viewCompact.className = '';
+        compactPill.className = 'compact-status-pill';
+        compactDot.className = 'compact-dot';
+        compactText.className = 'compact-label';
+        compactText.textContent = 'Bridge Ready';
+      }
+    }
+
+    function setOfflineState(errMsg) {
+      actCard.className = 'activity-card error';
+      cardTag.className = 'card-tag error';
+      cardTag.textContent = 'CONNECTION ERROR';
+      cardBadge.className = 'card-badge error';
+      cardBadge.textContent = '⚠️ Server Down';
+      taskDesc.className = 'task-desc error';
+      taskDesc.textContent = errMsg || 'Cannot connect to 127.0.0.1:8765. Run install.py.';
+      progressBar.className = 'progress-bar';
+
+      logoBox.className = 'logo-container offline';
+      setLogoColors('#F87171', '#EF4444');
+
+      statusPill.className = 'status-pill offline';
+      statusDot.className = 'status-dot offline';
+      statusText.textContent = 'OFFLINE';
+
+      viewCompact.className = 'offline';
+      compactPill.className = 'compact-status-pill offline';
+      compactDot.className = 'compact-dot offline';
+      compactText.className = 'compact-label offline';
+      compactText.textContent = 'Server Offline';
+    }
+
+    // View Switching Logic (Full <-> Compact)
+    function switchView(viewName) {
+      currentView = viewName;
+      if (viewName === 'compact') {
+        viewFull.classList.add('hidden');
+        viewCompact.classList.remove('hidden');
+        parent.postMessage({ pluginMessage: { type: 'RESIZE_WINDOW', width: 260, height: 44 } }, '*');
+      } else {
+        viewCompact.classList.add('hidden');
+        viewFull.classList.remove('hidden');
+        parent.postMessage({ pluginMessage: { type: 'RESIZE_WINDOW', width: 360, height: 390 } }, '*');
+      }
+    }
+
+    // Tab Switching Logic (Stream <-> Settings)
+    function switchTab(tabName) {
+      currentTab = tabName;
+      if (tabName === 'settings') {
+        tabStream.classList.add('hidden');
+        tabSettings.classList.remove('hidden');
+        navBtnStream.classList.remove('active');
+        navBtnSettings.classList.add('active');
+        headerSub.textContent = 'Preferences • v3.1';
+      } else {
+        tabSettings.classList.add('hidden');
+        tabStream.classList.remove('hidden');
+        navBtnSettings.classList.remove('active');
+        navBtnStream.classList.add('active');
+        headerSub.textContent = 'Local :8765 • v3.1';
+      }
+    }
+
+    // Settings Save & Persistence
+    function savePreferences() {
+      const defaultView = segCompact.classList.contains('active') ? 'compact' : 'full';
+      const settings = {
+        defaultView,
+        autoZoom,
+        smartPlacement,
+        serverUrl: SERVER_URL
+      };
+      parent.postMessage({ pluginMessage: { type: 'SAVE_SETTINGS', settings } }, '*');
+    }
+
+    // Wire Navigation & View Events
+    navBtnStream.onclick = () => switchTab('stream');
+    navBtnSettings.onclick = () => switchTab('settings');
+    btnMiniMode.onclick = () => switchView('compact');
+    compactExpandBtn.onclick = () => switchView('full');
+
+    // Default View Selector
+    segFull.onclick = () => {
+      segFull.classList.add('active');
+      segCompact.classList.remove('active');
+      savePreferences();
+    };
+    segCompact.onclick = () => {
+      segCompact.classList.add('active');
+      segFull.classList.remove('active');
+      savePreferences();
+    };
+
+    // Auto-zoom Toggle (Settings & Compact)
+    function setAutoZoom(val) {
+      autoZoom = val;
+      toggleZoomTrack.className = autoZoom ? 'toggle-track active' : 'toggle-track';
+      compactFocusBtn.className = autoZoom ? 'icon-btn active' : 'icon-btn';
+      parent.postMessage({ pluginMessage: { type: 'SET_AUTO_ZOOM', value: autoZoom } }, '*');
+      addLog('sys', 'SYS', `Auto-zoom canvas: ${autoZoom ? 'ON' : 'OFF'}`);
+      savePreferences();
+    }
+    toggleZoomSet.onclick = () => setAutoZoom(!autoZoom);
+    compactFocusBtn.onclick = () => setAutoZoom(!autoZoom);
+
+    // Smart Placement Toggle
+    togglePlaceSet.onclick = () => {
+      smartPlacement = !smartPlacement;
+      togglePlaceTrack.className = smartPlacement ? 'toggle-track active' : 'toggle-track';
+      parent.postMessage({ pluginMessage: { type: 'SET_SMART_PLACEMENT', value: smartPlacement } }, '*');
+      addLog('sys', 'SYS', `Smart placement: ${smartPlacement ? 'ON' : 'OFF'}`);
+      savePreferences();
+    };
+
+    // Server URL Input
+    serverUrlInput.onchange = () => {
+      SERVER_URL = serverUrlInput.value.trim() || 'http://127.0.0.1:8765';
+      addLog('sys', 'SYS', `Bridge URL updated: ${SERVER_URL}`);
+      savePreferences();
+    };
+
+    // Robust Clipboard Copy Helper
+    async function copyToClipboard(text) {
+      if (navigator.clipboard && window.isSecureContext) {
+        try {
+          await navigator.clipboard.writeText(text);
+          return true;
+        } catch (e) {}
+      }
+      try {
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.style.position = 'fixed';
+        textarea.style.left = '-9999px';
+        textarea.style.top = '-9999px';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.focus();
+        textarea.select();
+        const ok = document.execCommand('copy');
+        document.body.removeChild(textarea);
+        return ok;
+      } catch (e) {
+        return false;
+      }
+    }
+
+    // Copy Logs
+    termCopy.onclick = async () => {
+      const rows = Array.from(logList.querySelectorAll('.log-row'));
+      const texts = rows.map(r => {
+        const time = r.querySelector('.log-time')?.textContent?.trim() || '';
+        const tag = r.querySelector('.tag')?.textContent?.trim() || '';
+        const text = r.querySelector('.log-text')?.textContent?.trim() || '';
+        return `${time} [${tag}] ${text}`;
+      }).join('\n');
+
+      const ok = await copyToClipboard(texts);
+      if (ok) {
+        termCopy.textContent = 'Copied!';
+        setTimeout(() => { termCopy.textContent = 'Copy'; }, 1500);
+      } else {
+        termCopy.textContent = 'Error';
+        setTimeout(() => { termCopy.textContent = 'Copy'; }, 1500);
+      }
+    };
+
+    // Clear Logs
+    termClear.onclick = () => {
+      logList.innerHTML = '';
+      totalLogs = 0;
+      addLog('sys', 'SYS', 'Logs cleared');
+    };
+
+    // Ping Bridge (WebSocket + HTTP Status)
+    pingBtn.onclick = async () => {
+      const t0 = performance.now();
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'PING', timestamp: Date.now() }));
+        addLog('ok', 'PING', 'WebSocket link operational (<1ms)');
+        mLat.textContent = '<1ms';
+        termLatency.textContent = 'Latency: <1ms';
+        if (statusText.textContent === 'OFFLINE') setCardState(false);
+      } else {
+        try {
+          const res = await fetch(withToken(`${SERVER_URL}/status`), { headers: tokenHeaders() });
+          const dt = Math.round(performance.now() - t0);
+          if (res.ok) {
+            addLog('ok', 'PING', `Local HTTP operational (${dt}ms)`);
+            mLat.textContent = `${dt}ms`;
+            termLatency.textContent = `Latency: ${dt}ms`;
+            connectWebSocket();
+          } else {
+            addLog('err', 'ERR', `Bridge returned HTTP ${res.status}`);
+          }
+        } catch (err) {
+          addLog('err', 'ERR', `Ping failed: ${err.message}`);
+          setOfflineState('Connection refused at ' + WS_URL);
+        }
+      }
+    };
+
+    // Appends the bridge token as a query param — the server accepts it there
+    // for the WS handshake and for browser fetches that cannot set a custom
+    // header on an OPTIONS-free request.
+    function withToken(url) {
+      if (!BRIDGE_TOKEN) return url;
+      const sep = url.includes('?') ? '&' : '?';
+      return `${url}${sep}token=${encodeURIComponent(BRIDGE_TOKEN)}`;
+    }
+
+    function tokenHeaders(extra) {
+      return BRIDGE_TOKEN ? { ...extra, 'X-Bridge-Token': BRIDGE_TOKEN } : { ...extra };
+    }
+
+    // ==========================================
+    // Full-Duplex Native WebSocket Engine (RFC 6455)
+    // ==========================================
+    let WS_URL = 'ws://127.0.0.1:8765';
+    let ws = null;
+    let reconnectTimer = null;
+    let pingInterval = null;
+
+    function connectWebSocket() {
+      if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) {
+        return;
+      }
+
+      try {
+        ws = new WebSocket(withToken(WS_URL));
+
+        ws.onopen = () => {
+          clearTimeout(reconnectTimer);
+          setCardState(false);
+          addLog('ok', 'WS', 'Full-duplex WebSocket active (:8765 • 0ms)');
+          termLatency.textContent = 'Latency: <1ms';
+          mLat.textContent = '<1ms';
+
+          // Notify server that client is ready
+          ws.send(JSON.stringify({ type: 'CLIENT_READY', timestamp: Date.now() }));
+
+          // Heartbeat every 10s to keep connection alive
+          clearInterval(pingInterval);
+          pingInterval = setInterval(() => {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: 'PING' }));
+            }
+          }, 10000);
+        };
+
+        ws.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            if (!data) return;
+
+            if (data.type === 'PONG') {
+              return;
+            }
+
+            if (data.id) {
+              const startTime = performance.now();
+              const desc = data.description || data.type || 'AI Command';
+              const isCap = data.capture === true || data.type === 'SCREENSHOT';
+              if (isCap) { capCount++; mCaps.textContent = capCount; }
+              else { cmdCount++; mCmds.textContent = cmdCount; }
+
+              const msgType = data.type || (data.code ? 'EXECUTE' : 'UNKNOWN');
+
+              if (isCap) {
+                setCardState(true, `📸 ${desc}...`, true);
+                addLog('shot', 'SHOT', desc);
+              } else {
+                setCardState(true, desc, false);
+                addLog('run', 'RUN', `${desc} (#${data.id.slice(0, 5)})`);
+              }
+
+              parent.postMessage({
+                pluginMessage: {
+                  ...data,
+                  type: msgType,
+                  autoZoom,
+                  startTime
+                }
+              }, '*');
+            }
+          } catch (err) {
+            addLog('err', 'ERR', `WS parse error: ${err.message}`);
+          }
+        };
+
+        ws.onerror = (err) => {
+          setOfflineState('WebSocket Connection Error');
+        };
+
+        ws.onclose = () => {
+          clearInterval(pingInterval);
+          setOfflineState('WebSocket Disconnected. Reconnecting...');
+          scheduleReconnect();
+        };
+      } catch (err) {
+        setOfflineState('Cannot connect to ' + WS_URL);
+        scheduleReconnect();
+      }
+    }
+
+    function scheduleReconnect() {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = setTimeout(() => {
+        connectWebSocket();
+      }, 1500);
+    }
+
+    // Wake up immediately and update active window on focus or visibility change
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'CLIENT_FOCUS', timestamp: Date.now() }));
+        } else {
+          connectWebSocket();
+        }
+      }
+    });
+
+    window.addEventListener('focus', () => {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'CLIENT_FOCUS', timestamp: Date.now() }));
+      } else {
+        connectWebSocket();
+      }
+    });
+
+    // Message from Figma Backend (Sandbox)
+    window.onmessage = async (event) => {
+      const msg = event.data.pluginMessage;
+      if (!msg) return;
+
+      if (msg.type === 'SETTINGS_LOADED') {
+        const s = msg.settings || {};
+        if (s.serverUrl) {
+          SERVER_URL = s.serverUrl;
+          WS_URL = s.serverUrl.replace(/^http/, 'ws');
+          serverUrlInput.value = s.serverUrl;
+        }
+        if (typeof s.autoZoom === 'boolean') {
+          autoZoom = s.autoZoom;
+          toggleZoomTrack.className = autoZoom ? 'toggle-track active' : 'toggle-track';
+          compactFocusBtn.className = autoZoom ? 'icon-btn active' : 'icon-btn';
+        }
+        if (typeof s.smartPlacement === 'boolean') {
+          smartPlacement = s.smartPlacement;
+          togglePlaceTrack.className = smartPlacement ? 'toggle-track active' : 'toggle-track';
+        }
+        if (s.defaultView === 'compact') {
+          segCompact.classList.add('active');
+          segFull.classList.remove('active');
+          switchView('compact');
+        }
+      }
+
+      if (msg.type === 'RESULT') {
+        setCardState(false);
+        const desc = msg.description || 'Command';
+        
+        if (msg.startTime) {
+          const latency = Math.round(performance.now() - msg.startTime);
+          mLat.textContent = `${latency}ms`;
+          termLatency.textContent = `Latency: ${latency}ms`;
+        }
+
+        if (msg.success) {
+          if (msg.screenshot || msg.screenshots) {
+            addLog('ok', 'OK', `${desc} finished`);
+            const targetInfo = msg.targetName ? `[${msg.targetName}]` : '';
+            addLog('shot', 'AI', `Rendered PNG ${targetInfo} sent to context`);
+          } else {
+            addLog('ok', 'OK', `${desc} finished`);
+          }
+        } else {
+          addLog('err', 'ERR', `Error: ${msg.error}`);
+        }
+
+        // Direct WebSocket Result Return (0ms)
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify(msg));
+        } else {
+          // HTTP Fallback
+          try {
+            await fetch(withToken(`${SERVER_URL}/result`), {
+              method: 'POST',
+              headers: tokenHeaders({ 'Content-Type': 'application/json' }),
+              body: JSON.stringify(msg)
+            });
+          } catch (e) {
+            addLog('err', 'ERR', `Failed to return result: ${e.message}`);
+          }
+        }
+      }
+    };
+
+    // Initialize: load stored settings & connect full-duplex WebSocket
+    parent.postMessage({ pluginMessage: { type: 'LOAD_SETTINGS' } }, '*');
+    connectWebSocket();
+  </script>
+</body>
+</html>

@@ -1,0 +1,13 @@
+node_modules/
+.DS_Store
+Thumbs.db
+*.log
+.env
+.env.local
+.vscode/
+.idea/
+planning/
+roadmap/
+internal/
+
+__pycache__/

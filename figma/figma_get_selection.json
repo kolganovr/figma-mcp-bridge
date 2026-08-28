@@ -1,0 +1,1 @@
+{"name":"figma_get_selection","description":"Get information and properties of the currently selected nodes in the open Figma canvas","parameters":{"properties":{},"type":"object"}}
