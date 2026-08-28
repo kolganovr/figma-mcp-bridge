@@ -980,6 +980,12 @@
   <!-- JAVASCRIPT ENGINE -->
   <script>
     let SERVER_URL = 'http://127.0.0.1:8765';
+    // Replaced with a real value by install.py when it copies this file into
+    // place. Left blank, the bridge server still rejects any non-Figma Origin,
+    // but the token closes the remaining gap for a sandboxed-iframe page that
+    // can also present Origin: "null". Keep this exact literal — install.py
+    // matches it verbatim to know where to inject the token.
+    const BRIDGE_TOKEN = "";
 
     // State
     let cmdCount = 0;
@@ -1332,7 +1338,7 @@
         if (statusText.textContent === 'OFFLINE') setCardState(false);
       } else {
         try {
-          const res = await fetch(`${SERVER_URL}/status`);
+          const res = await fetch(withToken(`${SERVER_URL}/status`), { headers: tokenHeaders() });
           const dt = Math.round(performance.now() - t0);
           if (res.ok) {
             addLog('ok', 'PING', `Local HTTP operational (${dt}ms)`);
@@ -1349,6 +1355,19 @@
       }
     };
 
+    // Appends the bridge token as a query param — the server accepts it there
+    // for the WS handshake and for browser fetches that cannot set a custom
+    // header on an OPTIONS-free request.
+    function withToken(url) {
+      if (!BRIDGE_TOKEN) return url;
+      const sep = url.includes('?') ? '&' : '?';
+      return `${url}${sep}token=${encodeURIComponent(BRIDGE_TOKEN)}`;
+    }
+
+    function tokenHeaders(extra) {
+      return BRIDGE_TOKEN ? { ...extra, 'X-Bridge-Token': BRIDGE_TOKEN } : { ...extra };
+    }
+
     // ==========================================
     // Full-Duplex Native WebSocket Engine (RFC 6455)
     // ==========================================
@@ -1363,7 +1382,7 @@
       }
 
       try {
-        ws = new WebSocket(WS_URL);
+        ws = new WebSocket(withToken(WS_URL));
 
         ws.onopen = () => {
           clearTimeout(reconnectTimer);
@@ -1521,9 +1540,9 @@
         } else {
           // HTTP Fallback
           try {
-            await fetch(`${SERVER_URL}/result`, {
+            await fetch(withToken(`${SERVER_URL}/result`), {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
+              headers: tokenHeaders({ 'Content-Type': 'application/json' }),
               body: JSON.stringify(msg)
             });
           } catch (e) {

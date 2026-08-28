@@ -8,7 +8,13 @@ function toHexByte(n) {
 }
 
 /**
- * Converts Figma color object {r, g, b, a} to Hex or CSS string
+ * Converts Figma color object {r, g, b, a} to Hex or CSS string.
+ *
+ * The REST API carries transparency in TWO independent places: `color.a` on the
+ * colour itself and `opacity` on the Paint wrapping it. `color.a` is emitted on
+ * every solid paint (almost always 1), so reading only it silently discarded
+ * every paint-level opacity — a 20% scrim came back as opaque #000000.
+ * They multiply, exactly like Figma composites them.
  */
 function formatColor(color, opacity = 1) {
   if (!color || typeof color !== 'object') return null;
@@ -16,9 +22,11 @@ function formatColor(color, opacity = 1) {
   const r = toHexByte(color.r || 0);
   const g = toHexByte(color.g || 0);
   const b = toHexByte(color.b || 0);
-  const a = typeof color.a === 'number' ? color.a : opacity;
+  const channelAlpha = typeof color.a === 'number' ? color.a : 1;
+  const paintAlpha = typeof opacity === 'number' ? opacity : 1;
+  const a = channelAlpha * paintAlpha;
 
-  if (a !== undefined && a < 0.99) {
+  if (a < 0.99) {
     const alphaRound = Math.round(a * 100) / 100;
     return `rgba(${Math.round((color.r || 0) * 255)}, ${Math.round((color.g || 0) * 255)}, ${Math.round((color.b || 0) * 255)}, ${alphaRound})`;
   }
@@ -39,9 +47,10 @@ function formatPaint(paint) {
 
   if (paint.type && paint.type.startsWith('GRADIENT_')) {
     const type = paint.type.toLowerCase().replace('gradient_', '');
+    const gradientOpacity = typeof paint.opacity === 'number' ? paint.opacity : 1;
     if (paint.gradientStops && Array.isArray(paint.gradientStops)) {
       const stops = paint.gradientStops.map(s => {
-        const col = formatColor(s.color);
+        const col = formatColor(s.color, gradientOpacity);
         const pos = Math.round((s.position || 0) * 100);
         return `${col} ${pos}%`;
       }).join(', ');
@@ -81,8 +90,14 @@ function formatTypography(style) {
   }
   if (style.italic) parts.push('Italic');
   if (style.fontSize) parts.push(`${Math.round(style.fontSize)}px`);
-  if (style.lineHeightPx && Math.round(style.lineHeightPx) !== Math.round(style.fontSize * 1.2)) {
-    parts.push(`lh=${Math.round(style.lineHeightPx)}px`);
+  // Only omit line-height when it matches the implicit 1.2 default; with no
+  // fontSize to compare against, `fontSize * 1.2` was NaN and the check always
+  // passed, emitting a redundant lh= on every such node.
+  if (style.lineHeightPx) {
+    const implicitLh = typeof style.fontSize === 'number' ? Math.round(style.fontSize * 1.2) : null;
+    if (implicitLh === null || Math.round(style.lineHeightPx) !== implicitLh) {
+      parts.push(`lh=${Math.round(style.lineHeightPx)}px`);
+    }
   }
   if (style.letterSpacing && Math.abs(style.letterSpacing) > 0.01) {
     parts.push(`ls=${Math.round(style.letterSpacing * 100) / 100}px`);

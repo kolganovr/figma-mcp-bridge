@@ -14,25 +14,25 @@
 
 ```mermaid
 flowchart LR
-    subgraph AI["🤖 AI Coding Assistant"]
+    subgraph AI ["🤖 AI Coding Assistant"]
         LLM["Antigravity / Claude / Cursor"]
     end
 
-    subgraph Bridge["⚡ MCP Server (Node.js)"]
-        Server["JSON-RPC Engine\n(stdio + WebSocket :8765)"]
+    subgraph Bridge ["⚡ MCP Server (Node.js)"]
+        Server["JSON-RPC Engine<br/>(stdio + WebSocket :8765)"]
     end
 
-    subgraph Figma["🎨 Figma Canvas"]
-        Plugin["Bridge Plugin\n(Cockpit HUD)"]
-        Canvas["Live Nodes &\nAutoLayout Engine"]
+    subgraph Figma ["🎨 Figma Canvas"]
+        Plugin["Bridge Plugin<br/>(Cockpit HUD)"]
+        Canvas["Live Nodes &<br/>AutoLayout Engine"]
     end
 
-    LLM -->|"figma_execute_code(JS)"| Server
-    Server -->|"Full-Duplex WS (0ms)"| Plugin
-    Plugin -->|"Execute in Sandbox"| Canvas
-    Canvas -->|"Export PNG (1.5x)"| Plugin
-    Plugin -->|"WebSocket Result (PNG)"| Server
-    Server -->|"Visual Critique Return"| LLM
+    LLM -->|figma_execute_code| Server
+    Server -->|Full-Duplex WS| Plugin
+    Plugin -->|Execute in Sandbox| Canvas
+    Canvas -->|Export PNG| Plugin
+    Plugin -->|WebSocket Result| Server
+    Server -->|Visual Critique Return| LLM
 ```
 
 - **⚡ Full-Duplex Native WebSocket:** Zero-dependency RFC 6455 socket engine on port `:8765`. Instant Server-Push (< 1 ms latency), auto-reconnect, and immune to Electron background tab throttling.

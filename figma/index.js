@@ -11,7 +11,60 @@ const FIGMA_TOKEN = process.env.FIGMA_PERSONAL_ACCESS_TOKEN || process.env.FIGMA
 // Figma Live Plugin Bridge (HTTP + WebSocket Server)
 // ==========================================
 const BRIDGE_PORT = parseInt(process.env.FIGMA_BRIDGE_PORT, 10) || 8765;
-let pendingCommand = null;
+
+// ------------------------------------------------------------------
+// Access control.
+//
+// /execute takes an arbitrary JS string and runs it inside the user's open
+// Figma document. Bound to loopback that is still reachable by ANY web page the
+// user happens to have open, so without these two gates a visited site could
+// read, rewrite or delete their design (and open a WebSocket to impersonate the
+// plugin). Two independent checks:
+//
+//   1. Origin allowlist — a browser cannot forge Origin, so a page on evil.com
+//      is rejected outright. Figma's plugin iframe sends "null" or figma.com.
+//   2. Shared token — install.py generates one, puts it in the MCP config env
+//      and bakes the same value into the installed plugin UI. This also covers
+//      the sandboxed-iframe case, where a hostile page can also present "null".
+//
+// With no token configured (running straight from a clone) the Origin gate
+// still applies and a warning is printed, so the bridge degrades rather than
+// silently becoming wide open.
+// ------------------------------------------------------------------
+const BRIDGE_TOKEN = (process.env.FIGMA_BRIDGE_TOKEN || "").trim();
+const ALLOWED_ORIGINS = new Set(["null", "https://www.figma.com", "https://figma.com"]);
+
+// A single frame must not be able to exhaust memory before we can reject it.
+const MAX_WS_MESSAGE_BYTES = 64 * 1024 * 1024;
+const MAX_HTTP_BODY_BYTES = 64 * 1024 * 1024;
+
+function isOriginAllowed(req) {
+  const origin = req.headers["origin"];
+  // Non-browser callers (our own proxy fetch, curl) send no Origin at all.
+  if (!origin) return true;
+  return ALLOWED_ORIGINS.has(origin.toLowerCase());
+}
+
+function hasValidToken(req) {
+  if (!BRIDGE_TOKEN) return true;
+  const headerToken = req.headers["x-bridge-token"];
+  if (typeof headerToken === "string" && headerToken === BRIDGE_TOKEN) return true;
+  try {
+    const url = new URL(req.url, `http://127.0.0.1:${BRIDGE_PORT}`);
+    return url.searchParams.get("token") === BRIDGE_TOKEN;
+  } catch (e) {
+    return false;
+  }
+}
+
+function isAuthorized(req) {
+  return isOriginAllowed(req) && hasValidToken(req);
+}
+
+// Commands queue instead of overwriting a single slot: two tool calls issued
+// while the plugin is offline used to clobber each other, and the loser only
+// surfaced as a timeout 40s later.
+const pendingCommands = [];
 let commandResolvers = new Map();
 let lastPluginPing = 0;
 const wsClients = new Set();
@@ -44,6 +97,13 @@ function handleWsUpgrade(req, socket, head) {
     return;
   }
 
+  if (!isAuthorized(req)) {
+    // Refuse before the handshake so a hostile page never gets a live socket.
+    socket.write("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
+    socket.destroy();
+    return;
+  }
+
   const GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
   const accept = crypto.createHash("sha1").update(key + GUID).digest("base64");
   const responseHeaders = [
@@ -61,6 +121,10 @@ function handleWsUpgrade(req, socket, head) {
     socket,
     lastSeen: Date.now(),
     buffer: Buffer.alloc(0),
+    // Reassembly state for fragmented messages (FIN=0 + continuation frames).
+    fragments: [],
+    fragmentOpcode: 0,
+    fragmentBytes: 0,
     send(msg) {
       try {
         if (socket.writable) {
@@ -73,11 +137,9 @@ function handleWsUpgrade(req, socket, head) {
   wsClients.add(client);
   lastPluginPing = Date.now();
 
-  // If there is a pending command waiting for connection, dispatch immediately (0ms)
-  if (pendingCommand) {
-    const cmd = pendingCommand;
-    pendingCommand = null;
-    client.send(cmd);
+  // Flush everything queued while nothing was connected (0ms dispatch).
+  while (pendingCommands.length > 0) {
+    client.send(pendingCommands.shift());
   }
 
   socket.on("data", (chunk) => {
@@ -88,6 +150,7 @@ function handleWsUpgrade(req, socket, head) {
     while (client.buffer.length >= 2) {
       const byte0 = client.buffer[0];
       const byte1 = client.buffer[1];
+      const isFinal = (byte0 & 0x80) !== 0;
       const opcode = byte0 & 0x0f;
       const isMasked = (byte1 & 0x80) !== 0;
       let payloadLen = byte1 & 0x7f;
@@ -101,6 +164,13 @@ function handleWsUpgrade(req, socket, head) {
         if (client.buffer.length < 10) break;
         payloadLen = Number(client.buffer.readBigUInt64BE(2));
         offset = 10;
+      }
+
+      if (payloadLen > MAX_WS_MESSAGE_BYTES) {
+        console.error(`[Figma MCP Bridge] Dropping oversized WebSocket frame (${payloadLen} bytes).`);
+        socket.destroy();
+        wsClients.delete(client);
+        return;
       }
 
       let maskKey = null;
@@ -133,13 +203,38 @@ function handleWsUpgrade(req, socket, head) {
         if (socket.writable) {
           socket.write(Buffer.from([0x8a, 0x00]));
         }
-      } else if (opcode === 0x1) {
-        // Text frame
-        try {
-          const text = payload.toString("utf8");
-          const data = JSON.parse(text);
-          handleClientMessage(client, data);
-        } catch (err) {}
+      } else if (opcode === 0xa) {
+        // Pong — liveness only, already recorded via lastSeen above.
+      } else if (opcode === 0x0 || opcode === 0x1 || opcode === 0x2) {
+        // Data frame. A large screenshot can arrive split across a FIN=0 frame
+        // plus continuation frames; treating each fragment as a whole message
+        // silently dropped it and the tool call timed out 40s later.
+        if (opcode !== 0x0) {
+          client.fragments = [];
+          client.fragmentBytes = 0;
+          client.fragmentOpcode = opcode;
+        }
+
+        client.fragments.push(payload);
+        client.fragmentBytes += payload.length;
+
+        if (client.fragmentBytes > MAX_WS_MESSAGE_BYTES) {
+          console.error(`[Figma MCP Bridge] Dropping oversized fragmented message (${client.fragmentBytes} bytes).`);
+          socket.destroy();
+          wsClients.delete(client);
+          return;
+        }
+
+        if (isFinal) {
+          const full = client.fragments.length === 1 ? client.fragments[0] : Buffer.concat(client.fragments);
+          client.fragments = [];
+          client.fragmentBytes = 0;
+          if (client.fragmentOpcode === 0x1) {
+            try {
+              handleClientMessage(client, JSON.parse(full.toString("utf8")));
+            } catch (err) {}
+          }
+        }
       }
     }
   });
@@ -174,51 +269,91 @@ function handleClientMessage(client, data) {
   }
 }
 
+// Reads a request body with a hard ceiling, so a hostile or runaway client
+// cannot grow an unbounded string in memory.
+function readBody(req, limit = MAX_HTTP_BODY_BYTES) {
+  return new Promise((resolve, reject) => {
+    let body = "";
+    let size = 0;
+    req.on("data", chunk => {
+      size += chunk.length;
+      if (size > limit) {
+        reject(new Error(`Request body exceeds ${limit} bytes`));
+        req.destroy();
+        return;
+      }
+      body += chunk;
+    });
+    req.on("end", () => resolve(body));
+    req.on("error", reject);
+  });
+}
+
 const bridgeServer = http.createServer((req, res) => {
-  // Enable CORS for Figma plugin UI
-  res.setHeader("Access-Control-Allow-Origin", "*");
+  // CORS is echoed back only for origins we actually trust — "*" turned every
+  // page the user visits into a client of /execute.
+  const origin = req.headers["origin"];
+  if (origin && ALLOWED_ORIGINS.has(origin.toLowerCase())) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+  }
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Bridge-Token");
 
   if (req.method === "OPTIONS") {
-    res.writeHead(204);
+    res.writeHead(isOriginAllowed(req) ? 204 : 403);
     return res.end();
   }
 
+  // The query string now carries ?token=, so route on the pathname alone.
+  let pathname = req.url || "/";
+  const queryStart = pathname.indexOf("?");
+  if (queryStart !== -1) pathname = pathname.substring(0, queryStart);
+
+  if (!isAuthorized(req)) {
+    res.writeHead(403, { "Content-Type": "application/json" });
+    return res.end(JSON.stringify({
+      error: "Forbidden: the Figma bridge only accepts requests from the Antigravity Bridge plugin. " +
+             "If you are the plugin, make sure install.py baked the matching bridge token into it."
+    }));
+  }
+
   // HTTP Long-Polling Fallback
-  if (req.url === "/poll" && req.method === "GET") {
+  if (pathname === "/poll" && req.method === "GET") {
     lastPluginPing = Date.now();
-    if (pendingCommand) {
-      const cmd = pendingCommand;
-      pendingCommand = null;
+    if (pendingCommands.length > 0) {
       res.writeHead(200, { "Content-Type": "application/json" });
-      return res.end(JSON.stringify(cmd));
+      return res.end(JSON.stringify(pendingCommands.shift()));
     }
 
+    let idleTimer = null;
     const checkInterval = setInterval(() => {
-      if (pendingCommand) {
+      if (pendingCommands.length > 0) {
         clearInterval(checkInterval);
-        const cmd = pendingCommand;
-        pendingCommand = null;
+        clearTimeout(idleTimer);
         res.writeHead(200, { "Content-Type": "application/json" });
-        return res.end(JSON.stringify(cmd));
+        return res.end(JSON.stringify(pendingCommands.shift()));
       }
     }, 100);
 
-    setTimeout(() => {
+    idleTimer = setTimeout(() => {
       clearInterval(checkInterval);
       if (!res.writableEnded) {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ status: "idle" }));
       }
     }, 10000);
+
+    // A client that hangs up mid-poll must not leave the interval spinning.
+    req.on("close", () => {
+      clearInterval(checkInterval);
+      clearTimeout(idleTimer);
+    });
     return;
   }
 
-  if (req.url === "/result" && req.method === "POST") {
-    let body = "";
-    req.on("data", chunk => { body += chunk; });
-    req.on("end", () => {
+  if (pathname === "/result" && req.method === "POST") {
+    readBody(req).then((body) => {
       try {
         const data = JSON.parse(body);
         const resolver = commandResolvers.get(data.id);
@@ -232,14 +367,16 @@ const bridgeServer = http.createServer((req, res) => {
         res.writeHead(400, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: err.message }));
       }
+    }).catch((err) => {
+      if (res.writableEnded) return;
+      res.writeHead(413, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: err.message }));
     });
     return;
   }
 
-  if (req.url === "/execute" && req.method === "POST") {
-    let body = "";
-    req.on("data", chunk => { body += chunk; });
-    req.on("end", async () => {
+  if (pathname === "/execute" && req.method === "POST") {
+    readBody(req).then(async (body) => {
       try {
         const payload = JSON.parse(body);
         const result = await sendCommandToPlugin(payload, payload.timeoutMs || 45000);
@@ -249,11 +386,15 @@ const bridgeServer = http.createServer((req, res) => {
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ success: false, error: err.message }));
       }
+    }).catch((err) => {
+      if (res.writableEnded) return;
+      res.writeHead(413, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ success: false, error: err.message }));
     });
     return;
   }
 
-  if (req.url === "/status") {
+  if (pathname === "/status") {
     const isOnline = wsClients.size > 0 || (Date.now() - lastPluginPing) < 60000;
     res.writeHead(200, { "Content-Type": "application/json" });
     return res.end(JSON.stringify({
@@ -278,19 +419,47 @@ bridgeServer.on("upgrade", (req, socket, head) => {
 });
 
 let isBridgeMaster = false;
+let listenAttemptInFlight = false;
 
 bridgeServer.on("error", (err) => {
   if (err.code === "EADDRINUSE") {
     isBridgeMaster = false;
+    listenAttemptInFlight = false;
     console.error(`[Figma MCP Bridge] Port ${BRIDGE_PORT} is already in use. Forwarding commands to existing bridge instance.`);
   } else {
     console.error(`[Figma MCP Bridge] Server error:`, err);
   }
 });
 
-bridgeServer.listen(BRIDGE_PORT, "127.0.0.1", () => {
-  isBridgeMaster = true;
-});
+// Multiple agents (Antigravity, Claude Desktop, Cursor, ...) each spawn their own
+// copy of this server; the first one to bind :8765 owns the plugin socket and the
+// rest proxy to it. When the owner exits, one of the proxies has to be able to
+// take the port over — previously `isBridgeMaster` was latched to false forever,
+// so every surviving agent stayed permanently broken until it was restarted.
+function tryBecomeMaster() {
+  if (isBridgeMaster || listenAttemptInFlight) return;
+  listenAttemptInFlight = true;
+  try {
+    bridgeServer.listen(BRIDGE_PORT, "127.0.0.1", () => {
+      isBridgeMaster = true;
+      listenAttemptInFlight = false;
+      if (!BRIDGE_TOKEN) {
+        console.error(
+          "[Figma MCP Bridge] WARNING: no FIGMA_BRIDGE_TOKEN configured. " +
+          "Only the Origin allowlist is protecting :8765 — re-run install.py to provision a token."
+        );
+      }
+    });
+  } catch (e) {
+    listenAttemptInFlight = false;
+  }
+}
+
+tryBecomeMaster();
+
+// Cheap safety net for the case where the owner dies while this process is idle.
+const masterWatchdog = setInterval(tryBecomeMaster, 5000);
+if (masterWatchdog.unref) masterWatchdog.unref();
 
 const cleanup = () => {
   try { bridgeServer.close(); } catch (e) {}
@@ -305,17 +474,31 @@ async function sendCommandToPlugin(payload, timeoutMs = 45000) {
     try {
       const res = await fetch(`http://127.0.0.1:${BRIDGE_PORT}/execute`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(BRIDGE_TOKEN ? { "X-Bridge-Token": BRIDGE_TOKEN } : {})
+        },
         body: JSON.stringify({ ...payload, timeoutMs })
       });
       if (!res.ok) {
         const errText = await res.text();
-        throw new Error(`Bridge proxy error: ${errText}`);
+        let detail = errText;
+        try { detail = JSON.parse(errText).error || errText; } catch (e) {}
+        throw new Error(`Bridge proxy error (HTTP ${res.status}): ${detail}`);
       }
       const data = await res.json();
       if (data.success) return data;
       throw new Error(data.error || "Execution failed in Figma sandbox");
     } catch (err) {
+      // The owner of :8765 is gone — claim the port ourselves so the NEXT call
+      // succeeds instead of failing forever.
+      const cause = err && err.cause ? err.cause.code : null;
+      if (cause === "ECONNREFUSED" || cause === "ECONNRESET" || /fetch failed/i.test(err.message || "")) {
+        tryBecomeMaster();
+        throw new Error(
+          "The bridge instance that owned :8765 is no longer running. This server is taking the port over — retry the call."
+        );
+      }
       throw new Error(err.message || "Failed to communicate with Figma Bridge server on :8765");
     }
   }
@@ -326,9 +509,8 @@ async function sendCommandToPlugin(payload, timeoutMs = 45000) {
 
     const timer = setTimeout(() => {
       commandResolvers.delete(id);
-      if (pendingCommand && pendingCommand.id === id) {
-        pendingCommand = null;
-      }
+      const queuedAt = pendingCommands.findIndex(c => c.id === id);
+      if (queuedAt !== -1) pendingCommands.splice(queuedAt, 1);
       reject(new Error("Timeout waiting for Figma Plugin response. Ensure Figma is active and Antigravity Bridge plugin is running."));
     }, timeoutMs);
 
@@ -347,7 +529,7 @@ async function sendCommandToPlugin(payload, timeoutMs = 45000) {
       activeClient.send(cmd);
     } else {
       // 2. Queue for incoming WebSocket connection or HTTP long-poll
-      pendingCommand = cmd;
+      pendingCommands.push(cmd);
     }
   });
 }
@@ -395,13 +577,16 @@ const TOOLS = [
   // 1. Live Canvas Tools
   {
     name: "figma_execute_code",
-    description: "EXECUTE LIVE JAVASCRIPT inside the open Figma document to create, edit, move, style, color, or delete any canvas elements (requires 'Antigravity Bridge' plugin running in Figma Desktop). Injected globals: `figma`, `await ensureFont(family, style)`, `getFreePosition(w, h)`, `bridge`. EXECUTION MODEL: each call is compiled as a FRESH async function body - top-level `await` and `return` work, but `const`/`let`/`var`/`function` declarations DO NOT survive into the next call, and `eval()` is bound inside the Figma sandbox (always an indirect eval), so anything declared inside an eval string is invisible everywhere - never build helpers with eval. To reuse code across calls: `bridge.define(\'kit\', \'function mk(){...}; module.exports = { mk }\')` once, then `const kit = bridge.require(\'kit\')` later; `bridge.store.set/get(key, value)` for durable JSON in the document, `bridge.state` for scratch. Platform helpers: `bridge.componentize(node)` (createComponentFromNode without losing AutoLayout sizing), `bridge.setPosition(node, x, y)` (Figma forbids x/y on children of an INSTANCE - use AutoLayout alignment instead). Run `return bridge.info()` to read the full runtime contract. Set 'capture: true' to automatically capture a PNG screenshot of the resulting UI elements for visual feedback loop.",
+    // Kept deliberately short. The full execution model lives in
+    // SERVER_INSTRUCTIONS, which the client receives once on `initialize`;
+    // repeating it here re-sent ~1.2k tokens of identical prose on every turn.
+    description: "EXECUTE LIVE JAVASCRIPT inside the open Figma document to create, edit, move, style, color or delete canvas elements (requires the 'Antigravity Bridge' plugin running in Figma Desktop). Injected globals: `figma`, `await ensureFont(family, style)`, `getFreePosition(w, h)`, `bridge`. Each call is a FRESH async function body — declarations do not survive into the next call; persist helpers with `bridge.define`/`bridge.require` and never use `eval`. Run `return bridge.info()` for the full runtime contract, or read this server's instructions. Set `capture: true` to get a PNG back for visual verification.",
     inputSchema: {
       type: "object",
       properties: {
         code: {
           type: "string",
-          description: "JavaScript code to execute in Figma sandbox, compiled as an async function body (top-level await and return allowed; import/export are not). Example: const frame = figma.createFrame(); frame.resize(400, 600); frame.name = 'Card'; figma.currentPage.appendChild(frame); figma.currentPage.selection = [frame]; figma.viewport.scrollAndZoomIntoView([frame]); return 'Created frame'; — Helpers you declare here are gone on the next call: persist them with bridge.define(name, source) and reload with bridge.require(name)."
+          description: "JavaScript to run in the Figma sandbox, compiled as an async function body (top-level await and return allowed; import/export are not). Example: const frame = figma.createFrame(); frame.resize(400, 600); frame.name = 'Card'; figma.currentPage.appendChild(frame); figma.currentPage.selection = [frame]; return 'Created frame';"
         },
         description: {
           type: "string",
@@ -543,6 +728,10 @@ const TOOLS = [
         collection_name: {
           type: "string",
           description: "Optional filter by variable collection name (e.g. 'Theme', 'Tokens', 'Spacing')"
+        },
+        limit: {
+          type: "number",
+          description: "Maximum number of tokens to return across all matched collections, to prevent token bloat on large design-token files (default: 300)"
         }
       }
     }
@@ -654,6 +843,10 @@ const TOOLS = [
         gap: {
           type: "number",
           description: "Spacing in pixels between artboards (default: 80)"
+        },
+        limit: {
+          type: "number",
+          description: "Maximum number of artboards to list, to prevent token bloat on pages with hundreds of frames (default: 200)"
         }
       }
     }
@@ -679,7 +872,8 @@ const TOOLS = [
           description: "Output format: 'jsx' (clean semantic Pseudo-JSX, default), 'tree' (indented text tree), 'json' (pruned JSON), or 'raw' (unmodified raw Figma API response)"
         },
         simplify: { type: "boolean", description: "Whether to apply token pruning and vector collapsing (default: true)" },
-        include_hidden: { type: "boolean", description: "Whether to include hidden layers (default: false)" }
+        include_hidden: { type: "boolean", description: "Whether to include hidden layers (default: false)" },
+        max_depth: { type: "number", description: "Hard cap on tree traversal depth before nodes are truncated (default: 25)" }
       },
       required: ["file_key"]
     }
@@ -699,7 +893,8 @@ const TOOLS = [
           description: "Output format: 'jsx' (clean semantic Pseudo-JSX, default), 'tree' (indented text tree), 'json' (pruned JSON), or 'raw' (unmodified raw Figma API response)"
         },
         simplify: { type: "boolean", description: "Whether to apply token pruning and vector collapsing (default: true)" },
-        include_hidden: { type: "boolean", description: "Whether to include hidden layers (default: false)" }
+        include_hidden: { type: "boolean", description: "Whether to include hidden layers (default: false)" },
+        max_depth: { type: "number", description: "Hard cap on tree traversal depth before nodes are truncated (default: 25)" }
       },
       required: ["file_key"]
     }
@@ -815,6 +1010,16 @@ const SERVER_ERROR_HINTS = [
   }
 ];
 
+// node_ids is declared as a comma-separated string, but models (and the older
+// README) reach for an array often enough that rejecting one is pure friction —
+// and it used to blow up on `.trim is not a function` deep inside the plugin.
+function normalizeNodeIds(value) {
+  if (value == null) return null;
+  const raw = Array.isArray(value) ? value.join(",") : String(value);
+  const ids = raw.split(",").map(s => s.trim().replace(/-/g, ":")).filter(Boolean);
+  return ids.length > 0 ? ids.join(",") : null;
+}
+
 function withServerHint(message) {
   if (/\bHINT:/.test(message)) return message; // plugin already explained it
   for (const rule of SERVER_ERROR_HINTS) {
@@ -860,7 +1065,7 @@ async function handleCallTool(name, args = {}) {
         const desc = args.description || "Figma Screenshot";
         const response = await sendCommandToPlugin({
           type: "SCREENSHOT",
-          nodeIds: args.node_ids,
+          nodeIds: normalizeNodeIds(args.node_ids),
           scale: args.scale || 1.5,
           description: desc
         }, 40000);
@@ -916,9 +1121,18 @@ async function handleCallTool(name, args = {}) {
       }
 
       case "figma_create_ui_card": {
+        // Every user-supplied string below is spliced into generated JS source.
+        // Escaping only double quotes let a backslash ("C:\Users\x") or a newline
+        // produce a SyntaxError — and a trailing backslash escape the closing
+        // quote. JSON.stringify emits a complete, correctly escaped JS literal.
+        const jsStr = (value) => JSON.stringify(String(value == null ? "" : value));
+
         const hexToRgb = (hex) => {
-          let c = hex.replace("#", "");
+          let c = String(hex || "").trim().replace("#", "");
           if (c.length === 3) c = c.split("").map(x => x + x).join("");
+          if (!/^[0-9a-fA-F]{6}$/.test(c)) {
+            throw new Error(`Invalid hex color "${hex}". Use a 3- or 6-digit hex value such as "#F5F0FF".`);
+          }
           const num = parseInt(c, 16);
           return { r: ((num >> 16) & 255) / 255, g: ((num >> 8) & 255) / 255, b: (num & 255) / 255 };
         };
@@ -928,13 +1142,17 @@ async function handleCallTool(name, args = {}) {
         const badgeText = args.badge_text || "✨ Live Bridge";
         const buttonText = args.button_text || "Explore Features →";
         const bgColor = args.bg_color || "#F5F0FF";
-        const width = args.width || 400;
+        // Numbers are interpolated bare into the generated source, so coerce
+        // rather than trusting the client to have honoured the schema.
+        const width = Number.isFinite(Number(args.width)) && Number(args.width) > 0
+          ? Math.round(Number(args.width))
+          : 400;
 
         const rgb = hexToRgb(bgColor);
 
         const code = `
           const card = figma.createFrame();
-          card.name = "UI Card - ${title.replace(/"/g, '\\"')}";
+          card.name = "UI Card - " + ${jsStr(title)};
           card.layoutMode = "VERTICAL";
           card.primaryAxisSizingMode = "AUTO";
           card.counterAxisSizingMode = "FIXED";
@@ -972,7 +1190,7 @@ async function handleCallTool(name, args = {}) {
           badge.fills = [{ type: 'SOLID', color: { r: 0.90, g: 0.84, b: 0.98 } }];
 
           const badgeTextNode = figma.createText();
-          badgeTextNode.characters = "${badgeText.replace(/"/g, '\\"')}";
+          badgeTextNode.characters = ${jsStr(badgeText)};
           badgeTextNode.fontSize = 11;
           badgeTextNode.fontName = { family: "Inter", style: "Medium" };
           badgeTextNode.fills = [{ type: 'SOLID', color: { r: 0.45, g: 0.25, b: 0.75 } }];
@@ -981,7 +1199,7 @@ async function handleCallTool(name, args = {}) {
           ` : ""}
 
           const titleText = figma.createText();
-          titleText.characters = "${title.replace(/"/g, '\\"')}";
+          titleText.characters = ${jsStr(title)};
           titleText.fontSize = 22;
           titleText.fontName = { family: "Inter", style: "Bold" };
           titleText.fills = [{ type: 'SOLID', color: { r: 0.15, g: 0.12, b: 0.25 } }];
@@ -989,7 +1207,7 @@ async function handleCallTool(name, args = {}) {
 
           ${subtitle ? `
           const subText = figma.createText();
-          subText.characters = "${subtitle.replace(/"/g, '\\"')}";
+          subText.characters = ${jsStr(subtitle)};
           subText.fontSize = 14;
           subText.fontName = { family: "Inter", style: "Regular" };
           subText.fills = [{ type: 'SOLID', color: { r: 0.45, g: 0.42, b: 0.55 } }];
@@ -1015,7 +1233,7 @@ async function handleCallTool(name, args = {}) {
           btn.fills = [{ type: 'SOLID', color: { r: 0.55, g: 0.40, b: 0.95 } }];
 
           const btnText = figma.createText();
-          btnText.characters = "${buttonText.replace(/"/g, '\\"')}";
+          btnText.characters = ${jsStr(buttonText)};
           btnText.fontSize = 14;
           btnText.fontName = { family: "Inter", style: "Medium" };
           btnText.fills = [{ type: 'SOLID', color: { r: 1, g: 1, b: 1 } }];
@@ -1107,7 +1325,8 @@ async function handleCallTool(name, args = {}) {
       case "figma_get_variables": {
         const response = await sendCommandToPlugin({
           type: "GET_VARIABLES",
-          collection_name: args.collection_name
+          collection_name: args.collection_name,
+          limit: args.limit || 300
         }, 30000);
 
         return {
@@ -1191,7 +1410,8 @@ async function handleCallTool(name, args = {}) {
         const response = await sendCommandToPlugin({
           type: "GET_CANVAS_LAYOUT",
           direction: args.direction || "RIGHT",
-          gap: args.gap || 80
+          gap: args.gap || 80,
+          limit: args.limit || 200
         }, 30000);
 
         return {
@@ -1210,7 +1430,7 @@ async function handleCallTool(name, args = {}) {
       case "get_file": {
         const { fileKey } = parseFigmaUrlOrKey(args.file_key);
         const depth = args.depth || 2;
-        const data = await figmaApiRequest(`/files/${fileKey}?depth=${depth}`);
+        const data = await figmaApiRequest(`/files/${encodeURIComponent(fileKey)}?depth=${depth}`);
         const format = args.format || "jsx";
         const simplify = args.simplify !== false;
         const output = optimizeFigmaData(data, {
@@ -1224,11 +1444,10 @@ async function handleCallTool(name, args = {}) {
       case "get_node": {
         const parsed = parseFigmaUrlOrKey(args.file_key);
         const fileKey = parsed.fileKey;
-        let nodeIds = args.node_ids || parsed.nodeId;
+        const nodeIds = normalizeNodeIds(args.node_ids) || normalizeNodeIds(parsed.nodeId);
         if (!nodeIds) throw new Error("No node_ids provided.");
-        nodeIds = nodeIds.replace(/-/g, ":");
         const depth = args.depth || 3;
-        const data = await figmaApiRequest(`/files/${fileKey}/nodes?ids=${encodeURIComponent(nodeIds)}&depth=${depth}`);
+        const data = await figmaApiRequest(`/files/${encodeURIComponent(fileKey)}/nodes?ids=${encodeURIComponent(nodeIds)}&depth=${depth}`);
         const format = args.format || "jsx";
         const simplify = args.simplify !== false;
         const output = optimizeFigmaData(data, {
@@ -1242,32 +1461,31 @@ async function handleCallTool(name, args = {}) {
       case "get_image": {
         const parsed = parseFigmaUrlOrKey(args.file_key);
         const fileKey = parsed.fileKey;
-        let nodeIds = args.node_ids || parsed.nodeId;
+        const nodeIds = normalizeNodeIds(args.node_ids) || normalizeNodeIds(parsed.nodeId);
         if (!nodeIds) throw new Error("No node_ids provided.");
-        nodeIds = nodeIds.replace(/-/g, ":");
         const format = args.format || "png";
         const scale = args.scale || 2;
-        const data = await figmaApiRequest(`/images/${fileKey}?ids=${encodeURIComponent(nodeIds)}&format=${format}&scale=${scale}`);
+        const data = await figmaApiRequest(`/images/${encodeURIComponent(fileKey)}?ids=${encodeURIComponent(nodeIds)}&format=${format}&scale=${scale}`);
         return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
       }
       case "get_image_fills": {
         const { fileKey } = parseFigmaUrlOrKey(args.file_key);
-        const data = await figmaApiRequest(`/files/${fileKey}/images`);
+        const data = await figmaApiRequest(`/files/${encodeURIComponent(fileKey)}/images`);
         return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
       }
       case "get_styles": {
         const { fileKey } = parseFigmaUrlOrKey(args.file_key);
-        const data = await figmaApiRequest(`/files/${fileKey}/styles`);
+        const data = await figmaApiRequest(`/files/${encodeURIComponent(fileKey)}/styles`);
         return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
       }
       case "get_components": {
         const { fileKey } = parseFigmaUrlOrKey(args.file_key);
-        const data = await figmaApiRequest(`/files/${fileKey}/components`);
+        const data = await figmaApiRequest(`/files/${encodeURIComponent(fileKey)}/components`);
         return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
       }
       case "get_comments": {
         const { fileKey } = parseFigmaUrlOrKey(args.file_key);
-        const data = await figmaApiRequest(`/files/${fileKey}/comments`);
+        const data = await figmaApiRequest(`/files/${encodeURIComponent(fileKey)}/comments`);
         return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
       }
       case "post_comment": {
@@ -1275,7 +1493,7 @@ async function handleCallTool(name, args = {}) {
         const fileKey = parsed.fileKey;
         const body = { message: args.message };
         if (args.node_id) body.client_meta = { node_id: args.node_id.replace(/-/g, ":") };
-        const data = await figmaApiRequest(`/files/${fileKey}/comments`, {
+        const data = await figmaApiRequest(`/files/${encodeURIComponent(fileKey)}/comments`, {
           method: "POST",
           body: JSON.stringify(body)
         });
@@ -1296,9 +1514,11 @@ async function handleCallTool(name, args = {}) {
 // MCP SDK Loader & Universal Stdio Loop
 // ==========================================
 function startOfficialSdkServer() {
+  // Only locations that belong to THIS package. The list previously reached into
+  // a sibling "google-tasks" project from the author's machine, which on any
+  // other install could load an unrelated (and possibly incompatible) SDK build.
   const sdkLocations = [
     "@modelcontextprotocol/sdk",
-    path.resolve(__dirname, "../google-tasks/node_modules/@modelcontextprotocol/sdk/dist/cjs"),
     path.resolve(__dirname, "node_modules/@modelcontextprotocol/sdk/dist/cjs")
   ];
 
@@ -1337,7 +1557,7 @@ function startOfficialSdkServer() {
 }
 
 function startUniversalStdioServer() {
-  let buffer = "";
+  let buffer = Buffer.alloc(0);
 
   const sendResponse = (response) => {
     process.stdout.write(JSON.stringify(response) + "\n");
@@ -1392,44 +1612,66 @@ function startUniversalStdioServer() {
     }
   };
 
-  process.stdin.setEncoding("utf8");
+  // Framing is done on a Buffer, never a string. Content-Length counts BYTES,
+  // but the previous implementation sliced a decoded JS string by CHARACTER
+  // index: one Cyrillic description made the two disagree, the body was
+  // over-sliced, JSON.parse threw, and the read cursor was left mid-message —
+  // so every subsequent request was corrupt too and the server went silent.
+  // processMessage is async; an unhandled rejection here would take the whole
+  // server down instead of failing one request.
+  const dispatch = (msg) => {
+    Promise.resolve()
+      .then(() => processMessage(msg))
+      .catch((err) => {
+        if (msg && msg.id !== undefined) {
+          sendResponse({
+            jsonrpc: "2.0",
+            id: msg.id,
+            error: { code: -32603, message: `Internal error: ${err && err.message ? err.message : String(err)}` }
+          });
+        }
+      });
+  };
+
   process.stdin.on("data", (chunk) => {
-    buffer += chunk;
+    buffer = buffer.length === 0 ? chunk : Buffer.concat([buffer, chunk]);
+
     while (true) {
-      // Content-Length framing
       const headerEnd = buffer.indexOf("\r\n\r\n");
+
+      // Content-Length framing (LSP style)
       if (headerEnd !== -1) {
-        const header = buffer.substring(0, headerEnd);
+        const header = buffer.slice(0, headerEnd).toString("ascii");
         const match = header.match(/Content-Length:\s*(\d+)/i);
         if (match) {
           const contentLength = parseInt(match[1], 10);
           const bodyStart = headerEnd + 4;
-          if (Buffer.byteLength(buffer.substring(bodyStart), "utf8") >= contentLength) {
-            const body = buffer.substring(bodyStart, bodyStart + contentLength);
-            buffer = buffer.substring(bodyStart + contentLength);
-            try {
-              const msg = JSON.parse(body);
-              processMessage(msg);
-            } catch (e) {}
-            continue;
-          }
-        }
-      }
-
-      // Line-delimited fallback
-      const lineEnd = buffer.indexOf("\n");
-      if (lineEnd !== -1 && headerEnd === -1) {
-        const line = buffer.substring(0, lineEnd).trim();
-        buffer = buffer.substring(lineEnd + 1);
-        if (line.length > 0) {
+          if (buffer.length - bodyStart < contentLength) break; // wait for the rest
+          const body = buffer.slice(bodyStart, bodyStart + contentLength).toString("utf8");
+          buffer = buffer.slice(bodyStart + contentLength);
           try {
-            const msg = JSON.parse(line);
-            processMessage(msg);
+            dispatch(JSON.parse(body));
           } catch (e) {}
           continue;
         }
       }
-      break;
+
+      // Newline-delimited JSON (what MCP stdio actually uses).
+      const lineEnd = buffer.indexOf(0x0a);
+      if (lineEnd === -1) break;
+
+      // A \r\n\r\n further ahead in the stream belongs to a LATER framed
+      // message; only skip line parsing when the header is at the very start,
+      // otherwise a stray blank line stalled the loop forever.
+      if (headerEnd !== -1 && headerEnd < lineEnd) break;
+
+      const line = buffer.slice(0, lineEnd).toString("utf8").trim();
+      buffer = buffer.slice(lineEnd + 1);
+      if (line.length > 0) {
+        try {
+          dispatch(JSON.parse(line));
+        } catch (e) {}
+      }
     }
   });
 }

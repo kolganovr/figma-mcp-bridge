@@ -20,8 +20,10 @@ function optimizeFigmaData(rawData, options = {}) {
   const format = (options.format || 'jsx').toLowerCase();
   const simplify = options.simplify !== false;
 
+  // Unindented on purpose: pretty-printing the escape hatch cost ~30% more
+  // tokens than the payload it was escaping to.
   if (format === 'raw' || !simplify || !rawData) {
-    return JSON.stringify(rawData, null, 2);
+    return JSON.stringify(rawData);
   }
 
   const rawJsonStr = JSON.stringify(rawData);
@@ -43,7 +45,7 @@ function optimizeFigmaData(rawData, options = {}) {
   }
 
   if (targetNodes.length === 0) {
-    return JSON.stringify(rawData, null, 2);
+    return JSON.stringify(rawData);
   }
 
   const prunedTrees = targetNodes
@@ -66,9 +68,23 @@ function optimizeFigmaData(rawData, options = {}) {
     ? Math.round((1 - (optimizedBytes / originalBytes)) * 1000) / 10
     : 0;
 
-  const header = `<!-- Optimized Figma Layout (${reductionPercent}% Token Reduction | ${Math.round(originalBytes / 1024)} KB -> ${Math.round(optimizedBytes / 1024 * 10) / 10} KB) -->\n`;
+  // Document-level metadata used to be dropped on the floor: only `document` was
+  // read, so `get_file` never delivered the "file metadata" its description
+  // promised. Summarised rather than inlined — the full maps are large and the
+  // agent can pull them with get_styles / get_components when it needs them.
+  const metaParts = [];
+  if (rawData.name) metaParts.push(`file="${rawData.name}"`);
+  if (rawData.lastModified) metaParts.push(`lastModified=${rawData.lastModified}`);
+  if (rawData.version) metaParts.push(`version=${rawData.version}`);
+  const componentCount = rawData.components ? Object.keys(rawData.components).length : 0;
+  const styleCount = rawData.styles ? Object.keys(rawData.styles).length : 0;
+  if (componentCount) metaParts.push(`components=${componentCount}`);
+  if (styleCount) metaParts.push(`styles=${styleCount}`);
 
-  return header + formattedOutput;
+  const meta = metaParts.length ? `<!-- ${metaParts.join(' ')} -->\n` : '';
+  const header = `<!-- Optimized Figma Layout (${reductionPercent}% smaller than the raw API response | ${Math.round(originalBytes / 1024)} KB -> ${Math.round(optimizedBytes / 1024 * 10) / 10} KB) -->\n`;
+
+  return meta + header + formattedOutput;
 }
 
 module.exports = {

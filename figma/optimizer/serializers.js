@@ -12,7 +12,14 @@ function escapeJsxText(str) {
 
 function escapeAttr(str) {
   if (!str) return '';
-  return String(str).replace(/"/g, '&quot;');
+  return String(str).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+}
+
+// Variant keys become attribute names, and Figma allows spaces / punctuation in
+// them ("Size (px)"), which would produce unparseable pseudo-JSX.
+function toAttrName(key) {
+  const safe = String(key).replace(/[^A-Za-z0-9_.-]/g, '_').replace(/^[^A-Za-z_]+/, '');
+  return safe || 'prop';
 }
 
 /**
@@ -24,6 +31,13 @@ function serializeToJsx(node, indent = 0) {
   const spaces = '  '.repeat(indent);
   const tag = getJsxTagName(node);
   const props = [];
+
+  // Node id comes first and is never omitted: every follow-up call the agent can
+  // make (get_node, get_image, target_parent_id, figma.getNodeById) needs it, and
+  // without it the only way to obtain one was a second full fetch in tree format.
+  if (node.id) {
+    props.push(`id="${escapeAttr(node.id)}"`);
+  }
 
   // Name (omit if generic like "Frame 1" or "Vector")
   if (node.name && !isGenericName(node.name, node.type)) {
@@ -70,7 +84,7 @@ function serializeToJsx(node, indent = 0) {
   if (node.stroke) props.push(`stroke="${escapeAttr(node.stroke)}"`);
   if (node.strokeWidth) props.push(`strokeWidth="${node.strokeWidth}"`);
   if (node.radius) props.push(`radius="${node.radius}"`);
-  if (node.opacity) props.push(`opacity="${node.opacity}"`);
+  if (typeof node.opacity === 'number') props.push(`opacity="${node.opacity}"`);
 
   // Text specifics
   if (node.type === 'TEXT') {
@@ -80,7 +94,7 @@ function serializeToJsx(node, indent = 0) {
   // Component Variants
   if (node.variants) {
     for (const [k, v] of Object.entries(node.variants)) {
-      props.push(`${k}="${escapeAttr(v)}"`);
+      props.push(`${toAttrName(k)}="${escapeAttr(v)}"`);
     }
   }
 

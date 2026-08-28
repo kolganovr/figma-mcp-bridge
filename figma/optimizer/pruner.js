@@ -20,7 +20,12 @@ const VECTOR_TYPES = new Set([
 ]);
 
 /**
- * Checks if a node and all its sub-children are purely vector artwork / icons
+ * Checks if a node and all its sub-children are purely vector artwork / icons.
+ *
+ * Small size alone is NOT evidence of icon-ness: avatars, swatches, toggles,
+ * 40px inputs and dividers are all small leaves, and collapsing them to <Icon>
+ * threw away their real type, layout and radius. A leaf now has to be an actual
+ * vector type, or be icon-named AND small — never small on its own.
  */
 function isVectorOrIconCluster(node) {
   if (!node) return false;
@@ -30,26 +35,31 @@ function isVectorOrIconCluster(node) {
   }
 
   const nameLower = (node.name || '').toLowerCase();
-  const isIconNamed = /^(ic_|icon|logo|glyph|badge|vector|svg|arrow|chevron|check|close|search)/i.test(nameLower);
+  const isIconNamed = /^(ic_|icon|logo|glyph|vector|svg|arrow|chevron)[\s_\-/]?/i.test(nameLower);
 
   const width = node.absoluteBoundingBox?.width || node.size?.x || 0;
   const height = node.absoluteBoundingBox?.height || node.size?.y || 0;
   const isSmall = width > 0 && height > 0 && width <= 64 && height <= 64;
 
   if (!node.children || node.children.length === 0) {
-    return (isIconNamed || isSmall) && node.type !== 'TEXT';
+    // A childless FRAME/RECTANGLE/INSTANCE is real content, not an icon,
+    // unless its own name declares otherwise.
+    return isIconNamed && isSmall && node.type !== 'TEXT';
   }
 
   // Check if any descendant is a TEXT node
   let hasText = false;
   let hasOnlyVectors = true;
+  let hasRealVector = false;
 
   function scan(n) {
     if (n.type === 'TEXT') {
       hasText = true;
       return;
     }
-    if (!VECTOR_TYPES.has(n.type) && n.type !== 'GROUP' && n.type !== 'FRAME' && n.type !== 'INSTANCE') {
+    if (VECTOR_TYPES.has(n.type)) {
+      hasRealVector = true;
+    } else if (n.type !== 'GROUP' && n.type !== 'FRAME' && n.type !== 'INSTANCE') {
       hasOnlyVectors = false;
     }
     if (n.children && Array.isArray(n.children)) {
@@ -64,7 +74,9 @@ function isVectorOrIconCluster(node) {
 
   if (hasText) return false;
 
-  return (isIconNamed || isSmall) && hasOnlyVectors;
+  // A container only collapses when it genuinely wraps vector artwork — a frame
+  // of nested frames with no vector in it anywhere is a layout, not an icon.
+  return (isIconNamed || isSmall) && hasOnlyVectors && hasRealVector;
 }
 
 /**
