@@ -1705,6 +1705,27 @@
     let ws = null;
     let reconnectTimer = null;
     let pingInterval = null;
+    let wsFailCount = 0;
+    let tokenMismatchShown = false;
+
+    // A bad/stale BRIDGE_TOKEN (baked in at install time) makes the server
+    // reject the WS handshake before it upgrades, which the browser can only
+    // report as a generic close/error — no status code reaches onclose/onerror.
+    // Left alone, this just reconnects forever with the same bad token every
+    // 1.5s, forever showing "Reconnecting..." with no way for the user to
+    // learn the real fix is to reload the plugin. After a few failures, take
+    // the one path that DOES expose a real HTTP status — a plain fetch to
+    // /status — to tell a token rejection (403) apart from the server simply
+    // being offline, and say so explicitly.
+    async function checkTokenMismatch() {
+      try {
+        const res = await fetch(withToken(`${SERVER_URL}/status`));
+        if (res.status === 403) {
+          tokenMismatchShown = true;
+          setOfflineState('Bridge token mismatch. Close and re-open this plugin (Ctrl+Alt+P / Cmd+Option+P) to pick up the current token, or re-run install.py --update.');
+        }
+      } catch (e) {}
+    }
 
     function connectWebSocket() {
       if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) {
@@ -1716,6 +1737,8 @@
 
         ws.onopen = () => {
           clearTimeout(reconnectTimer);
+          wsFailCount = 0;
+          tokenMismatchShown = false;
           setCardState(false);
           addLog('ok', 'WS', 'Full-duplex WebSocket active (:8765 • 0ms)');
           termLatency.textContent = 'Latency: <1ms';
@@ -1785,7 +1808,13 @@
 
         ws.onclose = () => {
           clearInterval(pingInterval);
-          setOfflineState('WebSocket Disconnected. Reconnecting...');
+          wsFailCount++;
+          if (wsFailCount >= 3 && !tokenMismatchShown) {
+            checkTokenMismatch();
+          }
+          if (!tokenMismatchShown) {
+            setOfflineState('WebSocket Disconnected. Reconnecting...');
+          }
           scheduleReconnect();
         };
       } catch (err) {

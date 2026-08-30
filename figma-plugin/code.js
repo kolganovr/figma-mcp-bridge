@@ -321,30 +321,25 @@ const TRACKED_CREATORS = new Set([
   "createSticky", "createShapeWithText", "createPage"
 ]);
 
-// Wraps the real `figma` object so create*() calls made during an open
-// checkpoint are recorded, while every other property (currentPage, root,
-// viewport, ...) passes straight through untouched. `Reflect.get(target, prop,
-// target)` forces every getter to run with `this === figma` — the real
-// singleton, never the proxy — so this cannot desync anything figma's own
-// getters rely on internally. If Proxy construction ever fails on some host
-// object quirk, execution falls back to the raw `figma` and simply loses
-// auto-tracking for that call rather than failing outright.
+// Wraps creator functions during an open checkpoint so creations are journaled,
+// while all property lookups (currentPage, viewport, root, etc.) delegate
+// cleanly through the prototype chain to `figma` without triggering ES6 Proxy
+// get-trap invariant violations on native host objects.
 function createTrackingFigma() {
   try {
-    return new Proxy(figma, {
-      get(target, prop, _receiver) {
-        const val = Reflect.get(target, prop, target);
-        if (typeof val !== "function" || !TRACKED_CREATORS.has(prop)) return val;
-        return function (...args) {
-          const result = val.apply(target, args);
+    const tracking = Object.create(figma);
+    for (const name of TRACKED_CREATORS) {
+      if (typeof figma[name] === "function") {
+        tracking[name] = function (...args) {
+          const result = figma[name].apply(figma, args);
           if (activeCheckpoint && result && typeof result === "object" && typeof result.id === "string") {
             activeCheckpoint.created.push(result.id);
           }
           return result;
         };
-      },
-      set(target, prop, value) { target[prop] = value; return true; }
-    });
+      }
+    }
+    return tracking;
   } catch (e) {
     return figma;
   }

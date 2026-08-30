@@ -606,6 +606,16 @@ function pickTargetClient(targetFileName) {
 // resolve/reject-on-timeout behaviour by simply not passing it.
 async function sendCommandToPlugin(payload, timeoutMs = 45000, options = {}) {
   if (!isBridgeMaster) {
+    // A zombie master (process still bound to :8765 but stuck/unresponsive —
+    // stale after a `install.py --update` or a crashed event loop) doesn't
+    // fail the connection, so it never hit the ECONNREFUSED/ECONNRESET check
+    // below; it just hangs forever, and the proxy hop had no timeout of its
+    // own to notice. Cap it well under the caller's timeoutMs so a hung
+    // master surfaces as a fast, actionable error instead of a silent stall
+    // the caller eventually cancels.
+    const proxyTimeoutMs = Math.min(timeoutMs, 10000);
+    const controller = new AbortController();
+    const abortTimer = setTimeout(() => controller.abort(), proxyTimeoutMs);
     try {
       const res = await fetch(`http://127.0.0.1:${BRIDGE_PORT}/execute`, {
         method: "POST",
@@ -613,13 +623,21 @@ async function sendCommandToPlugin(payload, timeoutMs = 45000, options = {}) {
           "Content-Type": "application/json",
           ...(BRIDGE_TOKEN ? { "X-Bridge-Token": BRIDGE_TOKEN } : {})
         },
-        body: JSON.stringify({ ...payload, timeoutMs })
+        body: JSON.stringify({ ...payload, timeoutMs }),
+        signal: controller.signal
       });
       if (!res.ok) {
         const errText = await res.text();
         let detail = errText;
-        try { detail = JSON.parse(errText).error || errText; } catch (e) {}
-        throw new Error(`Bridge proxy error (HTTP ${res.status}): ${detail}`);
+        let code = null;
+        try {
+          const parsed = JSON.parse(errText);
+          detail = parsed.error || errText;
+          code = parsed.code || null;
+        } catch (e) {}
+        const err = new Error(`Bridge proxy error (HTTP ${res.status}): ${detail}`);
+        if (code) err.code = code;
+        throw err;
       }
       const data = await res.json();
       if (data.success) return data;
@@ -627,22 +645,42 @@ async function sendCommandToPlugin(payload, timeoutMs = 45000, options = {}) {
       if (data.code) err.code = data.code;
       throw err;
     } catch (err) {
-      // The owner of :8765 is gone — claim the port ourselves so the NEXT call
-      // succeeds instead of failing forever.
+      // The owner of :8765 is gone, or alive but wedged — claim the port
+      // ourselves so the NEXT call succeeds instead of failing forever.
       const cause = err && err.cause ? err.cause.code : null;
-      if (cause === "ECONNREFUSED" || cause === "ECONNRESET" || /fetch failed/i.test(err.message || "")) {
+      const isTimeout = err && err.name === "AbortError";
+      if (isTimeout || cause === "ECONNREFUSED" || cause === "ECONNRESET" || /fetch failed/i.test(err.message || "")) {
         tryBecomeMaster();
         const wrapped = new Error(
-          "The bridge instance that owned :8765 is no longer running. This server is taking the port over — retry the call."
+          isTimeout
+            ? "The bridge instance that owned :8765 stopped responding. This server is taking the port over — retry the call."
+            : "The bridge instance that owned :8765 is no longer running. This server is taking the port over — retry the call."
         );
         wrapped.code = "BRIDGE_OFFLINE";
         throw wrapped;
       }
       throw err;
+    } finally {
+      clearTimeout(abortTimer);
     }
   }
 
   const targetClient = pickTargetClient(payload.target);
+
+  // Fail-Fast: with zero WS clients AND no recent /poll heartbeat, no plugin
+  // is realistically going to show up before the hard timeout — queuing the
+  // command and waiting the full 45s (until the caller gives up) just makes
+  // every live tool call look hung. Bail immediately with an actionable error
+  // instead. A poll-based client that pinged inside the last 60s still gets
+  // the benefit of the doubt and the command is queued normally.
+  if (!targetClient && (Date.now() - lastPluginPing) >= 60000) {
+    const err = new Error(
+      "No Figma plugin is connected to the bridge. Ask the user to open Figma DESKTOP (not the browser) and launch the Antigravity Bridge plugin (Ctrl+Alt+P / Cmd+Option+P) until the status shows CONNECTED, then retry."
+    );
+    err.code = "NO_CONNECTED_CLIENTS";
+    throw err;
+  }
+
   const cmdPayload = { ...payload };
   delete cmdPayload.target;
 

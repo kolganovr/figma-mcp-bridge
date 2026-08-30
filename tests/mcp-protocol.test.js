@@ -112,12 +112,26 @@ async function main() {
     check("unknown tool call is flagged isError", unknown.result.isError === true, unknown.result);
     check("unknown tool error carries a machine-readable code", unknownBody.ok === false && unknownBody.code === "UNKNOWN_TOOL", unknownBody);
 
-    // A figma_execute_code call with no plugin connected is NOT exercised here:
-    // by design (§4.3 Job Ledger) it now takes at least TIMEOUTS.escalate
-    // (30s) before resolving into anything, which is a bad trade for a smoke
-    // test that should run in a couple of seconds. That path is covered
-    // functionally by sendCommandToPlugin's own timer logic and by manual
-    // testing against a real plugin.
+    console.log("\n== figma_execute_code Fail-Fast with no plugin connected (BUG_REPORT_PORT_PROXY_RECONNECT.md §C) ==");
+    // Used to hang until TIMEOUTS.escalate (30s) — sendCommandToPlugin now
+    // rejects immediately with NO_CONNECTED_CLIENTS when there are zero WS
+    // clients and no recent /poll heartbeat, so this must resolve in well
+    // under a second, not 30s. Runs in its own server on a dedicated port
+    // (not the shared 8765 the rest of this file deliberately avoids relying
+    // on) so this assertion always exercises the master code path, even on a
+    // machine where a real bridge instance already owns 8765.
+    const masterServer = startServer({ FIGMA_PERSONAL_ACCESS_TOKEN: "", FIGMA_MCP_LEGACY_TOOLS: "", FIGMA_BRIDGE_PORT: "18765" });
+    try {
+      const execStart = Date.now();
+      const exec = await masterServer.call("tools/call", { name: "figma_execute_code", arguments: { code: "1+1" } });
+      const execElapsed = Date.now() - execStart;
+      const execBody = JSON.parse(exec.result.content[0].text);
+      check("figma_execute_code fails fast (< 5s) with no plugin connected", execElapsed < 5000, execElapsed);
+      check("figma_execute_code with no plugin connected is flagged isError", exec.result.isError === true, exec.result);
+      check("figma_execute_code with no plugin connected carries NO_CONNECTED_CLIENTS", execBody.ok === false && execBody.code === "NO_CONNECTED_CLIENTS", execBody);
+    } finally {
+      await masterServer.stop();
+    }
   } finally {
     await server.stop();
   }
