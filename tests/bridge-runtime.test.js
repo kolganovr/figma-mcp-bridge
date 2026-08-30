@@ -17,16 +17,29 @@ const runtime = src.slice(start, end);
 // --- stub Figma sandbox ----------------------------------------------------
 const pluginData = {};
 const NODE_REGISTRY = new Map();
+// Every node made through makeNode() shares this single prototype, mirroring
+// the real Plugin API where all nodes of comparable shape share one — this
+// is exactly what patchCreationMethodsOnPrototype() in the runtime relies on
+// to make clone()/createInstance() traceable by patching it once.
+const nodeProto = {
+  resize(w, h) { this.width = w; this.height = h; },
+  appendChild(c) { c.parent = this; this.children.push(c); NODE_REGISTRY.set(c.id, c); },
+  remove() {
+    if (this.parent) this.parent.children = this.parent.children.filter(c => c !== this);
+    NODE_REGISTRY.delete(this.id);
+  },
+  clone() {
+    const c = makeNode(this.type, this.name, { width: this.width, height: this.height });
+    return c;
+  },
+  createInstance() {
+    return makeNode("INSTANCE", "Instance of " + this.name);
+  }
+};
 function makeNode(type, name, extra) {
-  const node = Object.assign({
+  const node = Object.assign(Object.create(nodeProto), {
     type, name, id: "n" + Math.random().toString(36).slice(2, 8),
-    parent: null, children: [], width: 100, height: 100, visible: true,
-    resize(w, h) { this.width = w; this.height = h; },
-    appendChild(c) { c.parent = this; this.children.push(c); NODE_REGISTRY.set(c.id, c); },
-    remove() {
-      if (this.parent) this.parent.children = this.parent.children.filter(c => c !== this);
-      NODE_REGISTRY.delete(this.id);
-    }
+    parent: null, children: [], width: 100, height: 100, visible: true
   }, extra || {});
   NODE_REGISTRY.set(node.id, node);
   return node;
@@ -38,6 +51,16 @@ const figma = {
   root: {
     setPluginData: (k, v) => { pluginData[k] = v; },
     getPluginData: (k) => pluginData[k] || ""
+  },
+  currentPage: makeNode("PAGE", "Page 1"),
+  createFrame: () => makeNode("FRAME", "Tracked " + Math.random().toString(36).slice(2, 5)),
+  createRectangle: () => makeNode("RECTANGLE", "Rect " + Math.random().toString(36).slice(2, 5)),
+  createComponent: () => makeNode("COMPONENT", "Component " + Math.random().toString(36).slice(2, 5)),
+  group: (nodes, parent) => {
+    const g = makeNode("GROUP", "Group");
+    for (const n of nodes) g.appendChild(n);
+    parent.appendChild(g);
+    return g;
   },
   createComponentFromNode(node) {
     // emulate the documented worst case: everything forced to FIXED, new ids
@@ -198,10 +221,6 @@ console.log("\n== checkpoint journal: modification tracking & rollback ==");
 
 console.log("\n== checkpoint journal: creation tracking via createTrackingFigma() ==");
 {
-  // The Plugin API doesn't expose createFrame on our minimal stub by default;
-  // add one so the Proxy has something real to wrap and record.
-  figma.createFrame = () => makeNode("FRAME", "Tracked " + Math.random().toString(36).slice(2, 5));
-
   const cp = bridge.checkpoint("Two frames via tracking figma");
   const trackingFigma = createTrackingFigma();
   const madeA = trackingFigma.createFrame();
@@ -225,6 +244,35 @@ console.log("\n== checkpoint journal: creation tracking via createTrackingFigma(
   const lastRollback = bridge.rollback("last");
   check("rollback('last') resolves the most recently committed, not-yet-rolled-back checkpoint",
     lastRollback.checkpoint_id === cp2.id, lastRollback);
+}
+
+console.log("\n== checkpoint journal: clone()/createInstance() tracking (Undo Last AI Action bug) ==");
+{
+  // These go through node.clone() / component.createInstance() — methods on
+  // the NODE, not on figma — which createTrackingFigma's wrapper never sees.
+  // Before patchCreationMethodsOnPrototype(), a checkpoint around either
+  // reported empty created[] even though a new node landed on the canvas,
+  // so Undo Last AI Action ran and genuinely removed nothing.
+  const template = makeNode("FRAME", "Card Template");
+  const master = figma.createComponent();
+
+  const cp = bridge.checkpoint("Clone + instantiate");
+  const cloned = template.clone();
+  const instance = master.createInstance();
+  const cpResult = cp.commit();
+
+  check("clone() during an open checkpoint is journaled",
+    cpResult.created.includes(cloned.id), cpResult);
+  check("createInstance() during an open checkpoint is journaled",
+    cpResult.created.includes(instance.id), cpResult);
+
+  const rollback = bridge.rollback(cp.id);
+  check("rollback removes the cloned node", figma.getNodeById(cloned.id) === null, rollback);
+  check("rollback removes the instantiated node", figma.getNodeById(instance.id) === null, rollback);
+
+  const untrackedClone = template.clone(); // outside any open checkpoint
+  check("clone() outside an open checkpoint is not journaled",
+    !cpResult.created.includes(untrackedClone.id) && figma.getNodeById(untrackedClone.id) !== null);
 }
 
 console.log(failures === 0 ? "\nALL PASS" : "\n" + failures + " FAILURES");

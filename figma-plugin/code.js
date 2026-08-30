@@ -199,6 +199,7 @@ let activeCheckpoint = null;
 let checkpointSeq = 0;
 
 function beginCheckpoint(label) {
+  ensureCloneTrackingInstalled();
   checkpointSeq += 1;
   const cp = {
     id: "cp_" + Date.now().toString(36) + "_" + checkpointSeq,
@@ -318,8 +319,106 @@ const TRACKED_CREATORS = new Set([
   "createFrame", "createRectangle", "createEllipse", "createPolygon", "createStar",
   "createVector", "createText", "createLine", "createComponent", "createComponentFromNode",
   "createNodeFromSvg", "createBooleanOperation", "createSlice", "createConnector",
-  "createSticky", "createShapeWithText", "createPage"
+  "createSticky", "createShapeWithText", "createPage",
+  // Combinators — each takes existing nodes and returns ONE new node (GROUP,
+  // BOOLEAN_OPERATION, or COMPONENT_SET) that owns them from then on. Missing
+  // these meant grouping/flattening/boolean-op'ing during a checkpoint looked
+  // like it created nothing, so rollback had nothing to remove.
+  "group", "flatten", "union", "subtract", "intersect", "exclude", "combineAsVariants"
 ]);
+
+// clone() and createInstance() are METHODS ON A NODE, not on `figma` itself —
+// "duplicate this template" and "instantiate that component" (the two most
+// common ways AI-authored figma_execute_code actually "creates a card") both
+// go through here, completely bypassing createTrackingFigma's wrapper above,
+// which only ever sees figma.create*() factory calls. A checkpoint around
+// either pattern silently recorded nothing, so Undo Last AI Action ran and
+// reported "removed 0, restored 0" even though a node was genuinely added.
+//
+// Node prototypes are shared per node type for the whole plugin session, so
+// patching a type's prototype once — reached via a throwaway node created
+// and removed before any real checkpoint exists — makes clone()/
+// createInstance() traceable everywhere afterward, regardless of how the
+// caller obtained the node reference (getNodeById, findOne, selection, ...).
+const PATCHED_CLONE_PROTOS = new WeakSet();
+function patchCreationMethodsOnPrototype(node) {
+  if (!node) return;
+  const proto = Object.getPrototypeOf(node);
+  if (!proto || PATCHED_CLONE_PROTOS.has(proto)) return;
+  PATCHED_CLONE_PROTOS.add(proto);
+
+  for (const methodName of ["clone", "createInstance"]) {
+    const original = proto[methodName];
+    if (typeof original !== "function") continue;
+    proto[methodName] = function (...args) {
+      const result = original.apply(this, args);
+      if (activeCheckpoint && result && typeof result === "object" && typeof result.id === "string") {
+        activeCheckpoint.created.push(result.id);
+      }
+      return result;
+    };
+  }
+}
+
+let cloneTrackingInstalled = false;
+function ensureCloneTrackingInstalled() {
+  if (cloneTrackingInstalled) return;
+  cloneTrackingInstalled = true;
+
+  // Runs with no checkpoint open (this is called once, before the first ever
+  // beginCheckpoint()), so nothing here is journaled — each throwaway node
+  // exists only long enough to read+patch its prototype, then is removed
+  // immediately. Each factory is independent: one missing/renamed method on
+  // a future Plugin API must not stop the others from getting patched.
+  const makeAndPatch = (factory) => {
+    let node = null;
+    try {
+      node = factory();
+      patchCreationMethodsOnPrototype(node);
+    } catch (e) {
+      // best-effort — a Plugin API surface change here must never block real checkpoints
+    } finally {
+      try { if (node && !node.removed) node.remove(); } catch (e) {}
+    }
+    return node;
+  };
+
+  makeAndPatch(() => figma.createRectangle());
+  makeAndPatch(() => figma.createEllipse());
+  makeAndPatch(() => figma.createText());
+  makeAndPatch(() => figma.createVector());
+  makeAndPatch(() => figma.createLine());
+  makeAndPatch(() => figma.createStar());
+  makeAndPatch(() => figma.createPolygon());
+
+  // Frame, component and instance are handled by hand: the instance needs a
+  // live (not-yet-removed) component to instantiate from, and the group
+  // needs a live rectangle to hold — makeAndPatch's immediate-removal
+  // wouldn't leave either in a usable state for the next step.
+  let frame = null, component = null, instance = null, rectForGroup = null, group = null;
+  try {
+    frame = figma.createFrame();
+    patchCreationMethodsOnPrototype(frame);
+
+    component = figma.createComponent();
+    patchCreationMethodsOnPrototype(component);
+
+    instance = component.createInstance();
+    patchCreationMethodsOnPrototype(instance);
+
+    rectForGroup = figma.createRectangle();
+    group = figma.group([rectForGroup], figma.currentPage);
+    patchCreationMethodsOnPrototype(group);
+  } catch (e) {
+    // best-effort — see above
+  } finally {
+    try { if (frame && !frame.removed) frame.remove(); } catch (e) {}
+    try { if (instance && !instance.removed) instance.remove(); } catch (e) {}
+    try { if (component && !component.removed) component.remove(); } catch (e) {}
+    // group.remove() also removes rectForGroup, which it still owns.
+    try { if (group && !group.removed) group.remove(); } catch (e) {}
+  }
+}
 
 // Wraps creator functions during an open checkpoint so creations are journaled,
 // while all property lookups (currentPage, viewport, root, etc.) delegate
@@ -1424,7 +1523,7 @@ figma.ui.onmessage = async (msg) => {
 
     let runningToast = null;
     if (allowCanvasToast()) {
-      try { runningToast = figma.notify(`🤖 ${actionLabel}...`, { timeout: 30000 }); } catch (e) {}
+      try { runningToast = figma.notify(`${actionLabel}...`, { timeout: 30000 }); } catch (e) {}
     }
 
     const logToUi = (text) => {
@@ -1530,9 +1629,9 @@ figma.ui.onmessage = async (msg) => {
       if (runningToast) runningToast.cancel();
       if (allowCanvasToast()) {
         if (capture && (screenshot || screenshots)) {
-          figma.notify(`✅ ${actionLabel} + 📸 capture sent to AI`, { timeout: 3000 });
+          figma.notify(`${actionLabel} + capture sent to AI`, { timeout: 3000 });
         } else {
-          figma.notify(`✅ ${actionLabel} — done!`, { timeout: 2500 });
+          figma.notify(`${actionLabel} — done!`, { timeout: 2500 });
         }
       }
 
@@ -1559,7 +1658,7 @@ figma.ui.onmessage = async (msg) => {
       cp.commit(); // whatever WAS created before the throw is still on canvas and rollback-eligible
       if (runningToast) runningToast.cancel();
       const enriched = enrichBridgeError(err);
-      try { figma.notify(`❌ Error: ${enriched.message}`, { error: true, timeout: 6000 }); } catch (e) {}
+      try { figma.notify(`Error: ${enriched.message}`, { error: true, timeout: 6000 }); } catch (e) {}
 
       figma.ui.postMessage({
         type: 'RESULT',
@@ -1597,7 +1696,7 @@ figma.ui.onmessage = async (msg) => {
       figma.viewport.scrollAndZoomIntoView(targets);
     }
 
-    figma.notify(`📸 Capturing screenshot (${targets.map(t => t.name).join(', ')})...`, { timeout: 2500 });
+    figma.notify(`Capturing screenshot (${targets.map(t => t.name).join(', ')})...`, { timeout: 2500 });
 
     try {
       const screenshots = [];
@@ -1770,7 +1869,7 @@ figma.ui.onmessage = async (msg) => {
     const cp = beginCheckpoint(actionLabel);
     let runningToast = null;
     if (allowCanvasToast()) {
-      try { runningToast = figma.notify(`🎨 Inserting component...`, { timeout: 15000 }); } catch (e) {}
+      try { runningToast = figma.notify(`Inserting component...`, { timeout: 15000 }); } catch (e) {}
     }
 
     try {
@@ -1963,7 +2062,7 @@ figma.ui.onmessage = async (msg) => {
 
       if (runningToast) runningToast.cancel();
       if (allowCanvasToast()) {
-        figma.notify(`✅ Inserted ${instance.name}${capture && screenshot ? ' + 📸 capture' : ''}`, { timeout: 3000 });
+        figma.notify(`Inserted ${instance.name}${capture && screenshot ? ' + capture' : ''}`, { timeout: 3000 });
       }
 
       figma.ui.postMessage({
@@ -1996,7 +2095,7 @@ figma.ui.onmessage = async (msg) => {
       cp.commit();
       if (runningToast) runningToast.cancel();
       const enriched = enrichBridgeError(err);
-      try { figma.notify(`❌ Error: ${enriched.message}`, { error: true, timeout: 6000 }); } catch (e) {}
+      try { figma.notify(`Error: ${enriched.message}`, { error: true, timeout: 6000 }); } catch (e) {}
 
       figma.ui.postMessage({
         type: 'RESULT',
@@ -2131,7 +2230,7 @@ figma.ui.onmessage = async (msg) => {
         captureNote = shot.error;
       }
 
-      figma.notify(`🌓 Theme switched to "${targetMode.name}" on ${targetNode.name}`, { timeout: 3000 });
+      figma.notify(`Theme switched to "${targetMode.name}" on ${targetNode.name}`, { timeout: 3000 });
 
       figma.ui.postMessage({
         type: 'RESULT',
@@ -2146,7 +2245,7 @@ figma.ui.onmessage = async (msg) => {
         startTime: startTime
       });
     } catch (err) {
-      figma.notify(`❌ Error: ${err.message || String(err)}`, { error: true, timeout: 6000 });
+      figma.notify(`Error: ${err.message || String(err)}`, { error: true, timeout: 6000 });
 
       figma.ui.postMessage({
         type: 'RESULT',
@@ -2184,7 +2283,7 @@ figma.ui.onmessage = async (msg) => {
     const cp = beginCheckpoint(actionLabel);
     let runningToast = null;
     if (allowCanvasToast()) {
-      try { runningToast = figma.notify(`📐 Inserting vector SVG...`, { timeout: 15000 }); } catch (e) {}
+      try { runningToast = figma.notify(`Inserting vector SVG...`, { timeout: 15000 }); } catch (e) {}
     }
 
     try {
@@ -2277,7 +2376,7 @@ figma.ui.onmessage = async (msg) => {
 
       if (runningToast) runningToast.cancel();
       if (allowCanvasToast()) {
-        figma.notify(`✅ Vector inserted: ${finalNode.name}${capture && screenshot ? ' + 📸 capture' : ''}`, { timeout: 3000 });
+        figma.notify(`Vector inserted: ${finalNode.name}${capture && screenshot ? ' + capture' : ''}`, { timeout: 3000 });
       }
 
       figma.ui.postMessage({
@@ -2307,7 +2406,7 @@ figma.ui.onmessage = async (msg) => {
       cp.commit();
       if (runningToast) runningToast.cancel();
       const enriched = enrichBridgeError(err);
-      try { figma.notify(`❌ Error: ${enriched.message}`, { error: true, timeout: 6000 }); } catch (e) {}
+      try { figma.notify(`Error: ${enriched.message}`, { error: true, timeout: 6000 }); } catch (e) {}
 
       figma.ui.postMessage({
         type: 'RESULT',
@@ -2432,7 +2531,7 @@ figma.ui.onmessage = async (msg) => {
           if (restoredNodes.length > 0) figma.viewport.scrollAndZoomIntoView(restoredNodes);
         } catch (e) {}
       }
-      figma.notify(`↩ Rolled back "${result.label}" (${result.removed.length} removed, ${result.restored.length} restored)`, { timeout: 3500 });
+      figma.notify(`Rolled back "${result.label}" (${result.removed.length} removed, ${result.restored.length} restored)`, { timeout: 3500 });
       figma.ui.postMessage({ type: 'RESULT', id, success: true, description: actionLabel, result, startTime });
     } catch (err) {
       figma.ui.postMessage({

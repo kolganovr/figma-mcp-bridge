@@ -857,7 +857,7 @@
       <div id="act-card" class="activity-card">
         <div class="card-top">
           <span id="card-tag" class="card-tag">AI ASSISTANT STATUS</span>
-          <span id="card-badge" class="card-badge">⚡ Ready</span>
+          <span id="card-badge" class="card-badge"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" style="vertical-align:-2px;flex-shrink:0;"><path d="M7 2v11h3v9l7-12h-4l4-8z"/></svg> Ready</span>
         </div>
         <div id="task-desc" class="task-desc">Listening on 127.0.0.1:8765. Ready for commands.</div>
         <div id="progress-bar" class="progress-bar">
@@ -975,7 +975,7 @@
         <div class="input-row">
           <input id="server-url-input" class="server-input" type="text" value="http://127.0.0.1:8765" spellcheck="false" />
           <button id="ping-btn" class="btn-icon-styled">
-            <span>⚡</span>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M7 2v11h3v9l7-12h-4l4-8z"/></svg>
             <span>Ping</span>
           </button>
         </div>
@@ -1024,7 +1024,7 @@
             <span class="setting-desc">Paused calls are rejected immediately — nothing queues silently</span>
           </div>
           <button id="pause-btn" class="btn-icon-styled">
-            <span>⏸</span>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
             <span>Pause</span>
           </button>
         </div>
@@ -1037,7 +1037,7 @@
           <span class="setting-desc" id="last-action-desc">Every write call opens a checkpoint automatically</span>
         </div>
         <button id="undo-btn" class="btn-icon-styled" disabled>
-          <span>↩</span>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12.5 8c-2.65 0-5.05.99-6.9 2.6L2 7v9h9l-3.62-3.62c1.39-1.16 3.16-1.88 5.12-1.88 3.54 0 6.55 2.31 7.6 5.5l2.37-.78C21.08 11.03 17.15 8 12.5 8z"/></svg>
           <span>Undo Last AI Action</span>
         </button>
       </div>
@@ -1064,15 +1064,15 @@
     <div class="nav-tabs-bar">
       <div class="nav-pills">
         <div id="nav-btn-stream" class="nav-pill active">
-          <span>⚡</span>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M7 2v11h3v9l7-12h-4l4-8z"/></svg>
           <span>Stream</span>
         </div>
         <div id="nav-btn-settings" class="nav-pill">
-          <span>⚙️</span>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
           <span>Settings</span>
         </div>
         <div id="nav-btn-control" class="nav-pill">
-          <span>⏻</span>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M13 3h-2v10h2V3zm4.83 2.17l-1.42 1.42C17.99 7.86 19 9.81 19 12c0 3.87-3.13 7-7 7s-7-3.13-7-7c0-2.19 1.01-4.14 2.58-5.42L6.17 5.17C4.23 6.82 3 9.26 3 12c0 4.97 4.03 9 9 9s9-4.03 9-9c0-2.74-1.23-5.18-3.17-6.83z"/></svg>
           <span>Control</span>
         </div>
       </div>
@@ -1128,6 +1128,27 @@
     // reporting a different version than the connected server is how the
     // Diagnostics banner catches "server was updated, plugin wasn't reloaded".
     const PLUGIN_VERSION = "4.0.0";
+
+    // Material Symbols path data (Apache-2.0, Google) inlined as <svg> — the
+    // panel previously leaned on emoji for status icons, which render as a
+    // different glyph (or a fallback box) on every OS/font and can't be
+    // recolored or sized to match the surrounding UI. One flat lookup keeps
+    // every icon a real, themeable vector.
+    const MATERIAL_ICON_PATHS = {
+      bolt: "M7 2v11h3v9l7-12h-4l4-8z",
+      undo: "M12.5 8c-2.65 0-5.05.99-6.9 2.6L2 7v9h9l-3.62-3.62c1.39-1.16 3.16-1.88 5.12-1.88 3.54 0 6.55 2.31 7.6 5.5l2.37-.78C21.08 11.03 17.15 8 12.5 8z",
+      settings: "M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z",
+      power: "M13 3h-2v10h2V3zm4.83 2.17l-1.42 1.42C17.99 7.86 19 9.81 19 12c0 3.87-3.13 7-7 7s-7-3.13-7-7c0-2.19 1.01-4.14 2.58-5.42L6.17 5.17C4.23 6.82 3 9.26 3 12c0 4.97 4.03 9 9 9s9-4.03 9-9c0-2.74-1.23-5.18-3.17-6.83z",
+      photo_camera: "M9 2l-1.83 2H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2h-3.17L15 2H9zm3 15c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z",
+      auto_awesome: "M19 9l1.25-2.75L23 5l-2.75-1.25L19 1l-1.25 2.75L15 5l2.75 1.25L19 9zM11.5 9.5L9 4 6.5 9.5 1 12l5.5 2.5L9 20l2.5-5.5L17 12l-5.5-2.5zM19 15l-1.25 2.75L15 19l2.75 1.25L19 23l1.25-2.75L23 19l-2.75-1.25L19 15z",
+      warning: "M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z",
+      play_arrow: "M8 5v14l11-7z",
+      pause: "M6 19h4V5H6v14zm8-14v14h4V5h-4z"
+    };
+    function matIcon(name, sizePx = 14) {
+      const d = MATERIAL_ICON_PATHS[name];
+      return `<svg width="${sizePx}" height="${sizePx}" viewBox="0 0 24 24" fill="currentColor" style="vertical-align:-2px;flex-shrink:0;"><path d="${d}"/></svg>`;
+    }
 
     // State
     let cmdCount = 0;
@@ -1277,7 +1298,7 @@
           cardTag.className = 'card-tag capture';
           cardTag.textContent = 'VISUAL FEEDBACK LOOP';
           cardBadge.className = 'card-badge capture';
-          cardBadge.textContent = '📸 1.5x Vision';
+          cardBadge.innerHTML = matIcon('photo_camera') + ' 1.5x Vision';
           taskDesc.className = 'task-desc busy';
           taskDesc.textContent = text || 'Exporting canvas viewport PNG to AI context...';
           progressBar.className = 'progress-bar active';
@@ -1300,7 +1321,7 @@
           cardTag.className = 'card-tag busy';
           cardTag.textContent = 'CURRENT EXECUTION';
           cardBadge.className = 'card-badge busy';
-          cardBadge.textContent = '🔮 Multi-Step Script';
+          cardBadge.innerHTML = matIcon('auto_awesome') + ' Multi-Step Script';
           taskDesc.className = 'task-desc busy';
           taskDesc.textContent = text || 'Executing code in Figma sandbox...';
           progressBar.className = 'progress-bar active';
@@ -1324,7 +1345,7 @@
         cardTag.className = 'card-tag';
         cardTag.textContent = 'AI ASSISTANT STATUS';
         cardBadge.className = 'card-badge';
-        cardBadge.textContent = '⚡ Ready';
+        cardBadge.innerHTML = matIcon('bolt') + ' Ready';
         taskDesc.className = 'task-desc';
         taskDesc.textContent = 'Listening on 127.0.0.1:8765. Ready for commands.';
         progressBar.className = 'progress-bar';
@@ -1349,7 +1370,7 @@
       cardTag.className = 'card-tag error';
       cardTag.textContent = 'CONNECTION ERROR';
       cardBadge.className = 'card-badge error';
-      cardBadge.textContent = '⚠️ Server Down';
+      cardBadge.innerHTML = matIcon('warning') + ' Server Down';
       taskDesc.className = 'task-desc error';
       taskDesc.textContent = errMsg || 'Cannot connect to 127.0.0.1:8765. Run install.py.';
       progressBar.className = 'progress-bar';
@@ -1518,7 +1539,7 @@
     function setPaused(val) {
       paused = val;
       parent.postMessage({ pluginMessage: { type: 'SET_PAUSED', value: paused } }, '*');
-      pauseBtn.innerHTML = paused ? '<span>▶</span><span>Resume</span>' : '<span>⏸</span><span>Pause</span>';
+      pauseBtn.innerHTML = paused ? (matIcon('play_arrow') + '<span>Resume</span>') : (matIcon('pause') + '<span>Pause</span>');
       pauseBtn.className = paused ? 'btn-icon-styled active-state' : 'btn-icon-styled';
       pauseStateLabel.textContent = paused ? 'Paused' : 'Running';
       addLog('sys', 'SYS', paused ? 'AI execution paused by user' : 'AI execution resumed');
@@ -1635,7 +1656,7 @@
     // server's version, so a mismatch becomes a visible banner instead.
     function showDiagBanner(text) {
       serverVersionMismatch = true;
-      diagBanner.textContent = text;
+      diagBanner.innerHTML = matIcon('warning', 12) + ' ' + escapeHtml(text);
       diagBanner.classList.remove('hidden');
     }
     function clearDiagBanner() {
@@ -1649,7 +1670,7 @@
         if (!res.ok) return;
         const data = await res.json();
         if (data.serverVersion && data.serverVersion !== PLUGIN_VERSION) {
-          showDiagBanner(`⚠ Server v${data.serverVersion} / plugin v${PLUGIN_VERSION} — reload the plugin (Ctrl+Alt+P) after updating, or re-run install.py --update.`);
+          showDiagBanner(`Server v${data.serverVersion} / plugin v${PLUGIN_VERSION} — reload the plugin (Ctrl+Alt+P) after updating, or re-run install.py --update.`);
         } else {
           clearDiagBanner();
         }
@@ -1781,7 +1802,7 @@
               const msgType = data.type || (data.code ? 'EXECUTE' : 'UNKNOWN');
 
               if (isCap) {
-                setCardState(true, `📸 ${desc}...`, true);
+                setCardState(true, `${desc}...`, true);
                 addLog('shot', 'SHOT', desc);
               } else {
                 setCardState(true, desc, false);
