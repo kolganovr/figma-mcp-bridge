@@ -1,1 +1,1 @@
-{"name":"get_image_fills","description":"Get download URLs for images used as fills in a Figma file","parameters":{"properties":{"file_key":{"description":"Figma file key or complete Figma URL","type":"string"}},"required":["file_key"],"type":"object"}}
+{"name":"get_image_fills","description":"Get download URLs for all images used as fills in a Figma file.","parameters":{"type":"object","properties":{"file_key":{"type":"string","description":"Figma file key or complete Figma URL"}},"required":["file_key"]}}

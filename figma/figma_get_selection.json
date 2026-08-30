@@ -1,1 +1,1 @@
-{"name":"figma_get_selection","description":"Get information and properties of the currently selected nodes in the open Figma canvas","parameters":{"properties":{},"type":"object"}}
+{"name":"figma_get_selection","description":"Get information and properties (dimensions, coordinates, text, fills, parent, page, AutoLayout context) of the currently selected nodes on the Figma canvas.","parameters":{"type":"object","properties":{"target":{"type":"string","description":"fileName of a specific connected Figma document, when more than one is open (see figma_list_targets)."}}}}

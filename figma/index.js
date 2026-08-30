@@ -69,6 +69,39 @@ let commandResolvers = new Map();
 let lastPluginPing = 0;
 const wsClients = new Set();
 
+// One place instead of four different literals (40000 / 45000 / 30000 / 35000)
+// scattered across handleCallTool. `escalate` is how long a synchronous
+// figma_execute_code call is allowed to block before it is handed back to the
+// agent as a background job instead of failing outright — see the Job Ledger
+// below and SERVER_VERSION.
+const TIMEOUTS = { fast: 15000, normal: 45000, heavy: 120000, escalate: 30000 };
+const SERVER_VERSION = "4.0.0";
+
+// ------------------------------------------------------------------
+// Job Ledger — makes a figma_execute_code call that runs long survive its own
+// synchronous wait window instead of the caller's promise just rejecting while
+// the plugin keeps working. Every command gets an entry (cheap: a plain
+// object); most are read once and evicted quickly by the LRU cap below. Only
+// commands that actually run past TIMEOUTS.escalate are ever surfaced to the
+// agent as a job_id via figma_job_status — see sendCommandToPlugin().
+// ------------------------------------------------------------------
+const jobs = new Map();
+const JOBS_MAX = 200;
+
+function touchJob(id, patch) {
+  let job = jobs.get(id);
+  if (!job) {
+    job = { id, status: "running", progress: [], result: undefined, error: null, createdAt: Date.now(), updatedAt: Date.now() };
+    jobs.set(id, job);
+    if (jobs.size > JOBS_MAX) {
+      const oldestKey = jobs.keys().next().value;
+      if (oldestKey !== id) jobs.delete(oldestKey);
+    }
+  }
+  Object.assign(job, patch, { updatedAt: Date.now() });
+  return job;
+}
+
 // Encode unmasked text frame (Server -> Client) as per RFC 6455
 function encodeWsFrame(data) {
   const payload = typeof data === "string" ? Buffer.from(data, "utf8") : Buffer.isBuffer(data) ? data : Buffer.from(JSON.stringify(data), "utf8");
@@ -125,6 +158,14 @@ function handleWsUpgrade(req, socket, head) {
     fragments: [],
     fragmentOpcode: 0,
     fragmentBytes: 0,
+    // Target Router identity — filled in by CLIENT_READY/CLIENT_FOCUS once the
+    // plugin reports it. Defaults to focused=true so a single connected
+    // document (the overwhelmingly common case) needs no handshake to route.
+    focused: true,
+    fileKey: null,
+    fileName: null,
+    pageName: null,
+    pluginVersion: null,
     send(msg) {
       try {
         if (socket.writable) {
@@ -257,15 +298,47 @@ function handleClientMessage(client, data) {
     return;
   }
 
+  // Target Router — every other connected client loses focus the moment one
+  // reports it, so "the window the user is looking at" is always at most one
+  // client, matching what the plugin's own focus/blur listeners see.
   if (data.type === "CLIENT_FOCUS" || data.type === "CLIENT_READY") {
-    client.lastSeen = Date.now();
+    for (const c of wsClients) c.focused = false;
+    client.focused = true;
+    if (data.fileKey !== undefined) client.fileKey = data.fileKey;
+    if (data.fileName !== undefined) client.fileName = data.fileName;
+    if (data.pageName !== undefined) client.pageName = data.pageName;
+    if (data.pluginVersion !== undefined) client.pluginVersion = data.pluginVersion;
     return;
   }
 
-  if (data.id && commandResolvers.has(data.id)) {
-    const resolver = commandResolvers.get(data.id);
-    resolver(data);
-    commandResolvers.delete(data.id);
+  if (data.type === "PAGE_CHANGED") {
+    if (data.pageName !== undefined) client.pageName = data.pageName;
+    return;
+  }
+
+  if (data.type === "PROGRESS" && data.id) {
+    const job = touchJob(data.id, {});
+    job.progress.push({ step: data.step, of: data.of, note: data.note, ts: data.ts || Date.now() });
+    if (job.progress.length > 50) job.progress.shift();
+    return;
+  }
+
+  if (data.id) {
+    // The job ledger is kept current unconditionally — a call that already
+    // escalated past TIMEOUTS.escalate has nothing left in commandResolvers,
+    // but figma_job_status still needs to see this arrive.
+    touchJob(data.id, {
+      status: data.success === false ? "error" : "done",
+      result: data.success === false ? undefined : data,
+      error: data.success === false ? (data.error || "Execution failed in Figma sandbox") : null,
+      code: data.code || null
+    });
+
+    if (commandResolvers.has(data.id)) {
+      const resolver = commandResolvers.get(data.id);
+      resolver(data);
+      commandResolvers.delete(data.id);
+    }
   }
 }
 
@@ -400,7 +473,9 @@ const bridgeServer = http.createServer((req, res) => {
     return res.end(JSON.stringify({
       connected: isOnline,
       wsClients: wsClients.size,
-      lastPing: lastPluginPing
+      lastPing: lastPluginPing,
+      serverVersion: SERVER_VERSION,
+      targets: listTargets()
     }));
   }
 
@@ -469,7 +544,67 @@ process.on("SIGINT", cleanup);
 process.on("SIGTERM", cleanup);
 process.stdin.on("close", cleanup);
 
-async function sendCommandToPlugin(payload, timeoutMs = 45000) {
+// Target Router — picks WHICH connected Figma document a command goes to.
+// `targetFileName`, when given, filters to clients reporting that fileName and
+// throws TARGET_NOT_FOUND if none match. Otherwise: the single connected
+// client wins outright; among several, the focused one wins; several
+// simultaneously "focused" (a focus message crossed in flight) breaks the tie
+// by recency; several connected and NONE focused is genuinely ambiguous and
+// throws AMBIGUOUS_TARGET rather than silently guessing wrong, which is what
+// sorting by lastSeen alone used to do (a PING updates lastSeen too, so it
+// wasn't even reliably tracking real focus).
+function listTargets() {
+  return Array.from(wsClients).map(c => ({
+    id: c.id,
+    fileName: c.fileName || null,
+    pageName: c.pageName || null,
+    pluginVersion: c.pluginVersion || null,
+    focused: !!c.focused,
+    lastSeenMsAgo: Date.now() - c.lastSeen
+  }));
+}
+
+function pickTargetClient(targetFileName) {
+  const clients = Array.from(wsClients);
+  if (clients.length === 0) return null;
+
+  let pool = clients;
+  if (targetFileName) {
+    const wanted = String(targetFileName).toLowerCase();
+    const matched = clients.filter(c => (c.fileName || "").toLowerCase() === wanted);
+    if (matched.length === 0) {
+      const available = clients.map(c => c.fileName || "(unnamed)").join(", ") || "(none connected)";
+      const err = new Error(`No connected Figma document named "${targetFileName}". Currently open: ${available}. Call figma_list_targets to check.`);
+      err.code = "TARGET_NOT_FOUND";
+      throw err;
+    }
+    pool = matched;
+  }
+
+  if (pool.length === 1) return pool[0];
+
+  const focused = pool.filter(c => c.focused);
+  if (focused.length === 1) return focused[0];
+  if (focused.length > 1) return focused.sort((a, b) => b.lastSeen - a.lastSeen)[0];
+
+  if (!targetFileName) {
+    const err = new Error(
+      `${pool.length} Figma documents are connected and none is focused (${pool.map(c => c.fileName || "(unnamed)").join(", ")}). ` +
+      `Click into the intended Figma window, or pass target: "<fileName>" — see figma_list_targets.`
+    );
+    err.code = "AMBIGUOUS_TARGET";
+    throw err;
+  }
+  return pool.sort((a, b) => b.lastSeen - a.lastSeen)[0];
+}
+
+// `options.target` routes to a specific connected document (Target Router).
+// `options.escalateMs`, when set and shorter than timeoutMs, converts a call
+// that is STILL running at that point into a background job instead of
+// blocking (or eventually rejecting) the caller — see the Job Ledger above
+// and figma_job_status. Every other call site keeps today's plain
+// resolve/reject-on-timeout behaviour by simply not passing it.
+async function sendCommandToPlugin(payload, timeoutMs = 45000, options = {}) {
   if (!isBridgeMaster) {
     try {
       const res = await fetch(`http://127.0.0.1:${BRIDGE_PORT}/execute`, {
@@ -488,45 +623,68 @@ async function sendCommandToPlugin(payload, timeoutMs = 45000) {
       }
       const data = await res.json();
       if (data.success) return data;
-      throw new Error(data.error || "Execution failed in Figma sandbox");
+      const err = new Error(data.error || "Execution failed in Figma sandbox");
+      if (data.code) err.code = data.code;
+      throw err;
     } catch (err) {
       // The owner of :8765 is gone — claim the port ourselves so the NEXT call
       // succeeds instead of failing forever.
       const cause = err && err.cause ? err.cause.code : null;
       if (cause === "ECONNREFUSED" || cause === "ECONNRESET" || /fetch failed/i.test(err.message || "")) {
         tryBecomeMaster();
-        throw new Error(
+        const wrapped = new Error(
           "The bridge instance that owned :8765 is no longer running. This server is taking the port over — retry the call."
         );
+        wrapped.code = "BRIDGE_OFFLINE";
+        throw wrapped;
       }
-      throw new Error(err.message || "Failed to communicate with Figma Bridge server on :8765");
+      throw err;
     }
   }
 
+  const targetClient = pickTargetClient(payload.target);
+  const cmdPayload = { ...payload };
+  delete cmdPayload.target;
+
   return new Promise((resolve, reject) => {
     const id = "cmd_" + Math.random().toString(36).substring(2, 9);
-    const cmd = { id, ...payload };
+    const cmd = { id, ...cmdPayload };
+    let escalateTimer = null;
 
-    const timer = setTimeout(() => {
+    const hardTimer = setTimeout(() => {
       commandResolvers.delete(id);
       const queuedAt = pendingCommands.findIndex(c => c.id === id);
       if (queuedAt !== -1) pendingCommands.splice(queuedAt, 1);
-      reject(new Error("Timeout waiting for Figma Plugin response. Ensure Figma is active and Antigravity Bridge plugin is running."));
+      const err = new Error("Timeout waiting for Figma Plugin response. Ensure Figma is active and Antigravity Bridge plugin is running.");
+      err.code = "BRIDGE_OFFLINE";
+      reject(err);
     }, timeoutMs);
 
+    if (options.escalateMs && options.escalateMs < timeoutMs) {
+      escalateTimer = setTimeout(() => {
+        if (!commandResolvers.has(id)) return; // already settled through the normal path
+        commandResolvers.delete(id);
+        clearTimeout(hardTimer);
+        touchJob(id, {}); // ensure a ledger entry exists even if no PROGRESS frame ever arrived
+        resolve({ __escalated: true, job_id: id, elapsed_ms: options.escalateMs });
+      }, options.escalateMs);
+    }
+
     commandResolvers.set(id, (response) => {
-      clearTimeout(timer);
+      clearTimeout(hardTimer);
+      if (escalateTimer) clearTimeout(escalateTimer);
       if (response.success) {
         resolve(response);
       } else {
-        reject(new Error(response.error || "Execution failed in Figma sandbox"));
+        const err = new Error(response.error || "Execution failed in Figma sandbox");
+        if (response.code) err.code = response.code;
+        reject(err);
       }
     });
 
     // 1. Direct WebSocket Push (0ms latency)
-    if (wsClients.size > 0) {
-      const activeClient = [...wsClients].sort((a, b) => b.lastSeen - a.lastSeen)[0];
-      activeClient.send(cmd);
+    if (targetClient) {
+      targetClient.send(cmd);
     } else {
       // 2. Queue for incoming WebSocket connection or HTTP long-poll
       pendingCommands.push(cmd);
@@ -586,7 +744,7 @@ const TOOLS = [
       properties: {
         code: {
           type: "string",
-          description: "JavaScript to run in the Figma sandbox, compiled as an async function body (top-level await and return allowed; import/export are not). Example: const frame = figma.createFrame(); frame.resize(400, 600); frame.name = 'Card'; figma.currentPage.appendChild(frame); figma.currentPage.selection = [frame]; return 'Created frame';"
+          description: "JavaScript to run in the Figma sandbox, compiled as an async function body (top-level await and return allowed; import/export are not). Example: const frame = figma.createFrame(); frame.resize(400, 600); frame.name = 'Card'; figma.currentPage.appendChild(frame); return 'Created frame';"
         },
         description: {
           type: "string",
@@ -594,11 +752,28 @@ const TOOLS = [
         },
         capture: {
           type: "boolean",
-          description: "Set to true to immediately take a PNG screenshot of the selected/created UI elements and return it to the model for visual verification (Visual Feedback Loop)."
+          description: "Set to true to capture a PNG of what this call created/modified and return it for visual verification. Never touches the user's selection — see capture_node_ids."
+        },
+        capture_node_ids: {
+          type: "array",
+          items: { type: "string" },
+          description: "Node ids to screenshot instead of the default (whatever this call created/modified, falling back to the user's current selection only if neither exists). The user's selection is never mutated to enable a capture."
+        },
+        diff: {
+          type: "boolean",
+          description: "Requires capture_node_ids. Captures those nodes BEFORE running the code too, so the response includes a before/after image pair instead of just after."
         },
         scale: {
           type: "number",
           description: "Screenshot resolution scale (default: 1.5)."
+        },
+        async: {
+          type: "boolean",
+          description: "Return { status: 'running', job_id } immediately instead of waiting — poll with figma_job_status. Calls that run past 30s do this automatically even without the flag."
+        },
+        target: {
+          type: "string",
+          description: "fileName of a specific connected Figma document to run this in, when more than one is open (see figma_list_targets). Defaults to whichever is currently focused."
         }
       },
       required: ["code"]
@@ -621,16 +796,25 @@ const TOOLS = [
         description: {
           type: "string",
           description: "Optional action description for Figma toast and logs."
+        },
+        target: {
+          type: "string",
+          description: "fileName of a specific connected Figma document, when more than one is open (see figma_list_targets)."
         }
       }
     }
   },
   {
     name: "figma_get_selection",
-    description: "Get information and properties (dimensions, coordinates, text, fills) of the currently selected nodes on the Figma canvas.",
+    description: "Get information and properties (dimensions, coordinates, text, fills, parent, page, AutoLayout context) of the currently selected nodes on the Figma canvas.",
     inputSchema: {
       type: "object",
-      properties: {}
+      properties: {
+        target: {
+          type: "string",
+          description: "fileName of a specific connected Figma document, when more than one is open (see figma_list_targets)."
+        }
+      }
     }
   },
   {
@@ -669,6 +853,14 @@ const TOOLS = [
         limit: {
           type: "number",
           description: "Maximum number of components to return to prevent token bloat (default: 30)"
+        },
+        refresh_index: {
+          type: "boolean",
+          description: "Force a fresh scan instead of using the cached component index (normally at most 60s stale — see figma_read_canvas / instructions for how the index works)."
+        },
+        target: {
+          type: "string",
+          description: "fileName of a specific connected Figma document, when more than one is open (see figma_list_targets)."
         }
       }
     }
@@ -715,6 +907,10 @@ const TOOLS = [
         scale: {
           type: "number",
           description: "Screenshot resolution scale (default: 1.5)"
+        },
+        target: {
+          type: "string",
+          description: "fileName of a specific connected Figma document, when more than one is open (see figma_list_targets)."
         }
       }
     }
@@ -732,6 +928,10 @@ const TOOLS = [
         limit: {
           type: "number",
           description: "Maximum number of tokens to return across all matched collections, to prevent token bloat on large design-token files (default: 300)"
+        },
+        target: {
+          type: "string",
+          description: "fileName of a specific connected Figma document, when more than one is open (see figma_list_targets)."
         }
       }
     }
@@ -761,6 +961,10 @@ const TOOLS = [
         scale: {
           type: "number",
           description: "Screenshot resolution scale (default: 1.5)"
+        },
+        target: {
+          type: "string",
+          description: "fileName of a specific connected Figma document, when more than one is open (see figma_list_targets)."
         }
       },
       required: ["collection_name", "mode_name"]
@@ -824,6 +1028,10 @@ const TOOLS = [
         scale: {
           type: "number",
           description: "Screenshot resolution scale factor (default: 2.0)"
+        },
+        target: {
+          type: "string",
+          description: "fileName of a specific connected Figma document, when more than one is open (see figma_list_targets)."
         }
       },
       required: ["svg_code"]
@@ -847,6 +1055,86 @@ const TOOLS = [
         limit: {
           type: "number",
           description: "Maximum number of artboards to list, to prevent token bloat on pages with hundreds of frames (default: 200)"
+        },
+        layout: {
+          type: "string",
+          enum: ["row", "grid"],
+          description: "'row' (default) places along one axis per `direction`, like before. 'grid' shelf-packs into a `columns`-wide grid so a run of generated screens fills a compact rectangle instead of one long ribbon."
+        },
+        columns: {
+          type: "number",
+          description: "Column count for layout: 'grid' (default: 4)."
+        },
+        target: {
+          type: "string",
+          description: "fileName of a specific connected Figma document, when more than one is open (see figma_list_targets)."
+        }
+      }
+    }
+  },
+  {
+    name: "figma_rollback",
+    description: "Undo what a previous write call (figma_execute_code, figma_insert_component_instance, figma_insert_svg) did: removes nodes it created and restores properties on nodes it modified. Deletions the code performed on pre-existing nodes are never recoverable. Every write call's response includes the checkpoint_id to pass here.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        checkpoint_id: {
+          type: "string",
+          description: "The checkpoint_id from a previous write call's response. Omit (or pass \"last\") to roll back the most recent not-yet-rolled-back checkpoint."
+        },
+        target: {
+          type: "string",
+          description: "fileName of a specific connected Figma document, when more than one is open (see figma_list_targets)."
+        }
+      }
+    }
+  },
+  {
+    name: "figma_job_status",
+    description: "Poll a figma_execute_code call that was handed back as { status: 'running', job_id } because it ran past 30s (or was called with async: true). Returns live progress while running, and — once finished — the exact same result/screenshot the synchronous call would have returned. A finished job is forgotten after being read once.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        job_id: { type: "string", description: "The job_id from figma_execute_code's { status: 'running', job_id } response." }
+      },
+      required: ["job_id"]
+    }
+  },
+  {
+    name: "figma_list_targets",
+    description: "List every Figma document currently connected to this bridge (fileName, current page, which one is focused). Use this when a LIVE tool call fails with AMBIGUOUS_TARGET, or before working with a specific file among several open at once — pass the fileName as `target` on any LIVE tool.",
+    inputSchema: { type: "object", properties: {} }
+  },
+  {
+    name: "figma_read_canvas",
+    description: "Read the LIVE, currently-open Figma document as token-optimized Pseudo-JSX/Tree/JSON — the same pipeline get_file/get_node use for the cloud API, applied to whatever is open in Figma Desktop right now. Prefer this over hand-writing a tree walk in figma_execute_code; it is far cheaper in tokens and its output format matches get_file/get_node exactly.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        node_ids: {
+          type: "string",
+          description: "Comma-separated node IDs to read. Omit to read the top-level frames of the current page."
+        },
+        format: {
+          type: "string",
+          enum: ["jsx", "tree", "json"],
+          description: "Output format — same meaning as get_file/get_node (default: 'jsx')."
+        },
+        depth: {
+          type: "number",
+          description: "Traversal depth from each requested node, hard-capped at 12 (default: 6)."
+        },
+        include_hidden: {
+          type: "boolean",
+          description: "Whether to include hidden (visible=false) layers (default: false)."
+        },
+        budget_tokens: {
+          type: "number",
+          description: "Target response size in tokens (default: 4000). If the requested depth overshoots this, depth is reduced and re-serialized (no extra round trip) until it fits, with a trailing comment noting the reduction."
+        },
+        target: {
+          type: "string",
+          description: "fileName of a specific connected Figma document, when more than one is open (see figma_list_targets)."
         }
       }
     }
@@ -873,7 +1161,8 @@ const TOOLS = [
         },
         simplify: { type: "boolean", description: "Whether to apply token pruning and vector collapsing (default: true)" },
         include_hidden: { type: "boolean", description: "Whether to include hidden layers (default: false)" },
-        max_depth: { type: "number", description: "Hard cap on tree traversal depth before nodes are truncated (default: 25)" }
+        max_depth: { type: "number", description: "Hard cap on tree traversal depth before nodes are truncated (default: 25)" },
+        budget_tokens: { type: "number", description: "Target response size in tokens. If set (and simplify is not false), depth is reduced and re-serialized until the output fits, with a trailing comment noting the reduction." }
       },
       required: ["file_key"]
     }
@@ -894,7 +1183,8 @@ const TOOLS = [
         },
         simplify: { type: "boolean", description: "Whether to apply token pruning and vector collapsing (default: true)" },
         include_hidden: { type: "boolean", description: "Whether to include hidden layers (default: false)" },
-        max_depth: { type: "number", description: "Hard cap on tree traversal depth before nodes are truncated (default: 25)" }
+        max_depth: { type: "number", description: "Hard cap on tree traversal depth before nodes are truncated (default: 25)" },
+        budget_tokens: { type: "number", description: "Target response size in tokens. If set (and simplify is not false), depth is reduced and re-serialized until the output fits, with a trailing comment noting the reduction." }
       },
       required: ["file_key"]
     }
@@ -973,6 +1263,61 @@ const TOOLS = [
 ];
 
 // ==========================================================================
+// Tool tiers — which of the 22 defined tools are actually SENT to the model.
+// A longer tools/list costs every single turn (every schema is re-sent) and
+// makes tool SELECTION worse, not just more expensive, so the surface is
+// trimmed by what's actually usable in this server's current configuration:
+//   - "core"/"extended" tools are always sent — LIVE tools work with zero
+//     configuration once the plugin is connected.
+//   - "rest" tools need FIGMA_PERSONAL_ACCESS_TOKEN; without one they are
+//     dead weight (every call would just fail with REST_TOKEN_MISSING), so
+//     they're hidden entirely rather than left in as a confusing option.
+//   - "legacy" tools (figma_create_ui_card, get_me, get_image_fills) are
+//     superseded by other tools and hidden by default; set
+//     FIGMA_MCP_LEGACY_TOOLS=1 to keep them available for existing workflows
+//     built around them. Nothing is deleted, only hidden.
+// ==========================================================================
+const TOOL_TIERS = {
+  figma_execute_code: "core",
+  figma_read_canvas: "core",
+  figma_screenshot: "core",
+  figma_find_components: "core",
+  figma_insert_component_instance: "core",
+  figma_insert_svg: "core",
+  figma_get_variables: "core",
+  figma_rollback: "core",
+
+  figma_get_selection: "extended",
+  figma_get_canvas_layout: "extended",
+  figma_set_variables_mode: "extended",
+  figma_job_status: "extended",
+  figma_list_targets: "extended",
+
+  get_file: "rest",
+  get_node: "rest",
+  get_image: "rest",
+  get_styles: "rest",
+  get_components: "rest",
+  get_comments: "rest",
+  post_comment: "rest",
+
+  figma_create_ui_card: "legacy",
+  get_me: "legacy",
+  get_image_fills: "legacy"
+};
+
+function getActiveTools() {
+  const hasRestToken = !!FIGMA_TOKEN;
+  const legacyEnabled = process.env.FIGMA_MCP_LEGACY_TOOLS === "1";
+  return TOOLS.filter(t => {
+    const tier = TOOL_TIERS[t.name] || "extended";
+    if (tier === "rest") return hasRestToken;
+    if (tier === "legacy") return legacyEnabled;
+    return true;
+  });
+}
+
+// ==========================================================================
 // Server-level instructions handed to the MCP client on initialize, plus
 // hints appended to failures that never reach the Figma sandbox.
 // ==========================================================================
@@ -985,6 +1330,8 @@ const SERVER_INSTRUCTIONS = [
   "3. `eval()` is a bound function in the Figma sandbox, so every eval is an INDIRECT eval: it cannot see the caller's locals and its declarations reach neither the caller nor globalThis. Never use eval to build reusable helpers — it fails silently.",
   "4. Persist code with `bridge.define(name, source)` (source must end in `module.exports = { ... }`) and reload it in later calls with `bridge.require(name)`. Persist data with `bridge.store.set/get` (durable, lives in the .fig file) or `bridge.state` (scratch, cleared on plugin reload).",
   "5. `return bridge.info()` reports the live runtime contract, injected globals, defined modules and stored keys.",
+  "6. A call still running past 30s is hidden from you — figma_execute_code returns { status: \"running\", job_id }` immediately instead of blocking; poll it with figma_job_status({ job_id }). Pass `async: true` to opt into that immediately instead of waiting out the 30s.",
+  "7. Call `progress(step, of, note)` inside long-running code (a multi-screen generation loop, etc.) so figma_job_status can report real progress instead of just \"still running\".",
   "",
   "Known Figma platform limits the bridge wraps for you:",
   "- x/y of a node inside an INSTANCE cannot be set (relative-transform is not overridable). Position through AutoLayout, or edit the master component. `bridge.setPosition(node, x, y)` raises this early with the remedy.",
@@ -992,20 +1339,31 @@ const SERVER_INSTRUCTIONS = [
   "- Fonts must be loaded before touching text: `await ensureFont(family, style)`.",
   "- Colors are floats in 0..1, not 0..255.",
   "",
+  "Reading the LIVE document: figma_read_canvas returns the same token-optimized Pseudo-JSX/tree/json the REST tools do, but for whatever is open right now — prefer it over writing your own traversal in figma_execute_code. Pass budget_tokens to cap the response size; it degrades by reducing depth and tells you how in a trailing comment.",
+  "",
+  "Every write call (figma_execute_code, figma_insert_component_instance, figma_insert_svg) opens a checkpoint automatically and returns its id as `checkpoint_id`. figma_rollback({ checkpoint_id }) (or \"last\") undoes what it created and restores what it modified — but only for nodes it created or nodes something explicitly snapshotted first; a node the code deleted is never recoverable. Responses also carry `created`/`modified` node-id lists and a `warnings` array from a cheap auto-lint (overflow, zero-size nodes, low text contrast) — read those before spending a screenshot to find the same thing visually.",
+  "",
+  "Capturing: pass capture_node_ids to screenshot specific nodes without touching the user's selection. Without it, a successful write call captures whatever it just created/modified; only a call with none of those falls back to the current selection. The whole page is never auto-captured.",
+  "",
+  "Multiple Figma documents open at once: figma_list_targets lists them; pass target: \"<fileName>\" on any LIVE tool to aim at a specific one. With nothing specified, the currently-focused Figma window is used; if more than one is connected and none is focused, calls fail with AMBIGUOUS_TARGET instead of guessing.",
+  "",
   "Always close the visual loop: pass `capture: true` or call figma_screenshot after changing the canvas, and inspect the returned PNG before declaring the task done."
 ].join("\n");
 
 const SERVER_ERROR_HINTS = [
   {
     test: /timeout|not connected|8765|bridge/i,
+    code: "BRIDGE_OFFLINE",
     hint: "The Figma plugin did not answer. Ask the user to open Figma DESKTOP (not the browser) and launch the Antigravity Bridge plugin (Ctrl+Alt+P / Cmd+Option+P) until the status shows CONNECTED, then retry."
   },
   {
     test: /FIGMA_PERSONAL_ACCESS_TOKEN|401|403|Unauthorized/i,
+    code: "REST_TOKEN_MISSING",
     hint: "REST tools need FIGMA_PERSONAL_ACCESS_TOKEN in the MCP server environment. Live tools (figma_execute_code, figma_screenshot, ...) work without a token — prefer them when the file is open in Figma Desktop."
   },
   {
     test: /Unknown tool/i,
+    code: "UNKNOWN_TOOL",
     hint: "Call tools/list to see the tools this bridge actually exposes."
   }
 ];
@@ -1020,12 +1378,65 @@ function normalizeNodeIds(value) {
   return ids.length > 0 ? ids.join(",") : null;
 }
 
+function classifyServerCode(message) {
+  for (const rule of SERVER_ERROR_HINTS) {
+    if (rule.test.test(message)) return rule.code;
+  }
+  return null;
+}
+
 function withServerHint(message) {
   if (/\bHINT:/.test(message)) return message; // plugin already explained it
   for (const rule of SERVER_ERROR_HINTS) {
     if (rule.test.test(message)) return message + "\n\nHINT: " + rule.hint;
   }
   return message;
+}
+
+// Every successful write/read tool renders through this so an agent gets the
+// same envelope shape regardless of which tool it called: { ok, result,
+// created, modified, warnings, checkpoint_id, duration_ms, ...extra }.
+function buildStructuredResult(response, extra) {
+  const envelope = { ok: true, result: response && response.result !== undefined ? response.result : null };
+  if (response) {
+    if (Array.isArray(response.created) && response.created.length) envelope.created = response.created;
+    if (Array.isArray(response.modified) && response.modified.length) envelope.modified = response.modified;
+    if (Array.isArray(response.warnings) && response.warnings.length) envelope.warnings = response.warnings;
+    if (response.checkpointId) envelope.checkpoint_id = response.checkpointId;
+    if (typeof response.durationMs === "number") envelope.duration_ms = response.durationMs;
+  }
+  if (extra) Object.assign(envelope, extra);
+  return JSON.stringify(envelope, null, 2);
+}
+
+// Mirrors buildStructuredResult for the failure path, used by handleCallTool's
+// outer catch — every tool failure comes back with the same { ok:false, code,
+// error } shape instead of a single opaque line of text.
+function buildErrorEnvelope(error) {
+  const rawMessage = error && error.message ? error.message : String(error);
+  const code = (error && error.code) || classifyServerCode(rawMessage) || null;
+  return { ok: false, code, error: withServerHint(rawMessage) };
+}
+
+// Shared by figma_read_canvas AND get_file/get_node: serialize at the
+// requested depth, and if that overshoots budget_tokens, re-serialize the
+// SAME already-fetched tree at a shallower maxDepth (cheap — pure JS, no
+// extra network/plugin round trip) until it fits or depth bottoms out at 0.
+function applyTokenBudget(rawData, { format, includeHidden, maxDepth, budgetTokens }) {
+  let depthTry = maxDepth;
+  let output = optimizeFigmaData(rawData, { format, simplify: true, maxDepth: depthTry, includeHidden });
+  let estTokens = Math.ceil(output.length / 4);
+
+  while (estTokens > budgetTokens && depthTry > 0) {
+    depthTry -= 1;
+    output = optimizeFigmaData(rawData, { format, simplify: true, maxDepth: depthTry, includeHidden });
+    estTokens = Math.ceil(output.length / 4);
+  }
+
+  if (depthTry < maxDepth) {
+    output += `\n\n<!-- truncated at depth=${depthTry} (budget ${budgetTokens} tok, ~${estTokens} tok emitted). Raise budget_tokens or fetch a specific node_id for full depth there. -->`;
+  }
+  return output;
 }
 
 async function handleCallTool(name, args = {}) {
@@ -1035,30 +1446,137 @@ async function handleCallTool(name, args = {}) {
         const desc = args.description || "Execute JS Code";
         const capture = args.capture === true;
         const scale = args.scale || 1.5;
+        const wantsAsync = args.async === true;
+        const normalizedCaptureIds = normalizeNodeIds(args.capture_node_ids);
+
         const response = await sendCommandToPlugin({
           code: args.code,
           description: desc,
           capture: capture,
-          scale: scale
-        }, 40000);
+          capture_node_ids: normalizedCaptureIds ? normalizedCaptureIds.split(",") : null,
+          diff: args.diff === true,
+          scale: scale,
+          target: args.target
+        }, TIMEOUTS.heavy, { escalateMs: wantsAsync ? 50 : TIMEOUTS.escalate });
+
+        if (response.__escalated) {
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                ok: true,
+                status: "running",
+                job_id: response.job_id,
+                note: `Still running in Figma after ${Math.round(response.elapsed_ms / 1000)}s. Poll with figma_job_status({ job_id: "${response.job_id}" }).`
+              }, null, 2)
+            }]
+          };
+        }
 
         const content = [];
-        const resText = typeof response.result === "object" ? JSON.stringify(response.result, null, 2) : String(response.result);
-        content.push({
-          type: "text",
-          text: `Figma Execution Result: ${resText}`
-        });
+        content.push({ type: "text", text: buildStructuredResult(response) });
 
+        if (response.beforeScreenshot) {
+          content.push({ type: "image", data: response.beforeScreenshot.replace(/^data:image\/\w+;base64,/, ""), mimeType: "image/png" });
+        }
         if (response.screenshot) {
-          const cleanB64 = response.screenshot.replace(/^data:image\/\w+;base64,/, "");
-          content.push({
-            type: "image",
-            data: cleanB64,
-            mimeType: "image/png"
-          });
+          content.push({ type: "image", data: response.screenshot.replace(/^data:image\/\w+;base64,/, ""), mimeType: "image/png" });
+        }
+        if (Array.isArray(response.screenshots)) {
+          for (const shot of response.screenshots) {
+            if (shot.base64) content.push({ type: "image", data: shot.base64.replace(/^data:image\/\w+;base64,/, ""), mimeType: "image/png" });
+          }
         }
 
         return { content };
+      }
+
+      case "figma_job_status": {
+        const job = jobs.get(args.job_id);
+        if (!job) {
+          return {
+            isError: true,
+            content: [{
+              type: "text",
+              text: JSON.stringify({ ok: false, code: "JOB_NOT_FOUND", error: `No job "${args.job_id}". A job is forgotten once read after finishing, or after ~${JOBS_MAX} newer jobs have been created.` }, null, 2)
+            }]
+          };
+        }
+
+        if (job.status === "running") {
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                ok: true, status: "running", job_id: job.id,
+                elapsed_ms: Date.now() - job.createdAt,
+                progress: job.progress.slice(-5)
+              }, null, 2)
+            }]
+          };
+        }
+
+        // Read-once: a finished job is removed after this response so the
+        // ledger doesn't hold onto screenshots and results indefinitely.
+        jobs.delete(job.id);
+
+        if (job.status === "error") {
+          return {
+            isError: true,
+            content: [{
+              type: "text",
+              text: JSON.stringify(buildErrorEnvelope({ message: job.error, code: job.code }), null, 2)
+            }]
+          };
+        }
+
+        const response = job.result;
+        const content = [];
+        content.push({ type: "text", text: buildStructuredResult(response, { status: "done", job_id: job.id }) });
+        if (response.screenshot) content.push({ type: "image", data: response.screenshot.replace(/^data:image\/\w+;base64,/, ""), mimeType: "image/png" });
+        if (Array.isArray(response.screenshots)) {
+          for (const shot of response.screenshots) {
+            if (shot.base64) content.push({ type: "image", data: shot.base64.replace(/^data:image\/\w+;base64,/, ""), mimeType: "image/png" });
+          }
+        }
+        return { content };
+      }
+
+      case "figma_read_canvas": {
+        const nodeIds = normalizeNodeIds(args.node_ids);
+        const format = args.format || "jsx";
+        const requestedDepth = Number.isFinite(args.depth) ? args.depth : 6;
+        const includeHidden = args.include_hidden === true;
+        const budgetTokens = Number.isFinite(args.budget_tokens) ? args.budget_tokens : 4000;
+
+        const response = await sendCommandToPlugin({
+          type: "READ_CANVAS",
+          node_ids: nodeIds,
+          depth: requestedDepth,
+          include_hidden: includeHidden,
+          target: args.target
+        }, TIMEOUTS.normal);
+
+        const rawData = response.result;
+        let output = applyTokenBudget(rawData, { format, includeHidden, maxDepth: requestedDepth, budgetTokens });
+        if (rawData && rawData.truncatedTop) {
+          output += `\n\n<!-- canvas traversal capped at 4000 nodes; some siblings were not sent. Narrow with node_ids. -->`;
+        }
+
+        return { content: [{ type: "text", text: output }] };
+      }
+
+      case "figma_rollback": {
+        const response = await sendCommandToPlugin({
+          type: "ROLLBACK",
+          checkpoint_id: args.checkpoint_id || "last",
+          target: args.target
+        }, TIMEOUTS.normal);
+        return { content: [{ type: "text", text: JSON.stringify({ ok: true, ...response.result }, null, 2) }] };
+      }
+
+      case "figma_list_targets": {
+        return { content: [{ type: "text", text: JSON.stringify({ ok: true, targets: listTargets() }, null, 2) }] };
       }
 
       case "figma_screenshot": {
@@ -1067,8 +1585,9 @@ async function handleCallTool(name, args = {}) {
           type: "SCREENSHOT",
           nodeIds: normalizeNodeIds(args.node_ids),
           scale: args.scale || 1.5,
-          description: desc
-        }, 40000);
+          description: desc,
+          target: args.target
+        }, TIMEOUTS.normal);
 
         const content = [];
         content.push({
@@ -1100,23 +1619,43 @@ async function handleCallTool(name, args = {}) {
       }
 
       case "figma_get_selection": {
+        // Runs as plugin-sandbox JS (not Node), so it inlines its own compact
+        // fill formatter rather than reaching for figma/optimizer/styles.js —
+        // that module only exists on the server side of the WebSocket.
+        // Compact by design: a solid fill becomes one hex string instead of
+        // the full paint object (gradient stops, boundVariables, matrices),
+        // and text is previewed rather than dumped in full. Parent/page and
+        // AutoLayout context are included since "what is this inside of" is
+        // usually the actual question behind checking a selection.
         const code = `
+          function hex(c) {
+            const b = (n) => Math.round(Math.max(0, Math.min(1, n)) * 255).toString(16).padStart(2, '0').toUpperCase();
+            return '#' + b(c.r) + b(c.g) + b(c.b);
+          }
+          function fillsSummary(fills) {
+            if (!fills || fills === figma.mixed || !Array.isArray(fills) || fills.length === 0) return null;
+            return fills.filter(f => f.visible !== false).map(f => f.type === 'SOLID' ? hex(f.color) : f.type).join('; ') || null;
+          }
           const selection = figma.currentPage.selection;
           return selection.map(node => ({
             id: node.id,
             name: node.name,
             type: node.type,
-            width: node.width,
-            height: node.height,
-            x: node.x,
-            y: node.y,
-            fills: node.fills,
-            characters: node.characters
+            width: Math.round(node.width || 0),
+            height: Math.round(node.height || 0),
+            x: Math.round(node.x || 0),
+            y: Math.round(node.y || 0),
+            page: figma.currentPage.name,
+            parentId: node.parent ? node.parent.id : null,
+            parentName: node.parent ? node.parent.name : null,
+            layoutMode: ('layoutMode' in node && node.layoutMode !== 'NONE') ? node.layoutMode : undefined,
+            fills: fillsSummary(node.fills),
+            characters: node.type === 'TEXT' ? String(node.characters || '').slice(0, 200) : undefined
           }));
         `;
-        const response = await sendCommandToPlugin({ code, description: "Get Selected Nodes" });
+        const response = await sendCommandToPlugin({ code, description: "Get Selected Nodes", target: args.target }, TIMEOUTS.normal);
         return {
-          content: [{ type: "text", text: JSON.stringify(response.result, null, 2) }]
+          content: [{ type: "text", text: JSON.stringify({ ok: true, result: response.result }, null, 2) }]
         };
       }
 
@@ -1277,15 +1816,12 @@ async function handleCallTool(name, args = {}) {
           query: args.query || "",
           page_name: args.page_name,
           include_variants: args.include_variants !== false,
-          limit: args.limit || 30
-        }, 30000);
+          limit: args.limit || 30,
+          refresh_index: args.refresh_index === true,
+          target: args.target
+        }, TIMEOUTS.fast);
 
-        return {
-          content: [{
-            type: "text",
-            text: JSON.stringify(response.result, null, 2)
-          }]
-        };
+        return { content: [{ type: "text", text: JSON.stringify({ ok: true, result: response.result }, null, 2) }] };
       }
 
       case "figma_insert_component_instance": {
@@ -1300,25 +1836,14 @@ async function handleCallTool(name, args = {}) {
           target_parent_id: args.target_parent_id,
           position: args.position,
           capture: capture,
-          scale: scale
-        }, 40000);
+          scale: scale,
+          target: args.target
+        }, TIMEOUTS.normal);
 
-        const content = [];
-        const resText = typeof response.result === "object" ? JSON.stringify(response.result, null, 2) : String(response.result);
-        content.push({
-          type: "text",
-          text: `Figma Component Instance Inserted: ${resText}`
-        });
-
+        const content = [{ type: "text", text: buildStructuredResult(response) }];
         if (response.screenshot) {
-          const cleanB64 = response.screenshot.replace(/^data:image\/\w+;base64,/, "");
-          content.push({
-            type: "image",
-            data: cleanB64,
-            mimeType: "image/png"
-          });
+          content.push({ type: "image", data: response.screenshot.replace(/^data:image\/\w+;base64,/, ""), mimeType: "image/png" });
         }
-
         return { content };
       }
 
@@ -1326,15 +1851,11 @@ async function handleCallTool(name, args = {}) {
         const response = await sendCommandToPlugin({
           type: "GET_VARIABLES",
           collection_name: args.collection_name,
-          limit: args.limit || 300
-        }, 30000);
+          limit: args.limit || 300,
+          target: args.target
+        }, TIMEOUTS.fast);
 
-        return {
-          content: [{
-            type: "text",
-            text: JSON.stringify(response.result, null, 2)
-          }]
-        };
+        return { content: [{ type: "text", text: JSON.stringify({ ok: true, result: response.result }, null, 2) }] };
       }
 
       case "figma_set_variables_mode": {
@@ -1346,25 +1867,14 @@ async function handleCallTool(name, args = {}) {
           mode_name: args.mode_name,
           target_id: args.target_id,
           capture: capture,
-          scale: scale
-        }, 35000);
+          scale: scale,
+          target: args.target
+        }, TIMEOUTS.normal);
 
-        const content = [];
-        const resText = typeof response.result === "object" ? JSON.stringify(response.result, null, 2) : String(response.result);
-        content.push({
-          type: "text",
-          text: `Figma Variable Mode Updated: ${resText}`
-        });
-
+        const content = [{ type: "text", text: buildStructuredResult(response) }];
         if (response.screenshot) {
-          const cleanB64 = response.screenshot.replace(/^data:image\/\w+;base64,/, "");
-          content.push({
-            type: "image",
-            data: cleanB64,
-            mimeType: "image/png"
-          });
+          content.push({ type: "image", data: response.screenshot.replace(/^data:image\/\w+;base64,/, ""), mimeType: "image/png" });
         }
-
         return { content };
       }
 
@@ -1384,25 +1894,14 @@ async function handleCallTool(name, args = {}) {
           position: args.position,
           as_component: args.as_component === true,
           capture: capture,
-          scale: scale
-        }, 40000);
+          scale: scale,
+          target: args.target
+        }, TIMEOUTS.normal);
 
-        const content = [];
-        const resText = typeof response.result === "object" ? JSON.stringify(response.result, null, 2) : String(response.result);
-        content.push({
-          type: "text",
-          text: `Figma SVG Vector Inserted: ${resText}`
-        });
-
+        const content = [{ type: "text", text: buildStructuredResult(response) }];
         if (response.screenshot) {
-          const cleanB64 = response.screenshot.replace(/^data:image\/\w+;base64,/, "");
-          content.push({
-            type: "image",
-            data: cleanB64,
-            mimeType: "image/png"
-          });
+          content.push({ type: "image", data: response.screenshot.replace(/^data:image\/\w+;base64,/, ""), mimeType: "image/png" });
         }
-
         return { content };
       }
 
@@ -1411,15 +1910,13 @@ async function handleCallTool(name, args = {}) {
           type: "GET_CANVAS_LAYOUT",
           direction: args.direction || "RIGHT",
           gap: args.gap || 80,
-          limit: args.limit || 200
-        }, 30000);
+          limit: args.limit || 200,
+          layout: args.layout,
+          columns: args.columns,
+          target: args.target
+        }, TIMEOUTS.fast);
 
-        return {
-          content: [{
-            type: "text",
-            text: JSON.stringify(response.result, null, 2)
-          }]
-        };
+        return { content: [{ type: "text", text: JSON.stringify({ ok: true, result: response.result }, null, 2) }] };
       }
 
       // REST API
@@ -1433,12 +1930,11 @@ async function handleCallTool(name, args = {}) {
         const data = await figmaApiRequest(`/files/${encodeURIComponent(fileKey)}?depth=${depth}`);
         const format = args.format || "jsx";
         const simplify = args.simplify !== false;
-        const output = optimizeFigmaData(data, {
-          format,
-          simplify,
-          maxDepth: args.max_depth || 25,
-          includeHidden: args.include_hidden === true
-        });
+        const maxDepth = args.max_depth || 25;
+        const includeHidden = args.include_hidden === true;
+        const output = (simplify && format !== "raw" && Number.isFinite(args.budget_tokens))
+          ? applyTokenBudget(data, { format, includeHidden, maxDepth, budgetTokens: args.budget_tokens })
+          : optimizeFigmaData(data, { format, simplify, maxDepth, includeHidden });
         return { content: [{ type: "text", text: output }] };
       }
       case "get_node": {
@@ -1450,12 +1946,11 @@ async function handleCallTool(name, args = {}) {
         const data = await figmaApiRequest(`/files/${encodeURIComponent(fileKey)}/nodes?ids=${encodeURIComponent(nodeIds)}&depth=${depth}`);
         const format = args.format || "jsx";
         const simplify = args.simplify !== false;
-        const output = optimizeFigmaData(data, {
-          format,
-          simplify,
-          maxDepth: args.max_depth || 25,
-          includeHidden: args.include_hidden === true
-        });
+        const maxDepth = args.max_depth || 25;
+        const includeHidden = args.include_hidden === true;
+        const output = (simplify && format !== "raw" && Number.isFinite(args.budget_tokens))
+          ? applyTokenBudget(data, { format, includeHidden, maxDepth, budgetTokens: args.budget_tokens })
+          : optimizeFigmaData(data, { format, simplify, maxDepth, includeHidden });
         return { content: [{ type: "text", text: output }] };
       }
       case "get_image": {
@@ -1505,7 +2000,7 @@ async function handleCallTool(name, args = {}) {
   } catch (error) {
     return {
       isError: true,
-      content: [{ type: "text", text: `Figma Error: ${withServerHint(error.message || String(error))}` }]
+      content: [{ type: "text", text: JSON.stringify(buildErrorEnvelope(error), null, 2) }]
     };
   }
 }
@@ -1531,14 +2026,14 @@ function startOfficialSdkServer() {
 
       const server = new Server({
         name: "figma-mcp",
-        version: "2.2.0"
+        version: SERVER_VERSION
       }, {
         capabilities: { tools: {} },
         instructions: SERVER_INSTRUCTIONS
       });
 
       server.setRequestHandler(types.ListToolsRequestSchema, async () => {
-        return { tools: TOOLS };
+        return { tools: getActiveTools() };
       });
 
       server.setRequestHandler(types.CallToolRequestSchema, async (request) => {
@@ -1574,7 +2069,7 @@ function startUniversalStdioServer() {
         result: {
           protocolVersion: "2024-11-05",
           capabilities: { tools: {} },
-          serverInfo: { name: "figma-mcp", version: "2.2.0" },
+          serverInfo: { name: "figma-mcp", version: SERVER_VERSION },
           instructions: SERVER_INSTRUCTIONS
         }
       });
@@ -1591,7 +2086,7 @@ function startUniversalStdioServer() {
     }
 
     if (method === "tools/list") {
-      sendResponse({ jsonrpc: "2.0", id, result: { tools: TOOLS } });
+      sendResponse({ jsonrpc: "2.0", id, result: { tools: getActiveTools() } });
       return;
     }
 
