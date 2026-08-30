@@ -2,6 +2,7 @@
 const http = require("http");
 const path = require("path");
 const fs = require("fs");
+const os = require("os");
 const crypto = require("crypto");
 const { optimizeFigmaData } = require("./optimizer");
 
@@ -23,7 +24,7 @@ const BRIDGE_PORT = parseInt(process.env.FIGMA_BRIDGE_PORT, 10) || 8765;
 //
 //   1. Origin allowlist — a browser cannot forge Origin, so a page on evil.com
 //      is rejected outright. Figma's plugin iframe sends "null" or figma.com.
-//   2. Shared token — install.py generates one, puts it in the MCP config env
+//   2. Shared token — install.mjs generates one, puts it in the MCP config env
 //      and bakes the same value into the installed plugin UI. This also covers
 //      the sandboxed-iframe case, where a hostile page can also present "null".
 //
@@ -387,7 +388,7 @@ const bridgeServer = http.createServer((req, res) => {
     res.writeHead(403, { "Content-Type": "application/json" });
     return res.end(JSON.stringify({
       error: "Forbidden: the Figma bridge only accepts requests from the Antigravity Bridge plugin. " +
-             "If you are the plugin, make sure install.py baked the matching bridge token into it."
+             "If you are the plugin, make sure install.mjs baked the matching bridge token into it."
     }));
   }
 
@@ -521,7 +522,7 @@ function tryBecomeMaster() {
       if (!BRIDGE_TOKEN) {
         console.error(
           "[Figma MCP Bridge] WARNING: no FIGMA_BRIDGE_TOKEN configured. " +
-          "Only the Origin allowlist is protecting :8765 — re-run install.py to provision a token."
+          "Only the Origin allowlist is protecting :8765 — re-run install.mjs to provision a token."
         );
       }
     });
@@ -607,7 +608,7 @@ function pickTargetClient(targetFileName) {
 async function sendCommandToPlugin(payload, timeoutMs = 45000, options = {}) {
   if (!isBridgeMaster) {
     // A zombie master (process still bound to :8765 but stuck/unresponsive —
-    // stale after a `install.py --update` or a crashed event loop) doesn't
+    // stale after a `install.mjs --update` or a crashed event loop) doesn't
     // fail the connection, so it never hit the ECONNREFUSED/ECONNRESET check
     // below; it just hangs forever, and the proxy hop had no timeout of its
     // own to notice. Cap it well under the caller's timeoutMs so a hung
@@ -2208,6 +2209,83 @@ function startUniversalStdioServer() {
     }
   });
 }
+
+// ------------------------------------------------------------------
+// Startup update check. Non-blocking and opt-out — this project's whole
+// pitch is running on a machine with no registry access, so a slow/failed
+// network call here must never delay startup or print anything scarier
+// than nothing at all.
+//
+// The INSTALLED copy (~/.figma-mcp-bridge/mcp/, etc.) is a plain file copy,
+// not a git checkout, so it can't ask git what commit it's at. install.mjs
+// captures that at copy time into version.json, sitting next to this
+// figma/ directory. No marker at all — a source-tree run via
+// `node figma/index.js` straight from a git clone, or an install.mjs run
+// where `git rev-parse` itself failed (no .git, no git binary, downloaded
+// as a zip) — means there is nothing to compare against, so skip silently
+// rather than guess.
+// ------------------------------------------------------------------
+const UPDATE_REPO = "kolganovr/figma-mcp-bridge";
+const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+function readJsonSafe(filePath) {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch (e) {
+    return null;
+  }
+}
+
+async function checkForUpdates() {
+  try {
+    if (process.env.FIGMA_MCP_NO_UPDATE_CHECK) return;
+
+    const versionInfo = readJsonSafe(path.join(__dirname, "..", "version.json"));
+    const localCommit = versionInfo && versionInfo.commit;
+    if (!localCommit) return;
+
+    const cacheDir = path.join(os.homedir(), ".figma-mcp-bridge");
+    const cachePath = path.join(cacheDir, "update-check.json");
+    const cache = readJsonSafe(cachePath);
+
+    let remoteSha = cache && cache.remoteSha;
+    const fresh = cache && typeof cache.lastCheckedAt === "number" &&
+      (Date.now() - cache.lastCheckedAt) < UPDATE_CHECK_INTERVAL_MS;
+
+    if (!fresh) {
+      const res = await fetch(`https://api.github.com/repos/${UPDATE_REPO}/commits/main`, {
+        headers: { "User-Agent": "figma-mcp-bridge", "Accept": "application/vnd.github+json" },
+        signal: AbortSignal.timeout(4000)
+      });
+      // Rate-limited, repo moved, offline resolver returning a captive
+      // portal page, whatever — try again next launch rather than guessing.
+      if (!res.ok) return;
+      const data = await res.json();
+      if (!data || typeof data.sha !== "string") return;
+      remoteSha = data.sha;
+      try {
+        fs.mkdirSync(cacheDir, { recursive: true });
+        fs.writeFileSync(cachePath, JSON.stringify({ lastCheckedAt: Date.now(), remoteSha }), "utf8");
+      } catch (e) {
+        // Cache write failing just means we ask again next launch instead
+        // of waiting out the full interval — not worth surfacing.
+      }
+    }
+
+    if (remoteSha && remoteSha !== localCommit) {
+      console.error(
+        `[Figma MCP Bridge] Update available on main (installed ${localCommit.slice(0, 7)}, ` +
+        `latest ${remoteSha.slice(0, 7)}). Run "node install.mjs --update" from your cloned repo to update.`
+      );
+    }
+  } catch (e) {
+    // Offline, DNS failure, corporate proxy, a bug in this function itself —
+    // never let a version check take the server down or print anything
+    // alarming on a machine that's deliberately air-gapped.
+  }
+}
+
+checkForUpdates();
 
 // Start either official SDK server or universal stdio engine
 if (!startOfficialSdkServer()) {

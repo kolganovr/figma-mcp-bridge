@@ -60,7 +60,7 @@ with a real design file.
 | **Token-optimized read of the *live* doc** | ✅ 86–91% smaller[²](#sources) | ⚠️ partial | ❌ REST only | ❌ |
 | **Persistent code modules in-sandbox** | ✅ `bridge.define/require` | ❌ | ❌ | ❌ |
 | **Long jobs survive their own timeout** | ✅ async `job_id` + progress | ❌ | n/a | ❌ |
-| **Install footprint** | 0 npm deps, one command | Figma desktop + paid seat | `npx` + access token | Bun + a second server process |
+| **Install footprint** | 0 npm deps, one command, Node only | Figma desktop + paid seat | `npx` + access token | Bun + a second server process |
 
 **The short version:** Framelink is the best choice if you only want to turn an existing design
 into code. The official server is the safest choice if you're already on a paid Figma plan and
@@ -107,12 +107,13 @@ latency, and results (including multi-megabyte base64 PNGs) stream straight back
 ```bash
 git clone https://github.com/kolganovr/figma-mcp-bridge.git
 cd figma-mcp-bridge
-python install.py
+node install.mjs
 ```
 
 That copies the server and plugin into place and registers the MCP server in every AI client
 config it finds — Claude Desktop, Claude Code, Cursor, Windsurf, Antigravity. There is no
-`npm install`, because there is nothing to install.
+`npm install`, because there is nothing to install — and no Python either; `node` is the only
+runtime this project needs, for the installer and the server alike.
 
 Then, in **Figma Desktop**:
 
@@ -123,7 +124,7 @@ Then, in **Figma Desktop**:
 Restart your AI client so it picks up the new tools. Verify anytime with:
 
 ```bash
-python install.py --doctor
+node install.mjs --doctor
 ```
 
 <details>
@@ -133,7 +134,7 @@ The live canvas tools need no token. If you also want to read *unopened* cloud f
 (`get_file`, `get_node`, `get_styles`, …), supply a personal access token:
 
 ```bash
-python install.py --token "your_figma_personal_access_token"
+node install.mjs --token "your_figma_personal_access_token"
 ```
 
 Without a token these 7 tools aren't registered at all — see [Tool reference](#tool-reference).
@@ -310,7 +311,7 @@ of guessing.
 <details>
 <summary><b>A hand-rolled RFC 6455 WebSocket, on purpose</b></summary>
 
-Zero npm dependencies isn't a vanity metric here — it means `git clone && python install.py` works
+Zero npm dependencies isn't a vanity metric here — it means `git clone && node install.mjs` works
 on a locked-down machine with no registry access, and there's no supply chain to audit for something
 that executes arbitrary JS inside your design files.
 
@@ -367,7 +368,7 @@ with a `HINT:` line naming the API that actually works, plus a stable machine-re
 
 `:8765` is loopback, but loopback is reachable by **any web page the user happens to have open**.
 Two independent gates: an Origin allowlist (a browser cannot forge `Origin`, so a page on
-`evil.com` is rejected at the handshake) and a shared token that `install.py` generates and bakes
+`evil.com` is rejected at the handshake) and a shared token that `install.mjs` generates and bakes
 into both the MCP config and the installed plugin — which also covers the sandboxed-iframe case,
 where a hostile page can present `Origin: "null"` too.
 
@@ -376,17 +377,35 @@ warning, so it degrades rather than silently opening up.
 
 </details>
 
+<details>
+<summary><b>The one network call this server makes on its own: an update check</b></summary>
+
+On startup the server compares the commit it was installed from (recorded by `install.mjs` into a
+`version.json` beside the copied code) against the latest commit on `main` via one GitHub API
+request, and prints a one-line notice to stderr if they differ. It never applies anything itself —
+`node install.mjs --update` is still a manual, deliberate step.
+
+This is the one thing in this project that assumes network access, so it's built to disappear
+cleanly when there isn't any: the check is fired without being awaited (never delays `initialize`
+or the first tool call), a failed/slow/offline request is caught and silently skipped, and results
+are cached for 24h so it doesn't hit GitHub's unauthenticated rate limit or run once per spawned
+copy of the server. Set `FIGMA_MCP_NO_UPDATE_CHECK=1` to turn it off entirely — worth doing on the
+locked-down machines the previous note is about.
+
+</details>
+
 ---
 
 ## Testing
 
-Four dependency-free suites, **111 assertions**, all runnable with bare `node`:
+Five dependency-free suites, all runnable with bare `node`:
 
 ```bash
 node tests/bridge-runtime.test.js   # sandbox runtime, module persistence, checkpoint/rollback
 node tests/layout-packer.test.js    # row/grid packing, collision grid
 node tests/optimizer.test.js        # jsx/tree/json serialization, budget truncation
 node tests/mcp-protocol.test.js     # real server over stdio: initialize, tools/list, tiering
+node tests/install.test.js          # config merge/reuse, token persistence, stale-file cleanup
 ```
 
 `mcp-protocol.test.js` spawns the actual server as a child process and speaks NDJSON to it — the
@@ -406,8 +425,8 @@ figma-mcp-bridge/
 ├── figma-plugin/             # Figma Desktop plugin
 │   ├── code.js               # sandbox executor, bridge runtime, checkpoints, capture
 │   └── ui.html               # HUD — stream, settings, control (pause / undo)
-├── tests/                    # 4 suites, 0 dependencies
-├── install.py                # cross-platform installer, updater, doctor
+├── tests/                    # 5 suites, 0 dependencies
+├── install.mjs               # cross-platform installer, updater, doctor (Node only)
 └── AGENTS.md                 # onboarding protocol for AI agents
 ```
 

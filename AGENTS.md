@@ -9,17 +9,17 @@ This document provides explicit, deterministic instructions for **AI Agents** (G
 When the user asks you to **"Install Figma MCP"**, **"Update Figma MCP"**, or passes a link to this repository, follow these steps:
 
 ### 1. Run the Automated Installer
-Execute `install.py` in the repository root directory:
+Execute `install.mjs` in the repository root directory (needs only Node.js — no Python, no npm packages):
 ```bash
 # New installation (with optional token):
-python install.py --token "<USER_TOKEN_OR_EMPTY>"
+node install.mjs --token "<USER_TOKEN_OR_EMPTY>"
 
 # In-place update:
-python install.py --update
+node install.mjs --update
 ```
 
 > [!IMPORTANT]
-> **CRITICAL RULE:** Do NOT merely download or extract the repository files. You **MUST** run `python install.py` / `python install.py --update`. This command copies the server and plugin files into the system directories (`~/.gemini/antigravity/mcp/` and `~/.gemini/antigravity-ide/mcp/`) and registers the server in all active `mcp_config.json` configuration files.
+> **CRITICAL RULE:** Do NOT merely download or extract the repository files. You **MUST** run `node install.mjs` / `node install.mjs --update`. This command copies the server and plugin files into the system directories (`~/.gemini/antigravity/mcp/` and `~/.gemini/antigravity-ide/mcp/`) and registers the server in all active `mcp_config.json` configuration files.
 
 ### 2. Guide the User to Activate / Reload the Plugin
 Instruct the user:
@@ -31,8 +31,11 @@ Instruct the user:
 ### 3. Verify Connection with Doctor
 Run the diagnostic check:
 ```bash
-python install.py --doctor
+node install.mjs --doctor
 ```
+
+> [!NOTE]
+> The server prints a one-line notice to stderr on startup if `main` has moved past the installed commit — it only *notifies*, it never updates anything on its own. `node install.mjs --update` is still the only thing that actually applies an update. Set `FIGMA_MCP_NO_UPDATE_CHECK=1` to disable the check entirely (e.g. on an air-gapped machine).
 
 ---
 
@@ -86,7 +89,7 @@ Four contract tests pin this behaviour; run the ones relevant to what you touche
 
 - **If tool calls time out:**
   1. Ask the user to make sure Figma Desktop is open and the **Antigravity Bridge** plugin window is active.
-  2. If the plugin shows **`OFFLINE`**, run `python install.py --doctor` to verify port `8765` availability.
+  2. If the plugin shows **`OFFLINE`**, run `node install.mjs --doctor` to verify port `8765` availability.
   3. If there are zombie Node processes holding port 8765, terminate them (`Stop-Process -Name node -Force` on Windows or `killall node` on macOS) and reload the plugin with `Ctrl + Alt + P`.
 - **Figma Web vs Desktop:** Plugins interacting with local WebSocket bridges (`ws://127.0.0.1:8765`) require **Figma Desktop**. Web browser versions of Figma block loopback sockets due to Mixed Content policies.
 
