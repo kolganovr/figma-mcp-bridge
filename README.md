@@ -18,16 +18,9 @@ canvas, then closes the loop by handing the rendered PNG back to the model for v
 
 ---
 
-<!-- ─────────────────────────────────────────────────────────────
-     DEMO — replace with a real capture before publishing.
-     A 15–25s GIF of: prompt → canvas fills in → agent spots its own
-     mistake in the returned screenshot → fixes it. This is the single
-     highest-impact thing on the page; it proves the loop in one glance.
-     Record at 1280×720, keep under ~8 MB so GitHub inlines it.
-     ───────────────────────────────────────────────────────────── -->
+![Figma MCP Bridge Demo](assets/demo.gif)
 
-> **[ demo GIF goes here ]** — agent generates a checkout screen, reads back its own
-> screenshot, notices the total is clipped, and fixes the padding. No human in the loop.
+*Agent generates the design, visually audits the rendered output, detects layout defects, and self-corrects in real time — zero human in the loop.*
 
 ---
 
