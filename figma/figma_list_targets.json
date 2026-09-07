@@ -1,0 +1,1 @@
+{"name":"figma_list_targets","description":"List every Figma document currently connected to this bridge (fileName, current page, which one is focused). Use this when a LIVE tool call fails with AMBIGUOUS_TARGET, or before working with a specific file among several open at once — pass the fileName as `target` on any LIVE tool.","parameters":{"type":"object","properties":{}}}

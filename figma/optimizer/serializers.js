@@ -29,6 +29,16 @@ function serializeToJsx(node, indent = 0) {
   if (!node) return '';
 
   const spaces = '  '.repeat(indent);
+
+  // pruneNode() stops descending past maxDepth and returns a stub
+  // {id, name, type, truncated: true} instead of the full node — without a
+  // visible marker here that stub is indistinguishable from a real childless
+  // leaf, and an agent has no way to know there was more to fetch.
+  if (node.truncated) {
+    // Fetch this id directly for its real content.
+    return `${spaces}<${getJsxTagName(node)} id="${escapeAttr(node.id)}" truncated />`;
+  }
+
   const tag = getJsxTagName(node);
   const props = [];
 
@@ -153,6 +163,10 @@ function serializeToTree(node, indent = 0) {
   const typeTag = `[${node.type || 'NODE'}]`;
   const nameStr = node.name ? ` "${node.name}"` : '';
   const idStr = node.id ? ` #${node.id}` : '';
+
+  if (node.truncated) {
+    return `${spaces}${typeTag}${nameStr}${idStr} …truncated`;
+  }
 
   const attrs = [];
   if (node.layout) {

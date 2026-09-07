@@ -16,19 +16,51 @@ const runtime = src.slice(start, end);
 
 // --- stub Figma sandbox ----------------------------------------------------
 const pluginData = {};
+const NODE_REGISTRY = new Map();
+// Every node made through makeNode() shares this single prototype, mirroring
+// the real Plugin API where all nodes of comparable shape share one — this
+// is exactly what patchCreationMethodsOnPrototype() in the runtime relies on
+// to make clone()/createInstance() traceable by patching it once.
+const nodeProto = {
+  resize(w, h) { this.width = w; this.height = h; },
+  appendChild(c) { c.parent = this; this.children.push(c); NODE_REGISTRY.set(c.id, c); },
+  remove() {
+    if (this.parent) this.parent.children = this.parent.children.filter(c => c !== this);
+    NODE_REGISTRY.delete(this.id);
+  },
+  clone() {
+    const c = makeNode(this.type, this.name, { width: this.width, height: this.height });
+    return c;
+  },
+  createInstance() {
+    return makeNode("INSTANCE", "Instance of " + this.name);
+  }
+};
 function makeNode(type, name, extra) {
-  return Object.assign({
+  const node = Object.assign(Object.create(nodeProto), {
     type, name, id: "n" + Math.random().toString(36).slice(2, 8),
-    parent: null, children: [], width: 100, height: 100,
-    resize(w, h) { this.width = w; this.height = h; },
-    appendChild(c) { c.parent = this; this.children.push(c); }
+    parent: null, children: [], width: 100, height: 100, visible: true
   }, extra || {});
+  NODE_REGISTRY.set(node.id, node);
+  return node;
 }
 const figma = {
   editorType: "figma",
+  mixed: Symbol("figma.mixed"),
+  getNodeById: (id) => NODE_REGISTRY.get(id) || null,
   root: {
     setPluginData: (k, v) => { pluginData[k] = v; },
     getPluginData: (k) => pluginData[k] || ""
+  },
+  currentPage: makeNode("PAGE", "Page 1"),
+  createFrame: () => makeNode("FRAME", "Tracked " + Math.random().toString(36).slice(2, 5)),
+  createRectangle: () => makeNode("RECTANGLE", "Rect " + Math.random().toString(36).slice(2, 5)),
+  createComponent: () => makeNode("COMPONENT", "Component " + Math.random().toString(36).slice(2, 5)),
+  group: (nodes, parent) => {
+    const g = makeNode("GROUP", "Group");
+    for (const n of nodes) g.appendChild(n);
+    parent.appendChild(g);
+    return g;
   },
   createComponentFromNode(node) {
     // emulate the documented worst case: everything forced to FIXED, new ids
@@ -48,8 +80,8 @@ const figma = {
 async function ensureFont() {}
 
 // --- load the runtime ------------------------------------------------------
-const load = new Function("figma", "ensureFont", runtime + "\n;return { createBridgeApi, enrichBridgeError, bridgeWrite, bridgeRead };");
-const { createBridgeApi, enrichBridgeError } = load(figma, ensureFont);
+const load = new Function("figma", "ensureFont", runtime + "\n;return { createBridgeApi, enrichBridgeError, bridgeWrite, bridgeRead, createTrackingFigma };");
+const { createBridgeApi, enrichBridgeError, createTrackingFigma } = load(figma, ensureFont);
 
 let failures = 0;
 function check(name, cond, extra) {
@@ -150,6 +182,97 @@ for (const [msg, re] of cases) {
   const out = enrichBridgeError(new Error(msg));
   if (re) check("hint for: " + msg.slice(0, 42), out.hint && re.test(out.hint), out.hint);
   else check("no hint for unknown error", out.hint === null, out.hint);
+}
+
+console.log("\n== checkpoint journal: modification tracking & rollback ==");
+{
+  const cp1 = bridge.checkpoint("No-op");
+  const cp1Result = cp1.commit();
+  check("commit with nothing tracked reports empty lists", cp1Result.created.length === 0 && cp1Result.modified.length === 0, cp1Result);
+
+  const existing = makeNode("TEXT", "Label", { characters: "Old", opacity: 1, x: 0, y: 0 });
+  const cp2 = bridge.checkpoint("Modify existing node");
+  const beforeCommit = bridge.checkpoints().find(c => c.id === cp2.id);
+  check("open checkpoint appears in checkpoints() before commit", !!beforeCommit && beforeCommit.committed === false, bridge.checkpoints());
+
+  bridge.snapshot(existing);
+  existing.characters = "New";
+  existing.x = 40;
+  const cp2Result = cp2.commit();
+  check("snapshot records the modified node", cp2Result.modified.length === 1 && cp2Result.modified[0] === existing.id, cp2Result);
+
+  const cp3 = bridge.checkpoint("Modify again");
+  bridge.snapshot(existing); // second checkpoint, independent snapshot of the SAME node
+  existing.characters = "Newer";
+  cp3.commit();
+
+  bridge.rollback(cp3.id);
+  check("rollback restores properties from ITS OWN snapshot, not an earlier one",
+    figma.getNodeById(existing.id).characters === "New", figma.getNodeById(existing.id));
+
+  threw = "";
+  try { bridge.rollback("does-not-exist"); } catch (e) { threw = e.message; }
+  check("rollback of unknown checkpoint explains itself", /No rollback-eligible checkpoint/.test(threw), threw);
+
+  threw = "";
+  try { bridge.rollback(cp3.id); } catch (e) { threw = e.message; }
+  check("rolling back the same checkpoint twice refuses", /already rolled back/.test(threw), threw);
+}
+
+console.log("\n== checkpoint journal: creation tracking via createTrackingFigma() ==");
+{
+  const cp = bridge.checkpoint("Two frames via tracking figma");
+  const trackingFigma = createTrackingFigma();
+  const madeA = trackingFigma.createFrame();
+  const madeB = trackingFigma.createFrame();
+  const cpResult = cp.commit();
+  check("tracking figma recorded both creations", cpResult.created.length === 2 &&
+    cpResult.created.includes(madeA.id) && cpResult.created.includes(madeB.id), cpResult);
+
+  const untracked = figma.createFrame(); // created OUTSIDE any open checkpoint via the real figma, not the proxy
+  check("creation outside an open checkpoint is not journaled",
+    !cpResult.created.includes(untracked.id), cpResult);
+
+  const rollback = bridge.rollback(cp.id);
+  check("rollback removes both tracked-figma creations",
+    figma.getNodeById(madeA.id) === null && figma.getNodeById(madeB.id) === null, rollback);
+  check("rollback leaves an untracked node alone", figma.getNodeById(untracked.id) !== null);
+
+  const cp2 = bridge.checkpoint("last-alias");
+  trackingFigma.createFrame();
+  cp2.commit();
+  const lastRollback = bridge.rollback("last");
+  check("rollback('last') resolves the most recently committed, not-yet-rolled-back checkpoint",
+    lastRollback.checkpoint_id === cp2.id, lastRollback);
+}
+
+console.log("\n== checkpoint journal: clone()/createInstance() tracking (Undo Last AI Action bug) ==");
+{
+  // These go through node.clone() / component.createInstance() — methods on
+  // the NODE, not on figma — which createTrackingFigma's wrapper never sees.
+  // Before patchCreationMethodsOnPrototype(), a checkpoint around either
+  // reported empty created[] even though a new node landed on the canvas,
+  // so Undo Last AI Action ran and genuinely removed nothing.
+  const template = makeNode("FRAME", "Card Template");
+  const master = figma.createComponent();
+
+  const cp = bridge.checkpoint("Clone + instantiate");
+  const cloned = template.clone();
+  const instance = master.createInstance();
+  const cpResult = cp.commit();
+
+  check("clone() during an open checkpoint is journaled",
+    cpResult.created.includes(cloned.id), cpResult);
+  check("createInstance() during an open checkpoint is journaled",
+    cpResult.created.includes(instance.id), cpResult);
+
+  const rollback = bridge.rollback(cp.id);
+  check("rollback removes the cloned node", figma.getNodeById(cloned.id) === null, rollback);
+  check("rollback removes the instantiated node", figma.getNodeById(instance.id) === null, rollback);
+
+  const untrackedClone = template.clone(); // outside any open checkpoint
+  check("clone() outside an open checkpoint is not journaled",
+    !cpResult.created.includes(untrackedClone.id) && figma.getNodeById(untrackedClone.id) !== null);
 }
 
 console.log(failures === 0 ? "\nALL PASS" : "\n" + failures + " FAILURES");

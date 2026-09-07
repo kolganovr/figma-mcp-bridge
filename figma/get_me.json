@@ -1,1 +1,1 @@
-{"name":"get_me","description":"Verify authenticated user and token validity in Figma","parameters":{"properties":{},"type":"object"}}
+{"name":"get_me","description":"Verify authenticated user and token validity via Figma Cloud REST API.","parameters":{"type":"object","properties":{}}}

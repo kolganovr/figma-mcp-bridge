@@ -116,14 +116,63 @@ const comp = bridge.componentize(frame);   // records sizing modes by tree posit
 
 ## 0c. Error Hints
 
-Failures coming back from the sandbox carry a `HINT:` line whenever the bridge recognises the failure mode — unloaded fonts, instance overrides, stale node ids, resizing a hugging AutoLayout frame, `pluginData` size limits, and the "helper from my previous call is not defined" case. Read the hint before retrying; it names the API that actually works.
+Failures coming back from the sandbox carry a `HINT:` line whenever the bridge recognises the failure mode — unloaded fonts, instance overrides, stale node ids, resizing a hugging AutoLayout frame, `pluginData` size limits, and the "helper from my previous call is not defined" case. Read the hint before retrying; it names the API that actually works. Every failure also carries a stable `code` field (`FONT_NOT_LOADED`, `INSTANCE_TRANSFORM_LOCKED`, `STALE_NODE_ID`, `AUTOLAYOUT_HUG_RESIZE`, `PLUGINDATA_LIMIT`, `SCOPE_LOST`, `CAPTURE_TOO_LARGE`, `BRIDGE_OFFLINE`, `REST_TOKEN_MISSING`, `AMBIGUOUS_TARGET`, `TARGET_NOT_FOUND`, `UNKNOWN_TOOL`, `JOB_NOT_FOUND`, `EXECUTION_PAUSED`) for branching on the error type without parsing prose.
+
+---
+
+## 0d. Checkpoints & Rollback (`figma_rollback`)
+
+Every write call — `figma_execute_code`, `figma_insert_component_instance`, `figma_insert_svg` — opens a checkpoint automatically before running and returns its id as `checkpoint_id` in the response (alongside `created`/`modified` node-id lists and a `warnings` array from a cheap auto-lint pass over what changed).
+
+- **Created nodes** are tracked automatically: everything `figma.create*()` / `createNodeFromSvg` / `createComponentFromNode` returns while a checkpoint is open is recorded.
+- **Modified existing nodes** are only tracked when something explicitly snapshots them first via `bridge.snapshot(node)` before mutating — the bridge's own handlers do this on the nodes they touch; your own `figma_execute_code` calls can too.
+- **Deleted nodes are never recoverable.** There is nothing to roll back to once a node is gone.
+
+```js
+figma_rollback({ checkpoint_id: "cp_abc123" });   // undo a specific write call
+figma_rollback({ checkpoint_id: "last" });        // undo whatever the most recent write call did
+```
+
+This is a real safety net for "that generated the wrong thing" — use it instead of asking the user to `Ctrl+Z`, which also undoes their own unrelated work.
+
+---
+
+## 0e. Reading the Live Canvas (`figma_read_canvas`)
+
+Don't write your own tree-walking `figma_execute_code` to "see" the document — `figma_read_canvas` runs the SAME token-optimizer pipeline that powers `get_file`/`get_node` against whatever is open in Figma Desktop right now, in the same Pseudo-JSX / tree / JSON formats.
+
+```js
+figma_read_canvas({ node_ids: ["12:34"], depth: 6, budget_tokens: 4000 });
+```
+
+If the serialized output would exceed `budget_tokens`, the server automatically reduces `depth` and re-serializes (no extra round trip) until it fits, appending a trailing comment telling you what depth was used and how to fetch deeper on a specific node.
+
+---
+
+## 0f. Multiple Figma Documents Open at Once (Target Router)
+
+If more than one Figma file is open, `figma_list_targets` lists every connected document (fileName, current page, which one is focused). Every LIVE tool accepts an optional `target: "<fileName>"` to aim at a specific one; with nothing specified, whichever window is currently focused in Figma is used. If several are connected and none is focused, a call fails with `AMBIGUOUS_TARGET` (naming the candidates) rather than guessing — check `figma_list_targets` and pass `target` explicitly.
+
+---
+
+## 0g. Long-Running Code & Async Jobs (`figma_job_status`)
+
+A `figma_execute_code` call still running past 30 seconds is automatically handed back as `{ status: "running", job_id }` instead of blocking — the canvas keeps working in Figma, it's just no longer being waited on synchronously. Poll with:
+
+```js
+figma_job_status({ job_id: "cmd_xyz" });
+```
+
+which returns live progress while running (call `progress(step, of, note)` inside your code so there's something real to report), and — once finished — the exact same result/screenshot a synchronous call would have returned. Pass `async: true` to opt into this immediately instead of waiting out the 30s. A finished job is forgotten after being read once.
 
 ---
 
 ## 1. Visual Feedback Loop (Crucial Rule for AI Agents)
 Whenever creating, editing, styling, or restructuring UI elements on the Figma canvas:
 - **Always close the visual loop**: Pass `capture: true` in `figma_execute_code`, `figma_insert_component_instance`, or `figma_insert_svg`, or call `figma_screenshot` immediately after UI generation.
+- **Captures never touch the user's selection.** A successful `capture: true` call screenshots whatever it just created/modified by default; pass `capture_node_ids` to target specific nodes explicitly. The user's current selection is only used as a last resort when neither exists, and is never overwritten to make a capture possible.
 - **Visually inspect the result**: Check alignment, spacing, typographic hierarchy, color contrast, and clipping before declaring a design task complete.
+- **Read `warnings` first.** Every write response includes a cheap auto-lint (text overflow, low contrast, zero-size nodes) — cheaper than a screenshot round trip for catching the obvious stuff.
 - **Iterative refinement**: If the screenshot reveals misalignments or bad spacing, send follow-up commands to fix them.
 
 ---
@@ -226,20 +275,27 @@ container.fills = [{ type: 'SOLID', color: { r: 0.96, g: 0.94, b: 1 } }];
 
 ## 7. Tool Reference
 
+Tools are registered in tiers (Core / Extended always on; REST only with `FIGMA_PERSONAL_ACCESS_TOKEN`; Legacy only with `FIGMA_MCP_LEGACY_TOOLS=1`) — see the top of `figma/index.js`'s `TOOL_TIERS` for the exact mapping.
+
 | Tool | Mode | Description |
 |------|------|-------------|
-| `get_file` | REST | Retrieves file metadata and token-optimized layer hierarchy (`format: 'jsx'`, saves 85%+ tokens). |
-| `get_node` | REST | Retrieves specific node subtree in token-optimized Pseudo-JSX, Tree, or JSON format. |
-| `figma_get_canvas_layout` | Live | Returns top-level artboard bounding boxes and a calculated safe `suggestedNextPosition` to prevent overlaps. |
-| `figma_insert_svg` | Live | Inserts raw SVG vector into canvas/AutoLayout with auto-scale, fill/stroke recoloring, and PNG capture. |
-| `figma_find_components` | Live | Finds and catalogs master components, variant matrices, and component properties in the active file. |
-| `figma_insert_component_instance` | Live | Creates an instance of a component set/variant, applies text overrides & AutoLayout placement, and returns a PNG capture. |
-| `figma_get_variables` | Live | Retrieves variable collections, modes (Light/Dark), and tokens from the active document. |
-| `figma_set_variables_mode` | Live | Sets variable mode (Light/Dark/Brand) on a target frame or page with visual screenshot. |
-| `figma_execute_code` | Live | Executes JS inside the Figma sandbox as a fresh async function body, with `figma`, `ensureFont`, `getFreePosition` and the `bridge` runtime (persistent modules, durable store, platform workarounds). See §0. |
-| `figma_screenshot` | Live | Captures a PNG screenshot of specific `node_ids` or current selection. |
-| `figma_get_selection` | Live | Returns properties, coordinates, and text of currently selected canvas nodes. |
-| `figma_create_ui_card` | Live | High-level template tool to quickly create a modern card with badge, title, and button (auto-placed). |
+| `figma_execute_code` | Live · Core | Executes JS inside the Figma sandbox as a fresh async function body, with `figma`, `ensureFont`, `getFreePosition`, `progress`, and the `bridge` runtime. See §0. |
+| `figma_read_canvas` | Live · Core | Reads the live document through the same optimizer pipeline as `get_file`/`get_node`. See §0e. |
+| `figma_screenshot` | Live · Core | Captures a PNG screenshot of specific `node_ids` or current selection. |
+| `figma_find_components` | Live · Core | Finds and catalogs master components, variant matrices, and component properties (cached index — see §4.6 of the UX plan). |
+| `figma_insert_component_instance` | Live · Core | Creates an instance of a component set/variant, applies text overrides & AutoLayout placement, and returns a PNG capture. |
+| `figma_insert_svg` | Live · Core | Inserts raw SVG vector into canvas/AutoLayout with auto-scale, fill/stroke recoloring, and PNG capture. |
+| `figma_get_variables` | Live · Core | Retrieves variable collections, modes (Light/Dark), and tokens from the active document. |
+| `figma_rollback` | Live · Core | Undoes a previous write call's checkpoint. See §0d. |
+| `figma_get_selection` | Live · Extended | Returns properties, coordinates, text, parent/page, and AutoLayout context of currently selected canvas nodes. |
+| `figma_get_canvas_layout` | Live · Extended | Returns top-level artboard bounding boxes and a `suggestedNextPosition`; `layout: "grid"` shelf-packs instead of a single-axis ribbon. |
+| `figma_set_variables_mode` | Live · Extended | Sets variable mode (Light/Dark/Brand) on a target frame or page with visual screenshot. |
+| `figma_job_status` | Live · Extended | Polls a `figma_execute_code` call handed back as a background job. See §0g. |
+| `figma_list_targets` | Live · Extended | Lists connected Figma documents for multi-file targeting. See §0f. |
+| `get_file` | REST | Retrieves file metadata and token-optimized layer hierarchy (`format: 'jsx'`, saves 85%+ tokens). Supports `budget_tokens`. |
+| `get_node` | REST | Retrieves specific node subtree in token-optimized Pseudo-JSX, Tree, or JSON format. Supports `budget_tokens`. |
 | `get_image` | REST | Renders nodes to PNG/SVG/PDF via Figma cloud renderer. |
 | `get_styles` | REST | Lists color and text styles from cloud document. |
 | `get_components` | REST | Lists design system components and component sets via REST API. |
+| `get_comments` / `post_comment` | REST | Reads and posts comments on a Figma file. |
+| `figma_create_ui_card` / `get_me` / `get_image_fills` | Legacy | Hidden by default; set `FIGMA_MCP_LEGACY_TOOLS=1` to keep using them. |

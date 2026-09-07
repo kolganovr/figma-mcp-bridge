@@ -622,6 +622,35 @@
     .btn-icon-styled:active {
       transform: scale(0.97);
     }
+    .btn-icon-styled[disabled] {
+      opacity: 0.4;
+      cursor: default;
+      pointer-events: none;
+    }
+    .btn-icon-styled.active-state {
+      background: var(--status-busy-bg);
+      border-color: var(--status-busy-border);
+      color: var(--status-busy);
+    }
+    .btn-icon-styled.danger {
+      background: var(--status-error-bg);
+      border-color: var(--status-error-border);
+      color: var(--status-error);
+    }
+
+    .diag-banner {
+      font-size: 9px;
+      line-height: 1.4;
+      padding: 6px 8px;
+      border-radius: var(--radius-sm);
+      background: var(--status-error-bg);
+      border: 1px solid var(--status-error-border);
+      color: var(--status-error);
+    }
+    .diag-banner.hidden { display: none; }
+
+    .log-row.clickable { cursor: pointer; }
+    .log-row.clickable:hover .log-text { color: var(--text-primary); text-decoration: underline; }
 
     /* =========================================================
        VIEW 2: COMPACT FLOATING MINI-BAR (260 x 44)
@@ -828,7 +857,7 @@
       <div id="act-card" class="activity-card">
         <div class="card-top">
           <span id="card-tag" class="card-tag">AI ASSISTANT STATUS</span>
-          <span id="card-badge" class="card-badge">⚡ Ready</span>
+          <span id="card-badge" class="card-badge"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" style="vertical-align:-2px;flex-shrink:0;"><path d="M7 2v11h3v9l7-12h-4l4-8z"/></svg> Ready</span>
         </div>
         <div id="task-desc" class="task-desc">Listening on 127.0.0.1:8765. Ready for commands.</div>
         <div id="progress-bar" class="progress-bar">
@@ -913,15 +942,120 @@
         </div>
       </div>
 
+      <!-- Section 1b: Compact preset & auto-collapse (TZ §2) -->
+      <div class="settings-card">
+        <span class="settings-card-title">COMPACT MODE</span>
+        <div class="setting-toggle-row">
+          <div class="setting-label-group">
+            <span class="setting-title">Compact window size</span>
+            <span class="setting-desc">Applies the next time Mini Mode is opened</span>
+          </div>
+          <select id="compact-preset-select" class="server-input" style="flex:0 0 auto; height:24px; width:auto;">
+            <option value="slim">Slim — 260×44</option>
+            <option value="standard">Standard — 300×52</option>
+            <option value="micro">Micro-Pill — 200×38</option>
+          </select>
+        </div>
+        <div class="setting-toggle-row">
+          <div class="setting-label-group">
+            <span class="setting-title">Auto-collapse when idle</span>
+            <span class="setting-desc">Switch to Mini Mode after 10s with no activity</span>
+          </div>
+          <div id="toggle-autocollapse-set" class="toggle-row">
+            <div id="toggle-autocollapse-track" class="toggle-track">
+              <div class="toggle-knob"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <!-- Section 3: Local Bridge Server -->
       <div class="settings-card">
         <span class="settings-card-title">LOCAL BRIDGE SERVER</span>
         <div class="input-row">
           <input id="server-url-input" class="server-input" type="text" value="http://127.0.0.1:8765" spellcheck="false" />
           <button id="ping-btn" class="btn-icon-styled">
-            <span>⚡</span>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M7 2v11h3v9l7-12h-4l4-8z"/></svg>
             <span>Ping</span>
           </button>
+        </div>
+        <div id="diag-banner" class="diag-banner hidden"></div>
+      </div>
+
+      <!-- Section 4: Diagnostics & Reset (TZ §Block 4) -->
+      <div class="settings-card">
+        <span class="settings-card-title">DIAGNOSTICS</span>
+        <div class="setting-toggle-row">
+          <div class="setting-label-group">
+            <span class="setting-title">Capture scale</span>
+            <span class="setting-desc">Resolution used for automatic Visual Feedback captures</span>
+          </div>
+          <select id="capture-scale-select" class="server-input" style="flex:0 0 auto; height:24px; width:auto;">
+            <option value="1">1.0x</option>
+            <option value="1.5" selected>1.5x</option>
+            <option value="2">2.0x</option>
+          </select>
+        </div>
+        <div class="setting-toggle-row">
+          <div class="setting-label-group">
+            <span class="setting-title">Log limit</span>
+            <span class="setting-desc">Rows kept in the Event Stream before older ones drop</span>
+          </div>
+          <select id="log-limit-select" class="server-input" style="flex:0 0 auto; height:24px; width:auto;">
+            <option value="50">50</option>
+            <option value="100" selected>100</option>
+            <option value="500">500</option>
+          </select>
+        </div>
+        <div class="input-row">
+          <button id="clear-logs-btn" class="btn-icon-styled" style="flex:1;">Clear Logs</button>
+          <button id="reset-settings-btn" class="btn-icon-styled" style="flex:1;">Reset to Defaults</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 03b. CONTROL TAB (Stop / Pause / Undo) -->
+    <div id="tab-control" class="tab-content hidden">
+      <div class="settings-card">
+        <span class="settings-card-title">AI EXECUTION</span>
+        <div class="setting-toggle-row">
+          <div class="setting-label-group">
+            <span class="setting-title" id="pause-state-label">Running</span>
+            <span class="setting-desc">Paused calls are rejected immediately — nothing queues silently</span>
+          </div>
+          <button id="pause-btn" class="btn-icon-styled">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+            <span>Pause</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="settings-card">
+        <span class="settings-card-title">LAST AI ACTION</span>
+        <div class="setting-label-group">
+          <span class="setting-title" id="last-action-label">Nothing to undo yet</span>
+          <span class="setting-desc" id="last-action-desc">Every write call opens a checkpoint automatically</span>
+        </div>
+        <button id="undo-btn" class="btn-icon-styled" disabled>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12.5 8c-2.65 0-5.05.99-6.9 2.6L2 7v9h9l-3.62-3.62c1.39-1.16 3.16-1.88 5.12-1.88 3.54 0 6.55 2.31 7.6 5.5l2.37-.78C21.08 11.03 17.15 8 12.5 8z"/></svg>
+          <span>Undo Last AI Action</span>
+        </button>
+      </div>
+
+      <div class="settings-card">
+        <span class="settings-card-title">SESSION</span>
+        <div class="setting-toggle-row">
+          <div class="setting-label-group">
+            <span class="setting-title">Context sent to model</span>
+            <span class="setting-desc" id="budget-desc">Estimated tokens across this session's tool results</span>
+          </div>
+          <span id="budget-value" class="metric-val blue" style="font-size:14px;">~0</span>
+        </div>
+        <div class="setting-toggle-row">
+          <div class="setting-label-group">
+            <span class="setting-title">Connected document</span>
+            <span class="setting-desc" id="target-desc">Waiting for Figma…</span>
+          </div>
         </div>
       </div>
     </div>
@@ -930,12 +1064,16 @@
     <div class="nav-tabs-bar">
       <div class="nav-pills">
         <div id="nav-btn-stream" class="nav-pill active">
-          <span>⚡</span>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M7 2v11h3v9l7-12h-4l4-8z"/></svg>
           <span>Stream</span>
         </div>
         <div id="nav-btn-settings" class="nav-pill">
-          <span>⚙️</span>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
           <span>Settings</span>
+        </div>
+        <div id="nav-btn-control" class="nav-pill">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M13 3h-2v10h2V3zm4.83 2.17l-1.42 1.42C17.99 7.86 19 9.81 19 12c0 3.87-3.13 7-7 7s-7-3.13-7-7c0-2.19 1.01-4.14 2.58-5.42L6.17 5.17C4.23 6.82 3 9.26 3 12c0 4.97 4.03 9 9 9s9-4.03 9-9c0-2.74-1.23-5.18-3.17-6.83z"/></svg>
+          <span>Control</span>
         </div>
       </div>
       <button id="btn-mini-mode" class="btn-icon-styled">
@@ -986,6 +1124,31 @@
     // can also present Origin: "null". Keep this exact literal — install.py
     // matches it verbatim to know where to inject the token.
     const BRIDGE_TOKEN = "";
+    // Bumped alongside SERVER_VERSION in figma/index.js — an installed plugin
+    // reporting a different version than the connected server is how the
+    // Diagnostics banner catches "server was updated, plugin wasn't reloaded".
+    const PLUGIN_VERSION = "4.0.0";
+
+    // Material Symbols path data (Apache-2.0, Google) inlined as <svg> — the
+    // panel previously leaned on emoji for status icons, which render as a
+    // different glyph (or a fallback box) on every OS/font and can't be
+    // recolored or sized to match the surrounding UI. One flat lookup keeps
+    // every icon a real, themeable vector.
+    const MATERIAL_ICON_PATHS = {
+      bolt: "M7 2v11h3v9l7-12h-4l4-8z",
+      undo: "M12.5 8c-2.65 0-5.05.99-6.9 2.6L2 7v9h9l-3.62-3.62c1.39-1.16 3.16-1.88 5.12-1.88 3.54 0 6.55 2.31 7.6 5.5l2.37-.78C21.08 11.03 17.15 8 12.5 8z",
+      settings: "M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z",
+      power: "M13 3h-2v10h2V3zm4.83 2.17l-1.42 1.42C17.99 7.86 19 9.81 19 12c0 3.87-3.13 7-7 7s-7-3.13-7-7c0-2.19 1.01-4.14 2.58-5.42L6.17 5.17C4.23 6.82 3 9.26 3 12c0 4.97 4.03 9 9 9s9-4.03 9-9c0-2.74-1.23-5.18-3.17-6.83z",
+      photo_camera: "M9 2l-1.83 2H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2h-3.17L15 2H9zm3 15c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z",
+      auto_awesome: "M19 9l1.25-2.75L23 5l-2.75-1.25L19 1l-1.25 2.75L15 5l2.75 1.25L19 9zM11.5 9.5L9 4 6.5 9.5 1 12l5.5 2.5L9 20l2.5-5.5L17 12l-5.5-2.5zM19 15l-1.25 2.75L15 19l2.75 1.25L19 23l1.25-2.75L23 19l-2.75-1.25L19 15z",
+      warning: "M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z",
+      play_arrow: "M8 5v14l11-7z",
+      pause: "M6 19h4V5H6v14zm8-14v14h4V5h-4z"
+    };
+    function matIcon(name, sizePx = 14) {
+      const d = MATERIAL_ICON_PATHS[name];
+      return `<svg width="${sizePx}" height="${sizePx}" viewBox="0 0 24 24" fill="currentColor" style="vertical-align:-2px;flex-shrink:0;"><path d="${d}"/></svg>`;
+    }
 
     // State
     let cmdCount = 0;
@@ -994,8 +1157,19 @@
     let autoZoom = true;
     let smartPlacement = true;
     let currentView = 'full'; // 'full' | 'compact'
-    let currentTab = 'stream'; // 'stream' | 'settings'
+    let currentTab = 'stream'; // 'stream' | 'settings' | 'control'
     let isPolling = false;
+    let paused = false;
+    let lastCheckpointId = null;
+    let lastCheckpointLabel = null;
+    let budgetTokensEstimate = 0;
+    let logLimit = 100;
+    let captureScale = 1.5;
+    let compactPreset = 'slim';
+    let autoCollapse = false;
+    let idleTimer = null;
+    const docInfo = { fileKey: null, fileName: null, pageName: null };
+    let serverVersionMismatch = false;
 
     // Elements - Full View
     const viewFull = document.getElementById('view-full');
@@ -1014,6 +1188,7 @@
 
     const tabStream = document.getElementById('tab-stream');
     const tabSettings = document.getElementById('tab-settings');
+    const tabControl = document.getElementById('tab-control');
 
     const actCard = document.getElementById('act-card');
     const cardTag = document.getElementById('card-tag');
@@ -1041,10 +1216,28 @@
     const togglePlaceSet = document.getElementById('toggle-place-set');
     const serverUrlInput = document.getElementById('server-url-input');
     const pingBtn = document.getElementById('ping-btn');
+    const diagBanner = document.getElementById('diag-banner');
+    const compactPresetSelect = document.getElementById('compact-preset-select');
+    const toggleAutocollapseTrack = document.getElementById('toggle-autocollapse-track');
+    const toggleAutocollapseSet = document.getElementById('toggle-autocollapse-set');
+    const captureScaleSelect = document.getElementById('capture-scale-select');
+    const logLimitSelect = document.getElementById('log-limit-select');
+    const clearLogsBtn = document.getElementById('clear-logs-btn');
+    const resetSettingsBtn = document.getElementById('reset-settings-btn');
+
+    // Control tab elements
+    const pauseBtn = document.getElementById('pause-btn');
+    const pauseStateLabel = document.getElementById('pause-state-label');
+    const undoBtn = document.getElementById('undo-btn');
+    const lastActionLabel = document.getElementById('last-action-label');
+    const lastActionDesc = document.getElementById('last-action-desc');
+    const budgetValue = document.getElementById('budget-value');
+    const targetDesc = document.getElementById('target-desc');
 
     // Navigation elements
     const navBtnStream = document.getElementById('nav-btn-stream');
     const navBtnSettings = document.getElementById('nav-btn-settings');
+    const navBtnControl = document.getElementById('nav-btn-control');
     const btnMiniMode = document.getElementById('btn-mini-mode');
 
     // Compact elements
@@ -1059,13 +1252,20 @@
       return now.toTimeString().split(' ')[0];
     }
 
-    function addLog(tagType, tagText, msg) {
+    // nodeId, when given, makes the row clickable: it selects + zooms to that
+    // node in Figma so "what did it just touch?" is one click instead of
+    // hunting through the canvas.
+    function addLog(tagType, tagText, msg, nodeId) {
       totalLogs++;
       const row = document.createElement('div');
-      row.className = 'log-row';
+      row.className = nodeId ? 'log-row clickable' : 'log-row';
       row.innerHTML = `<span class="log-time">${getTime()}</span><span class="tag ${tagType}">${tagText}</span><span class="log-text">${escapeHtml(msg)}</span>`;
+      if (nodeId) {
+        row.title = 'Click to select in Figma';
+        row.onclick = () => parent.postMessage({ pluginMessage: { type: 'JUMP_TO_NODE', nodeId } }, '*');
+      }
       logList.appendChild(row);
-      if (logList.children.length > 100) {
+      while (logList.children.length > logLimit) {
         logList.removeChild(logList.firstChild);
       }
       requestAnimationFrame(() => {
@@ -1087,13 +1287,18 @@
 
     // Update Status across BOTH views (Full & Compact)
     function setCardState(isBusy, text, isCapture = false) {
+      // A fresh command starts indeterminate; a PROGRESS frame (see
+      // window.onmessage) switches this to a real percentage until the next command.
+      progressFill.style.animation = '';
+      progressFill.style.width = '';
+      kickIdleTimer();
       if (isBusy) {
         if (isCapture) {
           actCard.className = 'activity-card capture';
           cardTag.className = 'card-tag capture';
           cardTag.textContent = 'VISUAL FEEDBACK LOOP';
           cardBadge.className = 'card-badge capture';
-          cardBadge.textContent = '📸 1.5x Vision';
+          cardBadge.innerHTML = matIcon('photo_camera') + ' 1.5x Vision';
           taskDesc.className = 'task-desc busy';
           taskDesc.textContent = text || 'Exporting canvas viewport PNG to AI context...';
           progressBar.className = 'progress-bar active';
@@ -1116,7 +1321,7 @@
           cardTag.className = 'card-tag busy';
           cardTag.textContent = 'CURRENT EXECUTION';
           cardBadge.className = 'card-badge busy';
-          cardBadge.textContent = '🔮 Multi-Step Script';
+          cardBadge.innerHTML = matIcon('auto_awesome') + ' Multi-Step Script';
           taskDesc.className = 'task-desc busy';
           taskDesc.textContent = text || 'Executing code in Figma sandbox...';
           progressBar.className = 'progress-bar active';
@@ -1140,7 +1345,7 @@
         cardTag.className = 'card-tag';
         cardTag.textContent = 'AI ASSISTANT STATUS';
         cardBadge.className = 'card-badge';
-        cardBadge.textContent = '⚡ Ready';
+        cardBadge.innerHTML = matIcon('bolt') + ' Ready';
         taskDesc.className = 'task-desc';
         taskDesc.textContent = 'Listening on 127.0.0.1:8765. Ready for commands.';
         progressBar.className = 'progress-bar';
@@ -1165,7 +1370,7 @@
       cardTag.className = 'card-tag error';
       cardTag.textContent = 'CONNECTION ERROR';
       cardBadge.className = 'card-badge error';
-      cardBadge.textContent = '⚠️ Server Down';
+      cardBadge.innerHTML = matIcon('warning') + ' Server Down';
       taskDesc.className = 'task-desc error';
       taskDesc.textContent = errMsg || 'Cannot connect to 127.0.0.1:8765. Run install.py.';
       progressBar.className = 'progress-bar';
@@ -1198,21 +1403,28 @@
       }
     }
 
-    // Tab Switching Logic (Stream <-> Settings)
+    // Tab Switching Logic (Stream <-> Settings <-> Control)
     function switchTab(tabName) {
       currentTab = tabName;
+      tabStream.classList.add('hidden');
+      tabSettings.classList.add('hidden');
+      tabControl.classList.add('hidden');
+      navBtnStream.classList.remove('active');
+      navBtnSettings.classList.remove('active');
+      navBtnControl.classList.remove('active');
+
       if (tabName === 'settings') {
-        tabStream.classList.add('hidden');
         tabSettings.classList.remove('hidden');
-        navBtnStream.classList.remove('active');
         navBtnSettings.classList.add('active');
-        headerSub.textContent = 'Preferences • v3.1';
+        headerSub.textContent = `Preferences • v${PLUGIN_VERSION}`;
+      } else if (tabName === 'control') {
+        tabControl.classList.remove('hidden');
+        navBtnControl.classList.add('active');
+        headerSub.textContent = `Control • v${PLUGIN_VERSION}`;
       } else {
-        tabSettings.classList.add('hidden');
         tabStream.classList.remove('hidden');
-        navBtnSettings.classList.remove('active');
         navBtnStream.classList.add('active');
-        headerSub.textContent = 'Local :8765 • v3.1';
+        headerSub.textContent = `Local :8765 • v${PLUGIN_VERSION}`;
       }
     }
 
@@ -1223,16 +1435,127 @@
         defaultView,
         autoZoom,
         smartPlacement,
-        serverUrl: SERVER_URL
+        serverUrl: SERVER_URL,
+        compactPreset,
+        autoCollapse,
+        captureScale,
+        logLimit
       };
       parent.postMessage({ pluginMessage: { type: 'SAVE_SETTINGS', settings } }, '*');
+    }
+
+    const SETTINGS_DEFAULTS = {
+      defaultView: 'full', autoZoom: true, smartPlacement: true,
+      serverUrl: 'http://127.0.0.1:8765', compactPreset: 'slim',
+      autoCollapse: false, captureScale: 1.5, logLimit: 100
+    };
+
+    function applySettings(s) {
+      SERVER_URL = s.serverUrl || SETTINGS_DEFAULTS.serverUrl;
+      WS_URL = SERVER_URL.replace(/^http/, 'ws');
+      serverUrlInput.value = SERVER_URL;
+
+      autoZoom = typeof s.autoZoom === 'boolean' ? s.autoZoom : SETTINGS_DEFAULTS.autoZoom;
+      toggleZoomTrack.className = autoZoom ? 'toggle-track active' : 'toggle-track';
+      compactFocusBtn.className = autoZoom ? 'icon-btn active' : 'icon-btn';
+
+      smartPlacement = typeof s.smartPlacement === 'boolean' ? s.smartPlacement : SETTINGS_DEFAULTS.smartPlacement;
+      togglePlaceTrack.className = smartPlacement ? 'toggle-track active' : 'toggle-track';
+
+      compactPreset = s.compactPreset || SETTINGS_DEFAULTS.compactPreset;
+      compactPresetSelect.value = compactPreset;
+
+      autoCollapse = typeof s.autoCollapse === 'boolean' ? s.autoCollapse : SETTINGS_DEFAULTS.autoCollapse;
+      toggleAutocollapseTrack.className = autoCollapse ? 'toggle-track active' : 'toggle-track';
+
+      captureScale = typeof s.captureScale === 'number' ? s.captureScale : SETTINGS_DEFAULTS.captureScale;
+      captureScaleSelect.value = String(captureScale);
+
+      logLimit = typeof s.logLimit === 'number' ? s.logLimit : SETTINGS_DEFAULTS.logLimit;
+      logLimitSelect.value = String(logLimit);
+
+      if (s.defaultView === 'compact') {
+        segCompact.classList.add('active');
+        segFull.classList.remove('active');
+        switchView('compact');
+      } else {
+        segFull.classList.add('active');
+        segCompact.classList.remove('active');
+      }
     }
 
     // Wire Navigation & View Events
     navBtnStream.onclick = () => switchTab('stream');
     navBtnSettings.onclick = () => switchTab('settings');
+    navBtnControl.onclick = () => switchTab('control');
     btnMiniMode.onclick = () => switchView('compact');
     compactExpandBtn.onclick = () => switchView('full');
+
+    // Compact preset (applied next time Mini Mode opens)
+    const COMPACT_SIZES = { slim: [260, 44], standard: [300, 52], micro: [200, 38] };
+    compactPresetSelect.onchange = () => {
+      compactPreset = compactPresetSelect.value;
+      addLog('sys', 'SYS', `Compact preset: ${compactPreset}`);
+      savePreferences();
+    };
+
+    toggleAutocollapseSet.onclick = () => {
+      autoCollapse = !autoCollapse;
+      toggleAutocollapseTrack.className = autoCollapse ? 'toggle-track active' : 'toggle-track';
+      addLog('sys', 'SYS', `Auto-collapse when idle: ${autoCollapse ? 'ON' : 'OFF'}`);
+      savePreferences();
+    };
+
+    captureScaleSelect.onchange = () => {
+      captureScale = parseFloat(captureScaleSelect.value) || 1.5;
+      savePreferences();
+    };
+
+    logLimitSelect.onchange = () => {
+      logLimit = parseInt(logLimitSelect.value, 10) || 100;
+      savePreferences();
+    };
+
+    clearLogsBtn.onclick = () => termClear.onclick && termClear.onclick();
+
+    resetSettingsBtn.onclick = () => {
+      applySettings(SETTINGS_DEFAULTS);
+      savePreferences();
+      addLog('sys', 'SYS', 'Settings reset to defaults');
+    };
+
+    // Idle auto-collapse: any activity resets the timer; after 10s idle (and
+    // only from Full Dashboard, and only if the user opted in) switch to Mini.
+    function kickIdleTimer() {
+      if (idleTimer) clearTimeout(idleTimer);
+      if (!autoCollapse) return;
+      idleTimer = setTimeout(() => {
+        if (autoCollapse && currentView === 'full') switchView('compact');
+      }, 10000);
+    }
+
+    // Pause / Resume — EXECUTION_PAUSED calls are rejected in code.js the
+    // instant they arrive, not queued, so this is immediate for the next call.
+    function setPaused(val) {
+      paused = val;
+      parent.postMessage({ pluginMessage: { type: 'SET_PAUSED', value: paused } }, '*');
+      pauseBtn.innerHTML = paused ? (matIcon('play_arrow') + '<span>Resume</span>') : (matIcon('pause') + '<span>Pause</span>');
+      pauseBtn.className = paused ? 'btn-icon-styled active-state' : 'btn-icon-styled';
+      pauseStateLabel.textContent = paused ? 'Paused' : 'Running';
+      addLog('sys', 'SYS', paused ? 'AI execution paused by user' : 'AI execution resumed');
+    }
+    pauseBtn.onclick = () => setPaused(!paused);
+
+    // Undo Last AI Action — routed straight to code.js as a local UI action
+    // ("ui_" id prefix), not through the server: this is the user acting, not
+    // the agent, so the result is only logged locally rather than reported
+    // back over the WebSocket as if a tool call had happened.
+    undoBtn.onclick = () => {
+      if (!lastCheckpointId) return;
+      parent.postMessage({
+        pluginMessage: { type: 'ROLLBACK', id: 'ui_' + Date.now(), checkpoint_id: lastCheckpointId, startTime: performance.now() }
+      }, '*');
+    };
 
     // Default View Selector
     segFull.onclick = () => {
@@ -1328,6 +1651,32 @@
     };
 
     // Ping Bridge (WebSocket + HTTP Status)
+    // Diagnostics: an installed plugin talking to a since-updated server (or
+    // vice versa) used to just fail in confusing ways. /status carries the
+    // server's version, so a mismatch becomes a visible banner instead.
+    function showDiagBanner(text) {
+      serverVersionMismatch = true;
+      diagBanner.innerHTML = matIcon('warning', 12) + ' ' + escapeHtml(text);
+      diagBanner.classList.remove('hidden');
+    }
+    function clearDiagBanner() {
+      if (!serverVersionMismatch) return;
+      serverVersionMismatch = false;
+      diagBanner.classList.add('hidden');
+    }
+    async function checkServerStatus() {
+      try {
+        const res = await fetch(withToken(`${SERVER_URL}/status`), { headers: tokenHeaders() });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data.serverVersion && data.serverVersion !== PLUGIN_VERSION) {
+          showDiagBanner(`Server v${data.serverVersion} / plugin v${PLUGIN_VERSION} — reload the plugin (Ctrl+Alt+P) after updating, or re-run install.py --update.`);
+        } else {
+          clearDiagBanner();
+        }
+      } catch (e) {}
+    }
+
     pingBtn.onclick = async () => {
       const t0 = performance.now();
       if (ws && ws.readyState === WebSocket.OPEN) {
@@ -1336,6 +1685,7 @@
         mLat.textContent = '<1ms';
         termLatency.textContent = 'Latency: <1ms';
         if (statusText.textContent === 'OFFLINE') setCardState(false);
+        checkServerStatus();
       } else {
         try {
           const res = await fetch(withToken(`${SERVER_URL}/status`), { headers: tokenHeaders() });
@@ -1345,6 +1695,7 @@
             mLat.textContent = `${dt}ms`;
             termLatency.textContent = `Latency: ${dt}ms`;
             connectWebSocket();
+            checkServerStatus();
           } else {
             addLog('err', 'ERR', `Bridge returned HTTP ${res.status}`);
           }
@@ -1375,6 +1726,27 @@
     let ws = null;
     let reconnectTimer = null;
     let pingInterval = null;
+    let wsFailCount = 0;
+    let tokenMismatchShown = false;
+
+    // A bad/stale BRIDGE_TOKEN (baked in at install time) makes the server
+    // reject the WS handshake before it upgrades, which the browser can only
+    // report as a generic close/error — no status code reaches onclose/onerror.
+    // Left alone, this just reconnects forever with the same bad token every
+    // 1.5s, forever showing "Reconnecting..." with no way for the user to
+    // learn the real fix is to reload the plugin. After a few failures, take
+    // the one path that DOES expose a real HTTP status — a plain fetch to
+    // /status — to tell a token rejection (403) apart from the server simply
+    // being offline, and say so explicitly.
+    async function checkTokenMismatch() {
+      try {
+        const res = await fetch(withToken(`${SERVER_URL}/status`));
+        if (res.status === 403) {
+          tokenMismatchShown = true;
+          setOfflineState('Bridge token mismatch. Close and re-open this plugin (Ctrl+Alt+P / Cmd+Option+P) to pick up the current token, or re-run install.py --update.');
+        }
+      } catch (e) {}
+    }
 
     function connectWebSocket() {
       if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) {
@@ -1386,13 +1758,21 @@
 
         ws.onopen = () => {
           clearTimeout(reconnectTimer);
+          wsFailCount = 0;
+          tokenMismatchShown = false;
           setCardState(false);
           addLog('ok', 'WS', 'Full-duplex WebSocket active (:8765 • 0ms)');
           termLatency.textContent = 'Latency: <1ms';
           mLat.textContent = '<1ms';
 
-          // Notify server that client is ready
-          ws.send(JSON.stringify({ type: 'CLIENT_READY', timestamp: Date.now() }));
+          // Notify server that client is ready — includes document identity
+          // (Target Router, §4.5) and this plugin's version (Diagnostics).
+          ws.send(JSON.stringify({
+            type: 'CLIENT_READY', timestamp: Date.now(),
+            fileKey: docInfo.fileKey, fileName: docInfo.fileName, pageName: docInfo.pageName,
+            pluginVersion: PLUGIN_VERSION
+          }));
+          checkServerStatus();
 
           // Heartbeat every 10s to keep connection alive
           clearInterval(pingInterval);
@@ -1422,7 +1802,7 @@
               const msgType = data.type || (data.code ? 'EXECUTE' : 'UNKNOWN');
 
               if (isCap) {
-                setCardState(true, `📸 ${desc}...`, true);
+                setCardState(true, `${desc}...`, true);
                 addLog('shot', 'SHOT', desc);
               } else {
                 setCardState(true, desc, false);
@@ -1449,7 +1829,13 @@
 
         ws.onclose = () => {
           clearInterval(pingInterval);
-          setOfflineState('WebSocket Disconnected. Reconnecting...');
+          wsFailCount++;
+          if (wsFailCount >= 3 && !tokenMismatchShown) {
+            checkTokenMismatch();
+          }
+          if (!tokenMismatchShown) {
+            setOfflineState('WebSocket Disconnected. Reconnecting...');
+          }
           scheduleReconnect();
         };
       } catch (err) {
@@ -1490,26 +1876,38 @@
       if (!msg) return;
 
       if (msg.type === 'SETTINGS_LOADED') {
-        const s = msg.settings || {};
-        if (s.serverUrl) {
-          SERVER_URL = s.serverUrl;
-          WS_URL = s.serverUrl.replace(/^http/, 'ws');
-          serverUrlInput.value = s.serverUrl;
+        applySettings({ ...SETTINGS_DEFAULTS, ...(msg.settings || {}) });
+      }
+
+      if (msg.type === 'DOC_INFO' || msg.type === 'PAGE_CHANGED') {
+        if (msg.fileKey !== undefined) docInfo.fileKey = msg.fileKey;
+        if (msg.fileName !== undefined) docInfo.fileName = msg.fileName;
+        if (msg.pageName !== undefined) docInfo.pageName = msg.pageName;
+        targetDesc.textContent = docInfo.fileName ? `${docInfo.fileName} — ${docInfo.pageName || 'page'}` : 'Waiting for Figma…';
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({
+            type: 'CLIENT_FOCUS', timestamp: Date.now(),
+            fileKey: docInfo.fileKey, fileName: docInfo.fileName, pageName: docInfo.pageName,
+            pluginVersion: PLUGIN_VERSION
+          }));
         }
-        if (typeof s.autoZoom === 'boolean') {
-          autoZoom = s.autoZoom;
-          toggleZoomTrack.className = autoZoom ? 'toggle-track active' : 'toggle-track';
-          compactFocusBtn.className = autoZoom ? 'icon-btn active' : 'icon-btn';
+      }
+
+      if (msg.type === 'PROGRESS') {
+        const note = msg.note ? `${msg.step}/${msg.of || '?'} — ${msg.note}` : `Step ${msg.step}/${msg.of || '?'}`;
+        taskDesc.textContent = note;
+        if (msg.of) {
+          progressFill.style.animation = 'none';
+          progressFill.style.width = `${Math.min(100, Math.round((msg.step / msg.of) * 100))}%`;
         }
-        if (typeof s.smartPlacement === 'boolean') {
-          smartPlacement = s.smartPlacement;
-          togglePlaceTrack.className = smartPlacement ? 'toggle-track active' : 'toggle-track';
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'PROGRESS', id: msg.id, step: msg.step, of: msg.of, note: msg.note, ts: msg.ts }));
         }
-        if (s.defaultView === 'compact') {
-          segCompact.classList.add('active');
-          segFull.classList.remove('active');
-          switchView('compact');
-        }
+        return;
+      }
+
+      if (msg.type === 'PAUSED_STATE') {
+        return; // acked by code.js; local button state already reflects the toggle
       }
 
       if (msg.type === 'RESULT') {
@@ -1524,14 +1922,48 @@
 
         if (msg.success) {
           if (msg.screenshot || msg.screenshots) {
-            addLog('ok', 'OK', `${desc} finished`);
+            addLog('ok', 'OK', `${desc} finished`, msg.targetId);
             const targetInfo = msg.targetName ? `[${msg.targetName}]` : '';
-            addLog('shot', 'AI', `Rendered PNG ${targetInfo} sent to context`);
+            addLog('shot', 'AI', `Rendered PNG ${targetInfo} sent to context`, msg.targetId);
           } else {
-            addLog('ok', 'OK', `${desc} finished`);
+            addLog('ok', 'OK', `${desc} finished`, msg.targetId);
+          }
+          if (msg.checkpointId) {
+            lastCheckpointId = msg.checkpointId;
+            lastCheckpointLabel = desc;
+            undoBtn.removeAttribute('disabled');
+            lastActionLabel.textContent = desc;
+            lastActionDesc.textContent = `checkpoint ${msg.checkpointId}` +
+              ((msg.created || []).length ? ` · ${msg.created.length} created` : '') +
+              ((msg.modified || []).length ? ` · ${msg.modified.length} modified` : '');
+          }
+          if (Array.isArray(msg.warnings) && msg.warnings.length) {
+            addLog('sys', 'LINT', msg.warnings.join(' | '));
           }
         } else {
           addLog('err', 'ERR', `Error: ${msg.error}`);
+        }
+
+        // Rough context-cost indicator: every byte the server turns into text
+        // content roughly maps to ~1/4 token, same approximation the server
+        // uses for budget_tokens — good enough for "is this session getting expensive".
+        budgetTokensEstimate += Math.ceil(JSON.stringify(msg).length / 4);
+        budgetValue.textContent = '~' + budgetTokensEstimate.toLocaleString();
+
+        // Local UI actions (Undo button) are logged here but never reported to
+        // the server as if a tool call had happened — there is no MCP request
+        // waiting on this id.
+        if (String(msg.id || '').startsWith('ui_')) {
+          if (msg.success) {
+            addLog('sys', 'SYS', `Rolled back: removed ${(msg.result && msg.result.removed || []).length}, restored ${(msg.result && msg.result.restored || []).length}`);
+            lastCheckpointId = null;
+            undoBtn.setAttribute('disabled', 'true');
+            lastActionLabel.textContent = 'Nothing to undo yet';
+            lastActionDesc.textContent = 'Every write call opens a checkpoint automatically';
+          } else {
+            addLog('err', 'ERR', `Rollback failed: ${msg.error}`);
+          }
+          return;
         }
 
         // Direct WebSocket Result Return (0ms)
@@ -1551,6 +1983,11 @@
         }
       }
     };
+
+    // Ask code.js for the current document identity as soon as the sandbox is
+    // ready — the CLIENT_READY/CLIENT_FOCUS payload sent on WS connect (Target
+    // Router) needs it, and DOC_INFO / PAGE_CHANGED keep it fresh afterward.
+    parent.postMessage({ pluginMessage: { type: 'GET_DOC_INFO' } }, '*');
 
     // Initialize: load stored settings & connect full-duplex WebSocket
     parent.postMessage({ pluginMessage: { type: 'LOAD_SETTINGS' } }, '*');

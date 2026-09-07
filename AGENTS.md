@@ -9,17 +9,17 @@ This document provides explicit, deterministic instructions for **AI Agents** (G
 When the user asks you to **"Install Figma MCP"**, **"Update Figma MCP"**, or passes a link to this repository, follow these steps:
 
 ### 1. Run the Automated Installer
-Execute `install.py` in the repository root directory:
+Execute `install.mjs` in the repository root directory (needs only Node.js — no Python, no npm packages):
 ```bash
 # New installation (with optional token):
-python install.py --token "<USER_TOKEN_OR_EMPTY>"
+node install.mjs --token "<USER_TOKEN_OR_EMPTY>"
 
 # In-place update:
-python install.py --update
+node install.mjs --update
 ```
 
 > [!IMPORTANT]
-> **CRITICAL RULE:** Do NOT merely download or extract the repository files. You **MUST** run `python install.py` / `python install.py --update`. This command copies the server and plugin files into the system directories (`~/.gemini/antigravity/mcp/` and `~/.gemini/antigravity-ide/mcp/`) and registers the server in all active `mcp_config.json` configuration files.
+> **CRITICAL RULE:** Do NOT merely download or extract the repository files. You **MUST** run `node install.mjs` / `node install.mjs --update`. This command copies the server and plugin files into the system directories (`~/.gemini/antigravity/mcp/` and `~/.gemini/antigravity-ide/mcp/`) and registers the server in all active `mcp_config.json` configuration files.
 
 ### 2. Guide the User to Activate / Reload the Plugin
 Instruct the user:
@@ -31,8 +31,11 @@ Instruct the user:
 ### 3. Verify Connection with Doctor
 Run the diagnostic check:
 ```bash
-python install.py --doctor
+node install.mjs --doctor
 ```
+
+> [!NOTE]
+> The server prints a one-line notice to stderr on startup if `main` has moved past the installed commit — it only *notifies*, it never updates anything on its own. `node install.mjs --update` is still the only thing that actually applies an update. Set `FIGMA_MCP_NO_UPDATE_CHECK=1` to disable the check entirely (e.g. on an air-gapped machine).
 
 ---
 
@@ -45,6 +48,10 @@ When interacting with the Figma canvas:
 4. **Smart Placement:** Use `getFreePosition(width, height, { gap: 80, direction: "RIGHT" })` or let the automatic collision engine place new artboards safely without overlapping existing work.
 5. **Color normalization:** Colors in Figma API are floats from `0` to `1` (e.g. `{ r: 0.1, g: 0.5, b: 0.9 }`), not `0-255`.
 6. **Font safety:** Always load fonts before setting text via `await ensureFont("Inter", "Regular")` or `await ensureFont("Inter", "Bold")`.
+7. **Read before you screenshot:** Prefer `figma_read_canvas` over hand-writing a tree walk to inspect the live document — same token-optimized output as `get_file`/`get_node`, far cheaper than dumping raw JSON.
+8. **Every write call is undoable:** it returns a `checkpoint_id`; `figma_rollback({ checkpoint_id })` (or `"last"`) undoes it. Use this instead of asking the user to `Ctrl+Z`.
+9. **Long-running code doesn't need special handling:** past 30s a call auto-escalates to `{ status: "running", job_id }`; poll with `figma_job_status`. Call `progress(step, of, note)` inside multi-step code so that polling shows real progress.
+10. **Multiple Figma files open:** check `figma_list_targets` and pass `target: "<fileName>"` on any LIVE tool if a call fails with `AMBIGUOUS_TARGET`.
 
 ---
 
@@ -70,7 +77,11 @@ Your code is compiled by the plugin as `new AsyncFunction('figma', 'ensureFont',
 Errors carry a `HINT:` line whenever the bridge recognises the failure mode (unloaded font, instance override, stale node id, hugging AutoLayout resize, `pluginData` limits, "helper from my last call is not defined"). Read the hint before retrying.
 
 ### Changing the runtime
-`node tests/bridge-runtime.test.js` is a contract test that pins this behaviour (module persistence, chunking, store, `componentize`, `setPosition`, error hints). Run it after touching `figma-plugin/code.js`.
+Four contract tests pin this behaviour; run the ones relevant to what you touched (or all of them — each finishes in well under a second, except `mcp-protocol.test.js` which spawns real server processes):
+- `node tests/bridge-runtime.test.js` — module persistence, chunking, store, `componentize`, `setPosition`, error hints, checkpoint/rollback. Run after touching `figma-plugin/code.js`'s Bridge Runtime block.
+- `node tests/layout-packer.test.js` — canvas placement (row/grid packing, collision grid). Run after touching `getFreeCanvasPosition*` / `autoPositionIfColliding` in `figma-plugin/code.js`.
+- `node tests/optimizer.test.js` — REST/live token optimizer (jsx/tree/json, budget truncation). Run after touching `figma/optimizer/*.js`.
+- `node tests/mcp-protocol.test.js` — the real server over stdio: `initialize`, `tools/list`, tool tiering by env. Run after touching `figma/index.js`'s `TOOLS` array or `TOOL_TIERS`.
 
 ---
 
@@ -78,7 +89,7 @@ Errors carry a `HINT:` line whenever the bridge recognises the failure mode (unl
 
 - **If tool calls time out:**
   1. Ask the user to make sure Figma Desktop is open and the **Antigravity Bridge** plugin window is active.
-  2. If the plugin shows **`OFFLINE`**, run `python install.py --doctor` to verify port `8765` availability.
+  2. If the plugin shows **`OFFLINE`**, run `node install.mjs --doctor` to verify port `8765` availability.
   3. If there are zombie Node processes holding port 8765, terminate them (`Stop-Process -Name node -Force` on Windows or `killall node` on macOS) and reload the plugin with `Ctrl + Alt + P`.
 - **Figma Web vs Desktop:** Plugins interacting with local WebSocket bridges (`ws://127.0.0.1:8765`) require **Figma Desktop**. Web browser versions of Figma block loopback sockets due to Mixed Content policies.
 
