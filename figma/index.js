@@ -76,7 +76,7 @@ const wsClients = new Set();
 // agent as a background job instead of failing outright — see the Job Ledger
 // below and SERVER_VERSION.
 const TIMEOUTS = { fast: 15000, normal: 45000, heavy: 120000, escalate: 30000 };
-const SERVER_VERSION = "4.0.0";
+const SERVER_VERSION = "4.0.1";
 
 // ------------------------------------------------------------------
 // Job Ledger — makes a figma_execute_code call that runs long survive its own
