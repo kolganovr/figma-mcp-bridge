@@ -53,7 +53,7 @@ with a real design file.
 | **Token-optimized read of the *live* doc** | ✅ 86–91% smaller[²](#sources) | ⚠️ partial | ❌ REST only | ❌ |
 | **Persistent code modules in-sandbox** | ✅ `bridge.define/require` | ❌ | ❌ | ❌ |
 | **Long jobs survive their own timeout** | ✅ async `job_id` + progress | ❌ | n/a | ❌ |
-| **Install footprint** | 0 npm deps, one command, Node only | Figma desktop + paid seat | `npx` + access token | Bun + a second server process |
+| **Install footprint** | 0 npm deps, `npx` *or* `git clone`, Node only | Figma desktop + paid seat | `npx` + access token | Bun + a second server process |
 
 **The short version:** Framelink is the best choice if you only want to turn an existing design
 into code. The official server is the safest choice if you're already on a paid Figma plan and
@@ -98,15 +98,23 @@ latency, and results (including multi-megabyte base64 PNGs) stream straight back
 ## Quickstart
 
 ```bash
+npx @kolganovr/figma-mcp-bridge
+```
+
+Or, to read the installer before it touches your machine — it's the same script either way,
+just fetched differently:
+
+```bash
 git clone https://github.com/kolganovr/figma-mcp-bridge.git
 cd figma-mcp-bridge
 node install.mjs
 ```
 
-That copies the server and plugin into place and registers the MCP server in every AI client
-config it finds — Claude Desktop, Claude Code, Cursor, Windsurf, Antigravity. There is no
-`npm install`, because there is nothing to install — and no Python either; `node` is the only
-runtime this project needs, for the installer and the server alike.
+Both copy the server and plugin into place and register the MCP server in every AI client config
+they find — Claude Desktop, Claude Code, Cursor, Windsurf, Antigravity. The npm package exists
+purely for a shorter first command; it doesn't add a single runtime dependency — `dependencies`
+is empty in its `package.json` too, and no Python is needed either. `node` is the only runtime
+this project ever needs, for the installer and the server alike.
 
 Then, in **Figma Desktop**:
 
@@ -117,7 +125,7 @@ Then, in **Figma Desktop**:
 Restart your AI client so it picks up the new tools. Verify anytime with:
 
 ```bash
-node install.mjs --doctor
+npx @kolganovr/figma-mcp-bridge --doctor   # or: node install.mjs --doctor
 ```
 
 <details>
@@ -127,7 +135,8 @@ The live canvas tools need no token. If you also want to read *unopened* cloud f
 (`get_file`, `get_node`, `get_styles`, …), supply a personal access token:
 
 ```bash
-node install.mjs --token "your_figma_personal_access_token"
+npx @kolganovr/figma-mcp-bridge --token "your_figma_personal_access_token"
+# or: node install.mjs --token "your_figma_personal_access_token"
 ```
 
 Without a token these 7 tools aren't registered at all — see [Tool reference](#tool-reference).

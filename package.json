@@ -1,0 +1,45 @@
+{
+  "name": "@kolganovr/figma-mcp-bridge",
+  "version": "4.0.0",
+  "description": "Zero-dependency MCP bridge with write access to a live Figma canvas, auto-framed screenshot feedback, and one-call rollback. Works on the Figma free plan.",
+  "bin": {
+    "figma-mcp-bridge": "./install.mjs"
+  },
+  "files": [
+    "figma/",
+    "figma-plugin/",
+    "install.mjs",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kolganovr/figma-mcp-bridge.git"
+  },
+  "homepage": "https://github.com/kolganovr/figma-mcp-bridge#readme",
+  "bugs": {
+    "url": "https://github.com/kolganovr/figma-mcp-bridge/issues"
+  },
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "figma",
+    "figma-plugin",
+    "model-context-protocol",
+    "ai-agent",
+    "claude",
+    "claude-code",
+    "cursor",
+    "windsurf",
+    "agentic-coding"
+  ],
+  "author": {
+    "name": "Roman Kolganov",
+    "url": "https://github.com/kolganovr"
+  },
+  "dependencies": {}
+}
