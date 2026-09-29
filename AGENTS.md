@@ -42,15 +42,16 @@ node install.mjs --doctor
 ## 🎨 Agent Usage Best Practices (Visual Feedback Loop)
 
 When interacting with the Figma canvas:
-1. **Always close the visual loop:** When creating or editing UI elements (frames, text, cards, buttons, vector icons), set `capture: true` in `figma_execute_code`, `figma_insert_component_instance`, or `figma_insert_svg`, or call `figma_screenshot`.
+0. **Mind the token bill:** every call re-reads the whole conversation and its output stays there. Do a whole stage (read → change → verify) in ONE `figma_execute_code` call and return only the ids/flags you need. Verify with the write response's `warnings` and `bridge.check(specs)` before reaching for an image.
+1. **Close the visual loop once per stage:** when a stage is done, set `capture: true` (with `capture_node_ids`) on the last write, or call `figma_screenshot`. Images default to `scale: 1`, `max_px: 1024` (~1k tokens); raise `max_px` only to read fine detail.
 2. **Inspect returned images:** Use the returned PNG image to visually audit typography, contrast, layout alignment, AutoLayout padding, and hierarchy.
 3. **AutoLayout first:** Always construct layouts using `layoutMode = "VERTICAL"` or `"HORIZONTAL"`, `primaryAxisSizingMode = "AUTO"` (hug) or `"FIXED"`, and `counterAxisSizingMode`.
 4. **Smart Placement:** Use `getFreePosition(width, height, { gap: 80, direction: "RIGHT" })` or let the automatic collision engine place new artboards safely without overlapping existing work.
 5. **Color normalization:** Colors in Figma API are floats from `0` to `1` (e.g. `{ r: 0.1, g: 0.5, b: 0.9 }`), not `0-255`.
 6. **Font safety:** Always load fonts before setting text via `await ensureFont("Inter", "Regular")` or `await ensureFont("Inter", "Bold")`.
-7. **Read before you screenshot:** Prefer `figma_read_canvas` over hand-writing a tree walk to inspect the live document — same token-optimized output as `get_file`/`get_node`, far cheaper than dumping raw JSON.
+7. **Read before you screenshot:** Prefer `figma_read_canvas`, or inside code `bridge.summarize(id, { depth })`, `bridge.inspect(ids, props)`, `bridge.find(query, { root, type })`, over hand-writing a tree walk — never return raw node dumps. Results over `max_output_chars` (6000) are shrunk; the full value stays in `bridge.state.lastResult` for the next call.
 8. **Every write call is undoable:** it returns a `checkpoint_id`; `figma_rollback({ checkpoint_id })` (or `"last"`) undoes it. Use this instead of asking the user to `Ctrl+Z`.
-9. **Long-running code doesn't need special handling:** past 30s a call auto-escalates to `{ status: "running", job_id }`; poll with `figma_job_status`. Call `progress(step, of, note)` inside multi-step code so that polling shows real progress.
+9. **Long-running code doesn't need special handling:** past 45s a call auto-escalates to `{ status: "running", job_id }`; call `figma_job_status` ONCE — it blocks until the job finishes (`wait_ms`, default 45s). `PLUGIN_BUSY` means another job still holds the single-threaded sandbox: wait for that job, don't retry. `stalled: true` means ask the user. Call `progress(step, of, note)` inside multi-step code.
 10. **Multiple Figma files open:** check `figma_list_targets` and pass `target: "<fileName>"` on any LIVE tool if a call fails with `AMBIGUOUS_TARGET`.
 
 ---
@@ -82,6 +83,7 @@ Four contract tests pin this behaviour; run the ones relevant to what you touche
 - `node tests/layout-packer.test.js` — canvas placement (row/grid packing, collision grid). Run after touching `getFreeCanvasPosition*` / `autoPositionIfColliding` in `figma-plugin/code.js`.
 - `node tests/optimizer.test.js` — REST/live token optimizer (jsx/tree/json, budget truncation). Run after touching `figma/optimizer/*.js`.
 - `node tests/mcp-protocol.test.js` — the real server over stdio: `initialize`, `tools/list`, tool tiering by env. Run after touching `figma/index.js`'s `TOOLS` array or `TOOL_TIERS`.
+- `node tests/token-economy.test.js` — real server + a fake plugin over a real WebSocket on an isolated port: output budgets, image sizing, blocking `figma_job_status`, `PLUGIN_BUSY`, disconnect/reconnect, proxy forwarding. Run after touching `sendCommandToPlugin`, the job ledger, or any tool's output rendering. After changing `TOOLS`, regenerate `figma/<tool>.json` from it (they mirror `TOOLS` for clients that read per-tool descriptors).
 
 ---
 

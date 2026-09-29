@@ -2,14 +2,10 @@
 // node tests/mcp-protocol.test.js
 //
 // Spawns the real server as a child process and talks NDJSON to it over
-// stdio — the same transport an MCP client uses — rather than importing
-// index.js directly. index.js binds :8765 as a side effect of module load
-// (the WebSocket bridge), so importing it in-process would either fail or
-// silently fight a real running instance; spawning a child process is the
-// only way to exercise the stdio protocol in isolation. This also means the
-// child's own :8765 bind is expected to no-op if something else already
-// owns the port on this machine (see tryBecomeMaster in index.js) — the
-// tests below never depend on that succeeding.
+// stdio — the same transport an MCP client uses. index.js binds :8765 (the
+// WebSocket bridge) when run as a program; require()-ing it only exposes pure
+// helpers (see tests/token-economy.test.js). Servers that could reach a live
+// bridge get their own FIGMA_BRIDGE_PORT; the rest never call a LIVE tool.
 const path = require("path");
 const { spawn } = require("child_process");
 
@@ -83,7 +79,9 @@ function check(name, cond, extra) {
 
 async function main() {
   console.log("\n== initialize / tools/list (no FIGMA_PERSONAL_ACCESS_TOKEN) ==");
-  const server = startServer({ FIGMA_PERSONAL_ACCESS_TOKEN: "", FIGMA_API_KEY: "", FIGMA_MCP_LEGACY_TOOLS: "" });
+  // Own port: figma_list_targets on a PROXY now reports the master's plugins,
+  // so on a machine with a live bridge on 8765 this would not be empty.
+  const server = startServer({ FIGMA_PERSONAL_ACCESS_TOKEN: "", FIGMA_API_KEY: "", FIGMA_MCP_LEGACY_TOOLS: "", FIGMA_BRIDGE_PORT: "18764" });
   try {
     const init = await server.call("initialize", { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "test", version: "0" } });
     check("initialize responds with serverInfo.name", init.result && init.result.serverInfo && init.result.serverInfo.name === "figma-mcp", init);

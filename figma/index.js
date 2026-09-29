@@ -75,8 +75,40 @@ const wsClients = new Set();
 // figma_execute_code call is allowed to block before it is handed back to the
 // agent as a background job instead of failing outright — see the Job Ledger
 // below and SERVER_VERSION.
-const TIMEOUTS = { fast: 15000, normal: 45000, heavy: 120000, escalate: 30000 };
-const SERVER_VERSION = "4.0.1";
+function envNumber(name, fallback) {
+  const n = Number(process.env[name]);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
+// `escalate` went 30s -> 45s: every escalation costs the agent at least one
+// extra figma_job_status turn, and each turn re-reads the WHOLE conversation.
+// 45s still sits under the ~60s tool-call timeout of the strictest MCP clients.
+const TIMEOUTS = {
+  fast: envNumber("FIGMA_MCP_TIMEOUT_FAST_MS", 15000),
+  normal: envNumber("FIGMA_MCP_TIMEOUT_MS", 45000),
+  heavy: envNumber("FIGMA_MCP_TIMEOUT_HEAVY_MS", 120000),
+  escalate: envNumber("FIGMA_MCP_ESCALATE_MS", 45000)
+};
+const SERVER_VERSION = "4.1.0";
+
+// ------------------------------------------------------------------
+// Token economy. In an agent loop the price of a tool call is not its own
+// output — it is the whole context re-read on the NEXT turn, and everything a
+// call returns stays in that context until the session ends. So the defaults
+// below optimise for: fewer turns (long-poll jobs, wait out a plugin reload),
+// smaller images (tokens scale with pixels, not bytes), and bounded text.
+// Every knob is overridable per call and per install (env).
+// ------------------------------------------------------------------
+const ECONOMY = {
+  scale: envNumber("FIGMA_MCP_SCALE", 1),                        // screenshot scale when the caller passes none
+  maxPx: envNumber("FIGMA_MCP_MAX_PX", 1024),                    // longest image side; ~1k tokens at 1024x1024
+  maxImages: envNumber("FIGMA_MCP_MAX_IMAGES", 3),               // images per tool response
+  maxOutputChars: envNumber("FIGMA_MCP_MAX_OUTPUT_CHARS", 6000), // text result budget (~1.5-2k tokens)
+  jobWaitMs: envNumber("FIGMA_MCP_JOB_WAIT_MS", 45000),          // how long figma_job_status blocks by default
+  jobWaitMaxMs: 55000,                                           // keep under ~60s client tool timeouts
+  reconnectGraceMs: envNumber("FIGMA_MCP_RECONNECT_GRACE_MS", 8000), // wait for a reloading plugin instead of failing
+  stalledAfterMs: 120000                                         // no progress for this long => report as stalled
+};
 
 // ------------------------------------------------------------------
 // Job Ledger — makes a figma_execute_code call that runs long survive its own
@@ -88,11 +120,12 @@ const SERVER_VERSION = "4.0.1";
 // ------------------------------------------------------------------
 const jobs = new Map();
 const JOBS_MAX = 200;
+const jobWaiters = new Map(); // job id -> Set<fn>, woken when the job leaves "running"
 
 function touchJob(id, patch) {
   let job = jobs.get(id);
   if (!job) {
-    job = { id, status: "running", progress: [], result: undefined, error: null, createdAt: Date.now(), updatedAt: Date.now() };
+    job = { id, status: "running", progress: [], result: undefined, error: null, clientId: null, createdAt: Date.now(), updatedAt: Date.now() };
     jobs.set(id, job);
     if (jobs.size > JOBS_MAX) {
       const oldestKey = jobs.keys().next().value;
@@ -100,7 +133,100 @@ function touchJob(id, patch) {
     }
   }
   Object.assign(job, patch, { updatedAt: Date.now() });
+  if (job.status !== "running") wakeJobWaiters(id);
   return job;
+}
+
+function wakeJobWaiters(id) {
+  const set = jobWaiters.get(id);
+  if (!set) return;
+  jobWaiters.delete(id);
+  for (const fn of set) { try { fn(); } catch (e) {} }
+}
+
+// Resolves when the job finishes or `ms` elapses, whichever comes first — the
+// long-poll behind figma_job_status. One blocking call replaces the 5-10
+// "still running" polls an agent otherwise burns, each re-reading its whole
+// context.
+function waitForJob(id, ms) {
+  const job = jobs.get(id);
+  if (!job || job.status !== "running" || !(ms > 0)) return Promise.resolve();
+  return new Promise((resolve) => {
+    let set = jobWaiters.get(id);
+    if (!set) { set = new Set(); jobWaiters.set(id, set); }
+    const done = () => { clearTimeout(timer); set.delete(done); resolve(); };
+    const timer = setTimeout(done, ms);
+    set.add(done);
+  });
+}
+
+// Result of a command whose caller is still blocked on it is handed straight
+// to that caller and NOT kept: the ledger used to retain every result
+// (screenshots included) for the last 200 commands. Only escalated commands —
+// the ones nobody is waiting on synchronously any more — keep theirs for
+// figma_job_status.
+function settleCommand(data) {
+  const resolver = commandResolvers.get(data.id);
+  const patch = {
+    status: data.success === false ? "error" : "done",
+    result: data.success === false ? undefined : data,
+    error: data.success === false ? (data.error || "Execution failed in Figma sandbox") : null,
+    code: data.code || null
+  };
+  if (resolver) {
+    commandResolvers.delete(data.id);
+    touchJob(data.id, { ...patch, result: undefined });
+    jobs.delete(data.id);
+    resolver(data);
+  } else {
+    touchJob(data.id, patch);
+  }
+}
+
+// The Figma sandbox runs plugin code on one thread: a heavy call blocks every
+// later one. Knowing what is still running on a client turns a bare timeout
+// into "wait for job X" instead of a retry loop. Only commands that started
+// BEFORE the timed-out one can be what blocked it.
+function findBusyJob(clientId, exceptId, startedBefore) {
+  let busiest = null;
+  for (const job of jobs.values()) {
+    if (job.status !== "running" || job.id === exceptId) continue;
+    if (clientId && job.clientId && job.clientId !== clientId) continue;
+    if (startedBefore && job.createdAt > startedBefore) continue;
+    if (!busiest || job.createdAt < busiest.createdAt) busiest = job;
+  }
+  return busiest;
+}
+
+// A plugin that disconnects (reload, Figma closed) will never answer what it
+// was running. Fail those now instead of letting callers and pollers wait out
+// their full timeouts.
+function failCommandsOfClient(clientId) {
+  for (const job of jobs.values()) {
+    if (job.status !== "running" || job.clientId !== clientId) continue;
+    const data = {
+      id: job.id,
+      success: false,
+      code: "PLUGIN_DISCONNECTED",
+      error: "The Figma plugin disconnected while this command was running, so its result is lost. " +
+             "It may or may not have finished: check the canvas with one cheap read before running it again."
+    };
+    settleCommand(data);
+  }
+}
+
+// Wakes callers parked in waitForClient() the moment a plugin (re)connects.
+const clientWaiters = new Set();
+function wakeClientWaiters() {
+  for (const fn of Array.from(clientWaiters)) { try { fn(); } catch (e) {} }
+}
+function waitForClient(ms) {
+  if (wsClients.size > 0 || !(ms > 0)) return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = () => { clearTimeout(timer); clientWaiters.delete(done); resolve(); };
+    const timer = setTimeout(done, ms);
+    clientWaiters.add(done);
+  });
 }
 
 // Encode unmasked text frame (Server -> Client) as per RFC 6455
@@ -181,8 +307,12 @@ function handleWsUpgrade(req, socket, head) {
 
   // Flush everything queued while nothing was connected (0ms dispatch).
   while (pendingCommands.length > 0) {
-    client.send(pendingCommands.shift());
+    const queued = pendingCommands.shift();
+    const job = jobs.get(queued.id);
+    if (job && job.status === "running") job.clientId = client.id;
+    client.send(queued);
   }
+  wakeClientWaiters();
 
   socket.on("data", (chunk) => {
     client.lastSeen = Date.now();
@@ -211,7 +341,7 @@ function handleWsUpgrade(req, socket, head) {
       if (payloadLen > MAX_WS_MESSAGE_BYTES) {
         console.error(`[Figma MCP Bridge] Dropping oversized WebSocket frame (${payloadLen} bytes).`);
         socket.destroy();
-        wsClients.delete(client);
+        cleanupClient();
         return;
       }
 
@@ -238,7 +368,7 @@ function handleWsUpgrade(req, socket, head) {
       if (opcode === 0x8) {
         // Close frame
         socket.end();
-        wsClients.delete(client);
+        cleanupClient();
         break;
       } else if (opcode === 0x9) {
         // Ping frame -> reply with Pong
@@ -263,7 +393,7 @@ function handleWsUpgrade(req, socket, head) {
         if (client.fragmentBytes > MAX_WS_MESSAGE_BYTES) {
           console.error(`[Figma MCP Bridge] Dropping oversized fragmented message (${client.fragmentBytes} bytes).`);
           socket.destroy();
-          wsClients.delete(client);
+          cleanupClient();
           return;
         }
 
@@ -282,7 +412,9 @@ function handleWsUpgrade(req, socket, head) {
   });
 
   const cleanupClient = () => {
+    if (!wsClients.has(client)) return; // close/end/error can all fire for one socket
     wsClients.delete(client);
+    failCommandsOfClient(client.id);
   };
   socket.on("close", cleanupClient);
   socket.on("end", cleanupClient);
@@ -325,21 +457,10 @@ function handleClientMessage(client, data) {
   }
 
   if (data.id) {
-    // The job ledger is kept current unconditionally — a call that already
-    // escalated past TIMEOUTS.escalate has nothing left in commandResolvers,
-    // but figma_job_status still needs to see this arrive.
-    touchJob(data.id, {
-      status: data.success === false ? "error" : "done",
-      result: data.success === false ? undefined : data,
-      error: data.success === false ? (data.error || "Execution failed in Figma sandbox") : null,
-      code: data.code || null
-    });
-
-    if (commandResolvers.has(data.id)) {
-      const resolver = commandResolvers.get(data.id);
-      resolver(data);
-      commandResolvers.delete(data.id);
-    }
+    // Goes to the blocked caller if there still is one, otherwise into the job
+    // ledger — a call that already escalated past TIMEOUTS.escalate has
+    // nothing left in commandResolvers, but figma_job_status needs to see it.
+    settleCommand(data);
   }
 }
 
@@ -430,11 +551,9 @@ const bridgeServer = http.createServer((req, res) => {
     readBody(req).then((body) => {
       try {
         const data = JSON.parse(body);
-        const resolver = commandResolvers.get(data.id);
-        if (resolver) {
-          resolver(data);
-          commandResolvers.delete(data.id);
-        }
+        // Same path as a WebSocket result: this used to bypass the job ledger,
+        // so an escalated job from an HTTP-polling plugin never finished.
+        if (data && data.id) settleCommand(data);
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ received: true }));
       } catch (err) {
@@ -453,18 +572,41 @@ const bridgeServer = http.createServer((req, res) => {
     readBody(req).then(async (body) => {
       try {
         const payload = JSON.parse(body);
-        const result = await sendCommandToPlugin(payload, payload.timeoutMs || 45000);
+        const timeoutMs = payload.timeoutMs || 45000;
+        const escalateMs = payload.escalateMs;
+        delete payload.timeoutMs;
+        delete payload.escalateMs;
+        // A proxy's call escalates here, in the master that owns the job
+        // ledger, so its figma_job_status (forwarded to /job) can find it.
+        const result = await sendCommandToPlugin(payload, timeoutMs, escalateMs ? { escalateMs } : {});
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(result));
       } catch (err) {
         res.writeHead(500, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ success: false, error: err.message }));
+        res.end(JSON.stringify({ success: false, error: err.message, code: err.code || null }));
       }
     }).catch((err) => {
       if (res.writableEnded) return;
       res.writeHead(413, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ success: false, error: err.message }));
     });
+    return;
+  }
+
+  // Job long-poll for proxies: the ledger only exists in the master process.
+  if (pathname === "/job" && req.method === "GET") {
+    const url = new URL(req.url, `http://127.0.0.1:${BRIDGE_PORT}`);
+    readJobSnapshot(url.searchParams.get("id"), Number(url.searchParams.get("wait_ms")) || 0)
+      .then((snap) => {
+        if (res.writableEnded) return;
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(snap));
+      })
+      .catch((err) => {
+        if (res.writableEnded) return;
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: err.message }));
+      });
     return;
   }
 
@@ -531,19 +673,23 @@ function tryBecomeMaster() {
   }
 }
 
-tryBecomeMaster();
+// Side effects live here, not at module load, so tests can require() this
+// file for its pure helpers without binding a port — see the bottom of file.
+function startBridge() {
+  tryBecomeMaster();
 
-// Cheap safety net for the case where the owner dies while this process is idle.
-const masterWatchdog = setInterval(tryBecomeMaster, 5000);
-if (masterWatchdog.unref) masterWatchdog.unref();
+  // Cheap safety net for the case where the owner dies while this process is idle.
+  const masterWatchdog = setInterval(tryBecomeMaster, 5000);
+  if (masterWatchdog.unref) masterWatchdog.unref();
 
-const cleanup = () => {
-  try { bridgeServer.close(); } catch (e) {}
-  process.exit(0);
-};
-process.on("SIGINT", cleanup);
-process.on("SIGTERM", cleanup);
-process.stdin.on("close", cleanup);
+  const cleanup = () => {
+    try { bridgeServer.close(); } catch (e) {}
+    process.exit(0);
+  };
+  process.on("SIGINT", cleanup);
+  process.on("SIGTERM", cleanup);
+  process.stdin.on("close", cleanup);
+}
 
 // Target Router — picks WHICH connected Figma document a command goes to.
 // `targetFileName`, when given, filters to clients reporting that fileName and
@@ -607,66 +753,26 @@ function pickTargetClient(targetFileName) {
 // resolve/reject-on-timeout behaviour by simply not passing it.
 async function sendCommandToPlugin(payload, timeoutMs = 45000, options = {}) {
   if (!isBridgeMaster) {
-    // A zombie master (process still bound to :8765 but stuck/unresponsive —
-    // stale after a `install.mjs --update` or a crashed event loop) doesn't
-    // fail the connection, so it never hit the ECONNREFUSED/ECONNRESET check
-    // below; it just hangs forever, and the proxy hop had no timeout of its
-    // own to notice. Cap it well under the caller's timeoutMs so a hung
-    // master surfaces as a fast, actionable error instead of a silent stall
-    // the caller eventually cancels.
-    const proxyTimeoutMs = Math.min(timeoutMs, 10000);
-    const controller = new AbortController();
-    const abortTimer = setTimeout(() => controller.abort(), proxyTimeoutMs);
-    try {
-      const res = await fetch(`http://127.0.0.1:${BRIDGE_PORT}/execute`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(BRIDGE_TOKEN ? { "X-Bridge-Token": BRIDGE_TOKEN } : {})
-        },
-        body: JSON.stringify({ ...payload, timeoutMs }),
-        signal: controller.signal
-      });
-      if (!res.ok) {
-        const errText = await res.text();
-        let detail = errText;
-        let code = null;
-        try {
-          const parsed = JSON.parse(errText);
-          detail = parsed.error || errText;
-          code = parsed.code || null;
-        } catch (e) {}
-        const err = new Error(`Bridge proxy error (HTTP ${res.status}): ${detail}`);
-        if (code) err.code = code;
-        throw err;
-      }
-      const data = await res.json();
-      if (data.success) return data;
-      const err = new Error(data.error || "Execution failed in Figma sandbox");
-      if (data.code) err.code = data.code;
-      throw err;
-    } catch (err) {
-      // The owner of :8765 is gone, or alive but wedged — claim the port
-      // ourselves so the NEXT call succeeds instead of failing forever.
-      const cause = err && err.cause ? err.cause.code : null;
-      const isTimeout = err && err.name === "AbortError";
-      if (isTimeout || cause === "ECONNREFUSED" || cause === "ECONNRESET" || /fetch failed/i.test(err.message || "")) {
-        tryBecomeMaster();
-        const wrapped = new Error(
-          isTimeout
-            ? "The bridge instance that owned :8765 stopped responding. This server is taking the port over — retry the call."
-            : "The bridge instance that owned :8765 is no longer running. This server is taking the port over — retry the call."
-        );
-        wrapped.code = "BRIDGE_OFFLINE";
-        throw wrapped;
-      }
-      throw err;
-    } finally {
-      clearTimeout(abortTimer);
-    }
+    return proxyToMaster("/execute", {
+      method: "POST",
+      body: { ...payload, timeoutMs, ...(options.escalateMs ? { escalateMs: options.escalateMs } : {}) },
+      // The master enforces timeoutMs/escalateMs itself; this is only the
+      // outer bound, so a slow-but-healthy call is not cut short by the hop.
+      timeoutMs: (options.escalateMs ? Math.min(options.escalateMs, timeoutMs) : timeoutMs) + 5000
+    });
   }
 
-  const targetClient = pickTargetClient(payload.target);
+  let targetClient = pickTargetClient(payload.target);
+
+  // A plugin that was connected recently is most likely reloading
+  // (Ctrl+Alt+P, Figma tab switch, a server restart). Waiting a few seconds
+  // for it to come back is far cheaper than failing: a failure costs the
+  // agent a turn to read the error, and usually a list_targets + retry turn.
+  if (!targetClient && wsClients.size === 0 && lastPluginPing > 0 &&
+      (Date.now() - lastPluginPing) < 10 * 60 * 1000 && ECONOMY.reconnectGraceMs > 0) {
+    await waitForClient(ECONOMY.reconnectGraceMs);
+    targetClient = pickTargetClient(payload.target);
+  }
 
   // Fail-Fast: with zero WS clients AND no recent /poll heartbeat, no plugin
   // is realistically going to show up before the hard timeout — queuing the
@@ -688,14 +794,33 @@ async function sendCommandToPlugin(payload, timeoutMs = 45000, options = {}) {
   return new Promise((resolve, reject) => {
     const id = "cmd_" + Math.random().toString(36).substring(2, 9);
     const cmd = { id, ...cmdPayload };
+    const clientId = targetClient ? targetClient.id : null;
     let escalateTimer = null;
+
+    // Ledger entry from the very start: elapsed_ms used to count from the
+    // moment of escalation, and "what else is running on this plugin" (see
+    // findBusyJob) needs in-flight commands, not just escalated ones.
+    const startedAt = touchJob(id, { clientId, kind: cmdPayload.type || "EXECUTE", description: cmdPayload.description || null }).createdAt;
 
     const hardTimer = setTimeout(() => {
       commandResolvers.delete(id);
       const queuedAt = pendingCommands.findIndex(c => c.id === id);
       if (queuedAt !== -1) pendingCommands.splice(queuedAt, 1);
-      const err = new Error("Timeout waiting for Figma Plugin response. Ensure Figma is active and Antigravity Bridge plugin is running.");
-      err.code = "BRIDGE_OFFLINE";
+      jobs.delete(id);
+      const busy = findBusyJob(clientId, id, startedAt);
+      let err;
+      if (busy) {
+        err = new Error(
+          `Timed out after ${Math.round(timeoutMs / 1000)}s: the plugin is still busy with ${busy.id}` +
+          `${busy.description ? ` ("${busy.description}")` : ""}, running for ${Math.round((Date.now() - busy.createdAt) / 1000)}s. ` +
+          `Figma runs plugin code on a single thread, so retrying now will time out again — ` +
+          `wait for it with figma_job_status({ job_id: "${busy.id}" }) first.`
+        );
+        err.code = "PLUGIN_BUSY";
+      } else {
+        err = new Error("Timeout waiting for Figma Plugin response. Ensure Figma is active and Antigravity Bridge plugin is running.");
+        err.code = "BRIDGE_OFFLINE";
+      }
       reject(err);
     }, timeoutMs);
 
@@ -729,6 +854,120 @@ async function sendCommandToPlugin(payload, timeoutMs = 45000, options = {}) {
       pendingCommands.push(cmd);
     }
   });
+}
+
+// One hop to the process that owns :8765 (see tryBecomeMaster). A zombie
+// master (still bound but wedged — stale after `install.mjs --update`, or a
+// crashed event loop) never refuses the connection, it just hangs. The old
+// guard capped EVERY proxied call at 10s, which also killed healthy long
+// calls and made the proxy "take over" a port that was never free — two
+// wasted agent turns per heavy call. Now a /status probe at the 10s mark
+// decides: answered => master alive, keep waiting; silent => zombie, abort.
+async function proxyToMaster(pathname, { method = "GET", body, timeoutMs = 45000 } = {}) {
+  const controller = new AbortController();
+  let zombie = false;
+  const abortTimer = setTimeout(() => controller.abort(), timeoutMs);
+  const probeTimer = setTimeout(async () => {
+    try {
+      const probe = await fetch(`http://127.0.0.1:${BRIDGE_PORT}/status`, {
+        headers: BRIDGE_TOKEN ? { "X-Bridge-Token": BRIDGE_TOKEN } : {},
+        signal: AbortSignal.timeout(2500)
+      });
+      if (!probe.ok) throw new Error("status " + probe.status);
+    } catch (e) {
+      zombie = true;
+      controller.abort();
+    }
+  }, Math.min(10000, timeoutMs));
+
+  try {
+    const res = await fetch(`http://127.0.0.1:${BRIDGE_PORT}${pathname}`, {
+      method,
+      headers: {
+        "Content-Type": "application/json",
+        ...(BRIDGE_TOKEN ? { "X-Bridge-Token": BRIDGE_TOKEN } : {})
+      },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+      signal: controller.signal
+    });
+    if (!res.ok) {
+      const errText = await res.text();
+      let detail = errText;
+      let code = null;
+      try {
+        const parsed = JSON.parse(errText);
+        detail = parsed.error || errText;
+        code = parsed.code || null;
+      } catch (e) {}
+      // A 500 from /execute is the master relaying a real tool failure
+      // (NO_CONNECTED_CLIENTS, a sandbox error...) — pass it through as-is.
+      const err = new Error(res.status === 500 ? detail : `Bridge proxy error (HTTP ${res.status}): ${detail}`);
+      if (code) err.code = code;
+      throw err;
+    }
+    const data = await res.json();
+    if (pathname !== "/execute" || data.success || data.__escalated) return data;
+    const err = new Error(data.error || "Execution failed in Figma sandbox");
+    if (data.code) err.code = data.code;
+    throw err;
+  } catch (err) {
+    // The owner of :8765 is gone, or alive but wedged — claim the port
+    // ourselves so the NEXT call succeeds instead of failing forever.
+    const cause = err && err.cause ? err.cause.code : null;
+    const aborted = err && err.name === "AbortError";
+    if (zombie || cause === "ECONNREFUSED" || cause === "ECONNRESET" || /fetch failed/i.test(err.message || "")) {
+      tryBecomeMaster();
+      const wrapped = new Error(
+        zombie
+          ? "The bridge instance that owned :8765 stopped responding. This server is taking the port over — retry the call."
+          : "The bridge instance that owned :8765 is no longer running. This server is taking the port over — retry the call."
+      );
+      wrapped.code = "BRIDGE_OFFLINE";
+      throw wrapped;
+    }
+    if (aborted) {
+      const wrapped = new Error("Timeout waiting for Figma Plugin response. Ensure Figma is active and Antigravity Bridge plugin is running.");
+      wrapped.code = "BRIDGE_OFFLINE";
+      throw wrapped;
+    }
+    throw err;
+  } finally {
+    clearTimeout(abortTimer);
+    clearTimeout(probeTimer);
+  }
+}
+
+// Shared by figma_job_status (master) and GET /job (what proxies call).
+// Blocks up to waitMs for the job to finish; a finished job is read once and
+// forgotten so the ledger does not keep screenshots alive.
+async function readJobSnapshot(id, waitMs) {
+  const waitStart = Date.now();
+  await waitForJob(id, Math.min(Math.max(0, waitMs || 0), ECONOMY.jobWaitMaxMs));
+  const job = jobs.get(id);
+  if (!job) {
+    return {
+      ok: false, code: "JOB_NOT_FOUND",
+      error: `No job "${id}". A job is forgotten once read after finishing, or after ~${JOBS_MAX} newer jobs have been created.`
+    };
+  }
+  if (job.status === "running") {
+    const lastProgress = job.progress.length ? job.progress[job.progress.length - 1].ts : 0;
+    const quietMs = Date.now() - Math.max(job.createdAt, lastProgress || 0);
+    const snap = {
+      ok: true, status: "running", job_id: job.id,
+      elapsed_ms: Date.now() - job.createdAt,
+      waited_ms: Date.now() - waitStart
+    };
+    if (job.progress.length) snap.progress = job.progress.slice(-3);
+    if (quietMs > ECONOMY.stalledAfterMs) {
+      snap.stalled = true;
+      snap.hint = `No result or progress for ${Math.round(quietMs / 1000)}s. The Figma plugin is probably frozen on a heavy operation — ask the user to check Figma (or reload the plugin) instead of polling again.`;
+    }
+    return snap;
+  }
+  jobs.delete(job.id);
+  if (job.status === "error") return { ok: false, status: "error", job_id: job.id, code: job.code, error: job.error };
+  return { ok: true, status: "done", job_id: job.id, response: job.result };
 }
 
 // ==========================================
@@ -777,7 +1016,7 @@ const TOOLS = [
     // Kept deliberately short. The full execution model lives in
     // SERVER_INSTRUCTIONS, which the client receives once on `initialize`;
     // repeating it here re-sent ~1.2k tokens of identical prose on every turn.
-    description: "EXECUTE LIVE JAVASCRIPT inside the open Figma document to create, edit, move, style, color or delete canvas elements (requires the 'Antigravity Bridge' plugin running in Figma Desktop). Injected globals: `figma`, `await ensureFont(family, style)`, `getFreePosition(w, h)`, `bridge`. Each call is a FRESH async function body — declarations do not survive into the next call; persist helpers with `bridge.define`/`bridge.require` and never use `eval`. Run `return bridge.info()` for the full runtime contract, or read this server's instructions. Set `capture: true` to get a PNG back for visual verification.",
+    description: "EXECUTE LIVE JAVASCRIPT inside the open Figma document to create, edit, move, style, color or delete canvas elements (requires the 'Antigravity Bridge' plugin running in Figma Desktop). Injected globals: `figma`, `await ensureFont(family, style)`, `getFreePosition(w, h)`, `bridge`. Each call is a FRESH async function body — declarations do not survive into the next call; persist helpers with `bridge.define`/`bridge.require` and never use `eval`. Run `return bridge.info()` for the full runtime contract, or read this server's instructions. Set `capture: true` to get a PNG back for visual verification. Return only what you need: results over max_output_chars are shrunk (the full value stays in bridge.state.lastResult for your next call).",
     inputSchema: {
       type: "object",
       properties: {
@@ -804,11 +1043,19 @@ const TOOLS = [
         },
         scale: {
           type: "number",
-          description: "Screenshot resolution scale (default: 1.5)."
+          description: "Screenshot resolution scale (default: 1)."
+        },
+        max_px: {
+          type: "number",
+          description: "Longest side of each returned image in px (default: 1024). Image tokens grow with pixel count, not file size."
+        },
+        max_output_chars: {
+          type: "number",
+          description: "Cap on the returned result's JSON text (default: 6000; 0 = no cap). Larger results are shrunk: long arrays/strings/deep objects are cut with markers."
         },
         async: {
           type: "boolean",
-          description: "Return { status: 'running', job_id } immediately instead of waiting — poll with figma_job_status. Calls that run past 30s do this automatically even without the flag."
+          description: "Return { status: 'running', job_id } immediately instead of waiting — collect it later with figma_job_status. Calls that run past 45s do this automatically."
         },
         target: {
           type: "string",
@@ -820,7 +1067,7 @@ const TOOLS = [
   },
   {
     name: "figma_screenshot",
-    description: "Capture a visual PNG screenshot of specific nodes or the current selection in Figma. Highly recommended after UI modifications to inspect layout alignment, contrast, typography, and spacing.",
+    description: "Capture PNG screenshots of specific nodes or the current selection in Figma, to check layout, contrast, typography and spacing. Each image costs ~1k tokens at the default max_px, and stays in context: check mechanical things through write-call `warnings` or bridge.check first, and take one screenshot per finished stage rather than after every edit.",
     inputSchema: {
       type: "object",
       properties: {
@@ -830,7 +1077,11 @@ const TOOLS = [
         },
         scale: {
           type: "number",
-          description: "Export resolution scale factor (default: 1.5)."
+          description: "Export resolution scale factor (default: 1)."
+        },
+        max_px: {
+          type: "number",
+          description: "Longest side of each image in px (default: 1024). Raise only to read fine detail; crop with node_ids instead where possible."
         },
         description: {
           type: "string",
@@ -906,7 +1157,7 @@ const TOOLS = [
   },
   {
     name: "figma_insert_component_instance",
-    description: "Create and insert an instance of a master component or component set into the canvas or target AutoLayout container. Supports selecting variants, applying text overrides with auto font loading, and returns a PNG screenshot for visual verification.",
+    description: "Create and insert an instance of a master component or component set into the canvas or target AutoLayout container. Supports selecting variants, applying text overrides with auto font loading, and can return a PNG screenshot (capture: true) for visual verification.",
     inputSchema: {
       type: "object",
       properties: {
@@ -941,11 +1192,11 @@ const TOOLS = [
         },
         capture: {
           type: "boolean",
-          description: "Whether to automatically capture and return a PNG screenshot of the inserted instance (default: true)"
+          description: "Whether to capture and return a PNG screenshot of the inserted instance (default: false)"
         },
         scale: {
           type: "number",
-          description: "Screenshot resolution scale (default: 1.5)"
+          description: "Screenshot resolution scale (default: 1)"
         },
         target: {
           type: "string",
@@ -995,11 +1246,11 @@ const TOOLS = [
         },
         capture: {
           type: "boolean",
-          description: "Whether to capture a PNG screenshot of the target after switching mode (default: true)"
+          description: "Whether to capture a PNG screenshot of the target after switching mode (default: false)"
         },
         scale: {
           type: "number",
-          description: "Screenshot resolution scale (default: 1.5)"
+          description: "Screenshot resolution scale (default: 1)"
         },
         target: {
           type: "string",
@@ -1011,7 +1262,7 @@ const TOOLS = [
   },
   {
     name: "figma_insert_svg",
-    description: "Insert raw SVG/vector code directly into Figma canvas or target AutoLayout container with automatic scale-proportional resizing, fill/stroke color overrides, optional component creation, and visual PNG screenshot return.",
+    description: "Insert raw SVG/vector code directly into Figma canvas or target AutoLayout container with automatic scale-proportional resizing, fill/stroke color overrides, optional component creation, and an optional PNG screenshot (capture: true).",
     inputSchema: {
       type: "object",
       properties: {
@@ -1062,7 +1313,7 @@ const TOOLS = [
         },
         capture: {
           type: "boolean",
-          description: "Whether to automatically capture and return a PNG screenshot of the inserted SVG (default: true)"
+          description: "Whether to capture and return a PNG screenshot of the inserted SVG (default: false)"
         },
         scale: {
           type: "number",
@@ -1130,11 +1381,12 @@ const TOOLS = [
   },
   {
     name: "figma_job_status",
-    description: "Poll a figma_execute_code call that was handed back as { status: 'running', job_id } because it ran past 30s (or was called with async: true). Returns live progress while running, and — once finished — the exact same result/screenshot the synchronous call would have returned. A finished job is forgotten after being read once.",
+    description: "Wait for a figma_execute_code call that came back as { status: 'running', job_id } (it ran past 45s, or was called with async: true). BLOCKS until the job finishes or wait_ms passes, then returns the same result/screenshot the synchronous call would have — so call it once, not in a polling loop. `stalled: true` means the plugin looks frozen: ask the user instead of waiting again. A finished job is forgotten after being read once.",
     inputSchema: {
       type: "object",
       properties: {
-        job_id: { type: "string", description: "The job_id from figma_execute_code's { status: 'running', job_id } response." }
+        job_id: { type: "string", description: "The job_id from figma_execute_code's { status: 'running', job_id } response." },
+        wait_ms: { type: "number", description: "How long to block waiting for the job to finish (default: 45000, max: 55000; 0 = just peek)." }
       },
       required: ["job_id"]
     }
@@ -1360,33 +1612,25 @@ function getActiveTools() {
 // Server-level instructions handed to the MCP client on initialize, plus
 // hints appended to failures that never reach the Figma sandbox.
 // ==========================================================================
+// Some clients (Claude Code among them) cut server instructions off after
+// ~2000 characters, so this is ordered by value and kept near that size: the
+// token-economy rules first, the execution model next, reference last. The
+// long-form guide lives in figma/instructions.md and bridge.info().
 const SERVER_INSTRUCTIONS = [
-  "Figma MCP Bridge — two modes: LIVE (read/write on the open Figma Desktop document via the Antigravity Bridge plugin) and REST (read-only cloud access to files/nodes/styles with a token optimizer).",
+  "Figma MCP Bridge: LIVE read/write of the file open in Figma Desktop (Antigravity Bridge plugin), plus optional read-only REST tools.",
   "",
-  "figma_execute_code execution model (read before writing any code):",
-  "1. Each call is compiled as a FRESH async function body. Top-level `await` and `return` work; `import`/`export` do not.",
-  "2. Top-level `const`/`let`/`var`/`function` declarations DO NOT survive into the next call.",
-  "3. `eval()` is a bound function in the Figma sandbox, so every eval is an INDIRECT eval: it cannot see the caller's locals and its declarations reach neither the caller nor globalThis. Never use eval to build reusable helpers — it fails silently.",
-  "4. Persist code with `bridge.define(name, source)` (source must end in `module.exports = { ... }`) and reload it in later calls with `bridge.require(name)`. Persist data with `bridge.store.set/get` (durable, lives in the .fig file) or `bridge.state` (scratch, cleared on plugin reload).",
-  "5. `return bridge.info()` reports the live runtime contract, injected globals, defined modules and stored keys.",
-  "6. A call still running past 30s is hidden from you — figma_execute_code returns { status: \"running\", job_id }` immediately instead of blocking; poll it with figma_job_status({ job_id }). Pass `async: true` to opt into that immediately instead of waiting out the 30s.",
-  "7. Call `progress(step, of, note)` inside long-running code (a multi-screen generation loop, etc.) so figma_job_status can report real progress instead of just \"still running\".",
+  "TOKEN ECONOMY — every call re-reads the whole conversation, and what it returns stays there:",
+  "1. Do a whole stage in ONE figma_execute_code call (read, change, verify), not a call per step. Return only the ids/flags/numbers you need.",
+  "2. Read cheaply: figma_read_canvas, or inside code bridge.summarize(id,{depth}), bridge.inspect(ids,[props]), bridge.find(query,{root,type}), bridge.check(specs) for pass/fail. Never return raw node dumps.",
+  "3. Results over max_output_chars (6000) are shrunk; the full value stays in bridge.state.lastResult for your next call.",
+  "4. A screenshot is ~1k tokens (scale 1, max_px 1024) and never leaves context: trust write-call `warnings` and bridge.check, capture once per finished stage via capture_node_ids.",
+  "5. Past 45s a call returns { status: \"running\", job_id }: call figma_job_status once — it blocks until done. PLUGIN_BUSY: wait for the named job, never retry blindly. `stalled`: ask the user.",
   "",
-  "Known Figma platform limits the bridge wraps for you:",
-  "- x/y of a node inside an INSTANCE cannot be set (relative-transform is not overridable). Position through AutoLayout, or edit the master component. `bridge.setPosition(node, x, y)` raises this early with the remedy.",
-  "- `figma.createComponentFromNode()` can freeze AutoLayout sizing modes to FIXED across the whole subtree and changes node ids. Use `bridge.componentize(node)` instead.",
-  "- Fonts must be loaded before touching text: `await ensureFont(family, style)`.",
-  "- Colors are floats in 0..1, not 0..255.",
+  "Execution model: each call is a FRESH async function body (top-level await/return work, import/export don't, declarations don't survive). eval is indirect in the sandbox: never build helpers with it. Persist code with bridge.define(name, src ending in module.exports = {...}) + bridge.require(name); data with bridge.store.set/get (in the file) or bridge.state (until reload). `return bridge.info()` lists all helpers.",
   "",
-  "Reading the LIVE document: figma_read_canvas returns the same token-optimized Pseudo-JSX/tree/json the REST tools do, but for whatever is open right now — prefer it over writing your own traversal in figma_execute_code. Pass budget_tokens to cap the response size; it degrades by reducing depth and tells you how in a trailing comment.",
+  "Figma limits: no x/y inside an INSTANCE (use AutoLayout; bridge.setPosition explains), bridge.componentize(node) instead of createComponentFromNode, await ensureFont(family, style) before text edits, colors are 0..1 floats.",
   "",
-  "Every write call (figma_execute_code, figma_insert_component_instance, figma_insert_svg) opens a checkpoint automatically and returns its id as `checkpoint_id`. figma_rollback({ checkpoint_id }) (or \"last\") undoes what it created and restores what it modified — but only for nodes it created or nodes something explicitly snapshotted first; a node the code deleted is never recoverable. Responses also carry `created`/`modified` node-id lists and a `warnings` array from a cheap auto-lint (overflow, zero-size nodes, low text contrast) — read those before spending a screenshot to find the same thing visually.",
-  "",
-  "Capturing: pass capture_node_ids to screenshot specific nodes without touching the user's selection. Without it, a successful write call captures whatever it just created/modified; only a call with none of those falls back to the current selection. The whole page is never auto-captured.",
-  "",
-  "Multiple Figma documents open at once: figma_list_targets lists them; pass target: \"<fileName>\" on any LIVE tool to aim at a specific one. With nothing specified, the currently-focused Figma window is used; if more than one is connected and none is focused, calls fail with AMBIGUOUS_TARGET instead of guessing.",
-  "",
-  "Always close the visual loop: pass `capture: true` or call figma_screenshot after changing the canvas, and inspect the returned PNG before declaring the task done."
+  "Write calls return checkpoint_id (figma_rollback undoes creations and snapshotted edits, not deletions), created/modified ids and lint warnings. Several files open: figma_list_targets, then target: \"<fileName>\"."
 ].join("\n");
 
 const SERVER_ERROR_HINTS = [
@@ -1432,20 +1676,171 @@ function withServerHint(message) {
   return message;
 }
 
+// Tool output is compact JSON. Pretty-printing (indent 2) spent a newline and
+// indentation tokens on every key of every result, and results stay in the
+// agent's context for the rest of the session.
+function toJson(value) {
+  return JSON.stringify(value);
+}
+
+// ------------------------------------------------------------------
+// Output budget. A tree walk that returns every node's properties can come
+// back as 40k characters; one such result then rides along in every later
+// turn. shrinkToBudget() keeps the SHAPE of an oversized result and cuts its
+// bulk — least lossy level that fits wins — so the agent still sees what is
+// there (and how much was cut) and can ask for exactly the part it needs.
+// ------------------------------------------------------------------
+const SHRINK_LEVELS = [
+  { str: 400, arr: 50, keys: 60, depth: 8 },
+  { str: 300, arr: 30, keys: 50, depth: 7 },
+  { str: 200, arr: 20, keys: 40, depth: 6 },
+  { str: 160, arr: 15, keys: 30, depth: 5 },
+  { str: 120, arr: 10, keys: 25, depth: 4 },
+  { str: 100, arr: 7, keys: 20, depth: 4 },
+  { str: 80, arr: 5, keys: 15, depth: 3 },
+  { str: 60, arr: 3, keys: 10, depth: 2 }
+];
+
+function pruneValue(value, lvl, depth) {
+  if (typeof value === "string") {
+    return value.length > lvl.str ? value.slice(0, lvl.str) + `…(+${value.length - lvl.str} chars)` : value;
+  }
+  if (value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) {
+    if (depth >= lvl.depth) return `[array of ${value.length}]`;
+    const out = value.slice(0, lvl.arr).map(v => pruneValue(v, lvl, depth + 1));
+    if (value.length > lvl.arr) out.push(`…+${value.length - lvl.arr} more (${value.length} total)`);
+    return out;
+  }
+  const keys = Object.keys(value);
+  if (depth >= lvl.depth) return `{object with ${keys.length} keys}`;
+  const out = {};
+  for (const k of keys.slice(0, lvl.keys)) out[k] = pruneValue(value[k], lvl, depth + 1);
+  if (keys.length > lvl.keys) out["…"] = `+${keys.length - lvl.keys} more keys`;
+  return out;
+}
+
+// -> { value, truncated: null | { from, to } } ; maxChars <= 0 disables.
+function shrinkToBudget(value, maxChars) {
+  let full;
+  try { full = toJson(value); } catch (e) { full = String(value); }
+  if (!(maxChars > 0) || full === undefined || full.length <= maxChars) return { value, truncated: null };
+  if (typeof value === "string") {
+    return { value: value.slice(0, maxChars) + `…(+${value.length - maxChars} chars)`, truncated: { from: full.length, to: maxChars } };
+  }
+  for (const lvl of SHRINK_LEVELS) {
+    const pruned = pruneValue(value, lvl, 0);
+    const text = toJson(pruned);
+    if (text.length <= maxChars) return { value: pruned, truncated: { from: full.length, to: text.length } };
+  }
+  // Nothing structural fits (thousands of top-level keys, say): plain cut.
+  return { value: full.slice(0, maxChars) + "…", truncated: { from: full.length, to: maxChars } };
+}
+
+function outputBudget(args) {
+  const n = Number(args && args.max_output_chars);
+  return Number.isFinite(n) && n >= 0 ? n : ECONOMY.maxOutputChars;
+}
+
+function truncationNote(truncated, stashed) {
+  return `result shrunk ${truncated.from}→${truncated.to} chars (long arrays/strings/deep objects cut, marked with …). ` +
+    (stashed ? "The full value is in bridge.state.lastResult — filter it in your next call instead of re-running. " : "") +
+    "Return less, or pass max_output_chars (0 = no cap).";
+}
+
+// ------------------------------------------------------------------
+// Images. Tokens are charged by pixel area (~w*h/750), so the useful facts to
+// surface are the real dimensions and the price. The PNG size is read from
+// the IHDR chunk — no decoding, no dependencies.
+// ------------------------------------------------------------------
+function stripDataUrl(b64) {
+  return String(b64 || "").replace(/^data:image\/\w+;base64,/, "");
+}
+
+function pngSize(b64) {
+  try {
+    const head = Buffer.from(stripDataUrl(b64).slice(0, 32), "base64");
+    if (head.length < 24 || head.toString("ascii", 12, 16) !== "IHDR") return null;
+    return { w: head.readUInt32BE(16), h: head.readUInt32BE(20) };
+  } catch (e) {
+    return null;
+  }
+}
+
+function describeImage(b64, label) {
+  const size = pngSize(b64);
+  const dims = size ? `${size.w}x${size.h} ~${Math.ceil((size.w * size.h) / 750)}tok` : "?";
+  return label ? `${label} ${dims}` : dims;
+}
+
+// Gathers every image a plugin response carries (before/after, single, list),
+// caps how many go back to the model, and describes each one in text.
+function collectImages(response, maxImages = ECONOMY.maxImages) {
+  const found = [];
+  if (!response) return { parts: [], meta: [], skipped: 0, errors: [] };
+  if (response.beforeScreenshot) found.push({ b64: response.beforeScreenshot, label: "before" });
+  if (response.screenshot) found.push({ b64: response.screenshot, label: response.targetName || null });
+  const errors = [];
+  if (Array.isArray(response.screenshots)) {
+    for (const shot of response.screenshots) {
+      if (shot && shot.base64) found.push({ b64: shot.base64, label: shot.name || shot.label || shot.id || null });
+      else if (shot && shot.error) errors.push(`${shot.name || shot.id || "node"}: ${shot.error}`);
+    }
+  }
+  const limit = Number.isFinite(maxImages) && maxImages > 0 ? maxImages : found.length;
+  const kept = found.slice(0, limit);
+  return {
+    parts: kept.map(img => ({ type: "image", data: stripDataUrl(img.b64), mimeType: "image/png" })),
+    meta: kept.map(img => describeImage(img.b64, img.label)),
+    skipped: found.length - kept.length,
+    errors
+  };
+}
+
 // Every successful write/read tool renders through this so an agent gets the
 // same envelope shape regardless of which tool it called: { ok, result,
 // created, modified, warnings, checkpoint_id, duration_ms, ...extra }.
-function buildStructuredResult(response, extra) {
-  const envelope = { ok: true, result: response && response.result !== undefined ? response.result : null };
+function buildStructuredResult(response, extra, options = {}) {
+  const budget = Number.isFinite(options.maxOutputChars) ? options.maxOutputChars : ECONOMY.maxOutputChars;
+  const shrunk = shrinkToBudget(response && response.result !== undefined ? response.result : null, budget);
+  const envelope = { ok: true, result: shrunk.value };
+  if (shrunk.truncated) envelope.truncated = truncationNote(shrunk.truncated, !!(response && response.resultStashed));
   if (response) {
-    if (Array.isArray(response.created) && response.created.length) envelope.created = response.created;
-    if (Array.isArray(response.modified) && response.modified.length) envelope.modified = response.modified;
-    if (Array.isArray(response.warnings) && response.warnings.length) envelope.warnings = response.warnings;
+    if (Array.isArray(response.created) && response.created.length) envelope.created = shrinkToBudget(response.created, 1500).value;
+    if (Array.isArray(response.modified) && response.modified.length) envelope.modified = shrinkToBudget(response.modified, 1500).value;
+    if (Array.isArray(response.warnings) && response.warnings.length) envelope.warnings = shrinkToBudget(response.warnings, 2000).value;
     if (response.checkpointId) envelope.checkpoint_id = response.checkpointId;
     if (typeof response.durationMs === "number") envelope.duration_ms = response.durationMs;
+    if (response.captureNote) envelope.capture_note = response.captureNote;
+  }
+  if (options.images) {
+    if (options.images.meta.length) envelope.images = options.images.meta;
+    if (options.images.skipped) envelope.images_skipped = `${options.images.skipped} more image(s) not sent (max ${ECONOMY.maxImages} per call) — capture those nodes separately if you need them.`;
+    if (options.images.errors.length) envelope.image_errors = options.images.errors;
   }
   if (extra) Object.assign(envelope, extra);
-  return JSON.stringify(envelope, null, 2);
+  return toJson(envelope);
+}
+
+// Text envelope + image parts, the shape every capture-capable tool returns.
+function renderPluginResponse(response, extra, options = {}) {
+  const images = collectImages(response, options.maxImages);
+  return {
+    content: [
+      { type: "text", text: buildStructuredResult(response, extra, { ...options, images }) },
+      ...images.parts
+    ]
+  };
+}
+
+// Screenshot knobs shared by every capture-capable tool.
+function captureOptions(args, defaultScale = ECONOMY.scale) {
+  const scale = Number(args && args.scale);
+  const maxPx = Number(args && args.max_px);
+  return {
+    scale: Number.isFinite(scale) && scale > 0 ? scale : defaultScale,
+    max_px: Number.isFinite(maxPx) && maxPx > 0 ? maxPx : ECONOMY.maxPx
+  };
 }
 
 // Mirrors buildStructuredResult for the failure path, used by handleCallTool's
@@ -1455,6 +1850,14 @@ function buildErrorEnvelope(error) {
   const rawMessage = error && error.message ? error.message : String(error);
   const code = (error && error.code) || classifyServerCode(rawMessage) || null;
   return { ok: false, code, error: withServerHint(rawMessage) };
+}
+
+// Plain data results (list/find/variables/layout...) under the same budget.
+function jsonResult(value, args) {
+  const shrunk = shrinkToBudget(value, outputBudget(args));
+  const body = { ok: true, result: shrunk.value };
+  if (shrunk.truncated) body.truncated = truncationNote(shrunk.truncated, false) + " Narrow the query (query/limit/collection_name/node_ids) to see the rest.";
+  return { content: [{ type: "text", text: toJson(body) }] };
 }
 
 // Shared by figma_read_canvas AND get_file/get_node: serialize at the
@@ -1484,7 +1887,6 @@ async function handleCallTool(name, args = {}) {
       case "figma_execute_code": {
         const desc = args.description || "Execute JS Code";
         const capture = args.capture === true;
-        const scale = args.scale || 1.5;
         const wantsAsync = args.async === true;
         const normalizedCaptureIds = normalizeNodeIds(args.capture_node_ids);
 
@@ -1494,7 +1896,7 @@ async function handleCallTool(name, args = {}) {
           capture: capture,
           capture_node_ids: normalizedCaptureIds ? normalizedCaptureIds.split(",") : null,
           diff: args.diff === true,
-          scale: scale,
+          ...captureOptions(args),
           target: args.target
         }, TIMEOUTS.heavy, { escalateMs: wantsAsync ? 50 : TIMEOUTS.escalate });
 
@@ -1502,87 +1904,41 @@ async function handleCallTool(name, args = {}) {
           return {
             content: [{
               type: "text",
-              text: JSON.stringify({
+              text: toJson({
                 ok: true,
                 status: "running",
                 job_id: response.job_id,
-                note: `Still running in Figma after ${Math.round(response.elapsed_ms / 1000)}s. Poll with figma_job_status({ job_id: "${response.job_id}" }).`
-              }, null, 2)
+                note: `Still running in Figma after ${Math.round(response.elapsed_ms / 1000)}s. Call figma_job_status({ job_id: "${response.job_id}" }) once — it waits for the result.`
+              })
             }]
           };
         }
 
-        const content = [];
-        content.push({ type: "text", text: buildStructuredResult(response) });
-
-        if (response.beforeScreenshot) {
-          content.push({ type: "image", data: response.beforeScreenshot.replace(/^data:image\/\w+;base64,/, ""), mimeType: "image/png" });
-        }
-        if (response.screenshot) {
-          content.push({ type: "image", data: response.screenshot.replace(/^data:image\/\w+;base64,/, ""), mimeType: "image/png" });
-        }
-        if (Array.isArray(response.screenshots)) {
-          for (const shot of response.screenshots) {
-            if (shot.base64) content.push({ type: "image", data: shot.base64.replace(/^data:image\/\w+;base64,/, ""), mimeType: "image/png" });
-          }
-        }
-
-        return { content };
+        return renderPluginResponse(response, null, { maxOutputChars: outputBudget(args) });
       }
 
       case "figma_job_status": {
-        const job = jobs.get(args.job_id);
-        if (!job) {
+        const waitMs = args.wait_ms != null && Number.isFinite(Number(args.wait_ms)) ? Number(args.wait_ms) : ECONOMY.jobWaitMs;
+        const snap = isBridgeMaster
+          ? await readJobSnapshot(args.job_id, waitMs)
+          : await proxyToMaster(`/job?id=${encodeURIComponent(args.job_id || "")}&wait_ms=${Math.round(waitMs)}`, {
+              timeoutMs: Math.min(waitMs, ECONOMY.jobWaitMaxMs) + 10000
+            });
+
+        if (snap.status === "done") {
+          return renderPluginResponse(snap.response, { status: "done", job_id: snap.job_id }, { maxOutputChars: outputBudget(args) });
+        }
+        if (snap.ok === false) {
           return {
             isError: true,
-            content: [{
-              type: "text",
-              text: JSON.stringify({ ok: false, code: "JOB_NOT_FOUND", error: `No job "${args.job_id}". A job is forgotten once read after finishing, or after ~${JOBS_MAX} newer jobs have been created.` }, null, 2)
-            }]
+            content: [{ type: "text", text: toJson(snap.code === "JOB_NOT_FOUND" ? snap : { ...buildErrorEnvelope({ message: snap.error, code: snap.code }), job_id: snap.job_id }) }]
           };
         }
-
-        if (job.status === "running") {
-          return {
-            content: [{
-              type: "text",
-              text: JSON.stringify({
-                ok: true, status: "running", job_id: job.id,
-                elapsed_ms: Date.now() - job.createdAt,
-                progress: job.progress.slice(-5)
-              }, null, 2)
-            }]
-          };
-        }
-
-        // Read-once: a finished job is removed after this response so the
-        // ledger doesn't hold onto screenshots and results indefinitely.
-        jobs.delete(job.id);
-
-        if (job.status === "error") {
-          return {
-            isError: true,
-            content: [{
-              type: "text",
-              text: JSON.stringify(buildErrorEnvelope({ message: job.error, code: job.code }), null, 2)
-            }]
-          };
-        }
-
-        const response = job.result;
-        const content = [];
-        content.push({ type: "text", text: buildStructuredResult(response, { status: "done", job_id: job.id }) });
-        if (response.screenshot) content.push({ type: "image", data: response.screenshot.replace(/^data:image\/\w+;base64,/, ""), mimeType: "image/png" });
-        if (Array.isArray(response.screenshots)) {
-          for (const shot of response.screenshots) {
-            if (shot.base64) content.push({ type: "image", data: shot.base64.replace(/^data:image\/\w+;base64,/, ""), mimeType: "image/png" });
-          }
-        }
-        return { content };
+        return { content: [{ type: "text", text: toJson(snap) }] };
       }
 
       case "figma_read_canvas": {
-        const nodeIds = normalizeNodeIds(args.node_ids);
+        const nodeIds = normalizeNodeIds(args.node_ids || args.node_id || args.nodeIds || args.nodeId || args.ids);
         const format = args.format || "jsx";
         const requestedDepth = Number.isFinite(args.depth) ? args.depth : 6;
         const includeHidden = args.include_hidden === true;
@@ -1611,51 +1967,41 @@ async function handleCallTool(name, args = {}) {
           checkpoint_id: args.checkpoint_id || "last",
           target: args.target
         }, TIMEOUTS.normal);
-        return { content: [{ type: "text", text: JSON.stringify({ ok: true, ...response.result }, null, 2) }] };
+        return { content: [{ type: "text", text: toJson({ ok: true, ...response.result }) }] };
       }
 
       case "figma_list_targets": {
-        return { content: [{ type: "text", text: JSON.stringify({ ok: true, targets: listTargets() }, null, 2) }] };
+        // A proxy has no plugin sockets of its own — the master does.
+        let targets = listTargets();
+        if (!isBridgeMaster) {
+          try {
+            const status = await proxyToMaster("/status", { timeoutMs: 5000 });
+            if (status && Array.isArray(status.targets)) targets = status.targets;
+          } catch (e) {}
+        }
+        return { content: [{ type: "text", text: toJson({ ok: true, targets }) }] };
       }
 
       case "figma_screenshot": {
         const desc = args.description || "Figma Screenshot";
+        // Models reach for node_id / nodeId often enough; ignoring the alias
+        // silently captured the SELECTION instead — a wasted image and turn.
+        const nodeIds = normalizeNodeIds(args.node_ids || args.node_id || args.nodeIds || args.nodeId || args.ids);
         const response = await sendCommandToPlugin({
           type: "SCREENSHOT",
-          nodeIds: normalizeNodeIds(args.node_ids),
-          scale: args.scale || 1.5,
+          nodeIds,
+          ...captureOptions(args),
           description: desc,
           target: args.target
         }, TIMEOUTS.normal);
 
-        const content = [];
-        content.push({
-          type: "text",
-          text: `Figma Screenshot: ${response.result || "Captured"}`
-        });
-
-        if (response.screenshots && Array.isArray(response.screenshots)) {
-          for (const item of response.screenshots) {
-            if (item.base64) {
-              const cleanB64 = item.base64.replace(/^data:image\/\w+;base64,/, "");
-              content.push({
-                type: "image",
-                data: cleanB64,
-                mimeType: "image/png"
-              });
-            }
-          }
-        } else if (response.screenshot) {
-          const cleanB64 = response.screenshot.replace(/^data:image\/\w+;base64,/, "");
-          content.push({
-            type: "image",
-            data: cleanB64,
-            mimeType: "image/png"
-          });
-        }
-
-        return { content };
+        const images = collectImages(response);
+        const body = { ok: true, result: response.result || "Captured", images: images.meta };
+        if (images.skipped) body.images_skipped = `${images.skipped} more image(s) not sent (max ${ECONOMY.maxImages} per call).`;
+        if (images.errors.length) body.image_errors = images.errors;
+        return { content: [{ type: "text", text: toJson(body) }, ...images.parts] };
       }
+
 
       case "figma_get_selection": {
         // Runs as plugin-sandbox JS (not Node), so it inlines its own compact
@@ -1693,9 +2039,7 @@ async function handleCallTool(name, args = {}) {
           }));
         `;
         const response = await sendCommandToPlugin({ code, description: "Get Selected Nodes", target: args.target }, TIMEOUTS.normal);
-        return {
-          content: [{ type: "text", text: JSON.stringify({ ok: true, result: response.result }, null, 2) }]
-        };
+        return jsonResult(response.result, args);
       }
 
       case "figma_create_ui_card": {
@@ -1831,7 +2175,8 @@ async function handleCallTool(name, args = {}) {
         const response = await sendCommandToPlugin({
           code,
           description: `Create card "${title}"`,
-          capture: true
+          capture: true,
+          ...captureOptions(args)
         });
 
         const content = [];
@@ -1860,12 +2205,13 @@ async function handleCallTool(name, args = {}) {
           target: args.target
         }, TIMEOUTS.fast);
 
-        return { content: [{ type: "text", text: JSON.stringify({ ok: true, result: response.result }, null, 2) }] };
+        return jsonResult(response.result, args);
       }
 
       case "figma_insert_component_instance": {
-        const capture = args.capture !== false;
-        const scale = args.scale || 1.5;
+        // Capture is opt-in: the auto-lint `warnings` catch the mechanical
+        // defects, and an image per inserted instance adds up fast.
+        const capture = args.capture === true;
         const response = await sendCommandToPlugin({
           type: "INSERT_COMPONENT_INSTANCE",
           component_name: args.component_name,
@@ -1875,15 +2221,11 @@ async function handleCallTool(name, args = {}) {
           target_parent_id: args.target_parent_id,
           position: args.position,
           capture: capture,
-          scale: scale,
+          ...captureOptions(args),
           target: args.target
         }, TIMEOUTS.normal);
 
-        const content = [{ type: "text", text: buildStructuredResult(response) }];
-        if (response.screenshot) {
-          content.push({ type: "image", data: response.screenshot.replace(/^data:image\/\w+;base64,/, ""), mimeType: "image/png" });
-        }
-        return { content };
+        return renderPluginResponse(response);
       }
 
       case "figma_get_variables": {
@@ -1894,32 +2236,26 @@ async function handleCallTool(name, args = {}) {
           target: args.target
         }, TIMEOUTS.fast);
 
-        return { content: [{ type: "text", text: JSON.stringify({ ok: true, result: response.result }, null, 2) }] };
+        return jsonResult(response.result, args);
       }
 
       case "figma_set_variables_mode": {
-        const capture = args.capture !== false;
-        const scale = args.scale || 1.5;
+        const capture = args.capture === true;
         const response = await sendCommandToPlugin({
           type: "SET_VARIABLES_MODE",
           collection_name: args.collection_name,
           mode_name: args.mode_name,
           target_id: args.target_id,
           capture: capture,
-          scale: scale,
+          ...captureOptions(args),
           target: args.target
         }, TIMEOUTS.normal);
 
-        const content = [{ type: "text", text: buildStructuredResult(response) }];
-        if (response.screenshot) {
-          content.push({ type: "image", data: response.screenshot.replace(/^data:image\/\w+;base64,/, ""), mimeType: "image/png" });
-        }
-        return { content };
+        return renderPluginResponse(response);
       }
 
       case "figma_insert_svg": {
-        const capture = args.capture !== false;
-        const scale = args.scale || 2.0;
+        const capture = args.capture === true;
         const response = await sendCommandToPlugin({
           type: "INSERT_SVG",
           svg_code: args.svg_code,
@@ -1933,15 +2269,12 @@ async function handleCallTool(name, args = {}) {
           position: args.position,
           as_component: args.as_component === true,
           capture: capture,
-          scale: scale,
+          // Icons are tiny, so they keep a 2x default; max_px still bounds it.
+          ...captureOptions(args, 2),
           target: args.target
         }, TIMEOUTS.normal);
 
-        const content = [{ type: "text", text: buildStructuredResult(response) }];
-        if (response.screenshot) {
-          content.push({ type: "image", data: response.screenshot.replace(/^data:image\/\w+;base64,/, ""), mimeType: "image/png" });
-        }
-        return { content };
+        return renderPluginResponse(response);
       }
 
       case "figma_get_canvas_layout": {
@@ -1955,13 +2288,13 @@ async function handleCallTool(name, args = {}) {
           target: args.target
         }, TIMEOUTS.fast);
 
-        return { content: [{ type: "text", text: JSON.stringify({ ok: true, result: response.result }, null, 2) }] };
+        return jsonResult(response.result, args);
       }
 
       // REST API
       case "get_me": {
         const data = await figmaApiRequest("/me");
-        return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+        return { content: [{ type: "text", text: toJson(data) }] };
       }
       case "get_file": {
         const { fileKey } = parseFigmaUrlOrKey(args.file_key);
@@ -2000,27 +2333,27 @@ async function handleCallTool(name, args = {}) {
         const format = args.format || "png";
         const scale = args.scale || 2;
         const data = await figmaApiRequest(`/images/${encodeURIComponent(fileKey)}?ids=${encodeURIComponent(nodeIds)}&format=${format}&scale=${scale}`);
-        return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+        return { content: [{ type: "text", text: toJson(data) }] };
       }
       case "get_image_fills": {
         const { fileKey } = parseFigmaUrlOrKey(args.file_key);
         const data = await figmaApiRequest(`/files/${encodeURIComponent(fileKey)}/images`);
-        return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+        return { content: [{ type: "text", text: toJson(data) }] };
       }
       case "get_styles": {
         const { fileKey } = parseFigmaUrlOrKey(args.file_key);
         const data = await figmaApiRequest(`/files/${encodeURIComponent(fileKey)}/styles`);
-        return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+        return { content: [{ type: "text", text: toJson(data) }] };
       }
       case "get_components": {
         const { fileKey } = parseFigmaUrlOrKey(args.file_key);
         const data = await figmaApiRequest(`/files/${encodeURIComponent(fileKey)}/components`);
-        return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+        return { content: [{ type: "text", text: toJson(data) }] };
       }
       case "get_comments": {
         const { fileKey } = parseFigmaUrlOrKey(args.file_key);
         const data = await figmaApiRequest(`/files/${encodeURIComponent(fileKey)}/comments`);
-        return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+        return { content: [{ type: "text", text: toJson(data) }] };
       }
       case "post_comment": {
         const parsed = parseFigmaUrlOrKey(args.file_key);
@@ -2031,7 +2364,7 @@ async function handleCallTool(name, args = {}) {
           method: "POST",
           body: JSON.stringify(body)
         });
-        return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+        return { content: [{ type: "text", text: toJson(data) }] };
       }
       default:
         throw new Error(`Unknown tool: ${name}`);
@@ -2039,7 +2372,7 @@ async function handleCallTool(name, args = {}) {
   } catch (error) {
     return {
       isError: true,
-      content: [{ type: "text", text: JSON.stringify(buildErrorEnvelope(error), null, 2) }]
+      content: [{ type: "text", text: toJson(buildErrorEnvelope(error)) }]
     };
   }
 }
@@ -2285,9 +2618,18 @@ async function checkForUpdates() {
   }
 }
 
-checkForUpdates();
+if (require.main === module) {
+  startBridge();
+  checkForUpdates();
 
-// Start either official SDK server or universal stdio engine
-if (!startOfficialSdkServer()) {
-  startUniversalStdioServer();
+  // Start either official SDK server or universal stdio engine
+  if (!startOfficialSdkServer()) {
+    startUniversalStdioServer();
+  }
+} else {
+  // Pure helpers for tests (tests/token-economy.test.js); nothing is bound.
+  module.exports = {
+    TOOLS, SERVER_INSTRUCTIONS, ECONOMY, TIMEOUTS,
+    shrinkToBudget, pngSize, collectImages, buildStructuredResult, captureOptions, getActiveTools
+  };
 }

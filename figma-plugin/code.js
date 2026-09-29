@@ -444,6 +444,218 @@ function createTrackingFigma() {
   }
 }
 
+// ==========================================================================
+// Cheap reads — bridge.summarize / inspect / find / check
+// --------------------------------------------------------------------------
+// The most expensive thing an agent does through this bridge is a hand-written
+// tree walk that returns every property of every node: tens of kilobytes that
+// then ride along in every later turn of the conversation. These helpers
+// return the same facts as short text or flat maps, and `check` turns
+// "dump it and eyeball it" into a pass/fail list that is empty when all is well.
+// ==========================================================================
+function readRound(v) {
+  return typeof v === "number" ? Math.round(v * 100) / 100 : v;
+}
+
+function readNode(ref) {
+  if (!ref) return null;
+  if (typeof ref === "string") return figma.getNodeById(ref.replace(/-/g, ":"));
+  return ref;
+}
+
+function readHex(color, opacity) {
+  if (!color) return null;
+  const b = (n) => Math.round(Math.max(0, Math.min(1, n)) * 255).toString(16).padStart(2, "0").toUpperCase();
+  const base = "#" + b(color.r) + b(color.g) + b(color.b);
+  return typeof opacity === "number" && opacity < 1 ? base + "@" + readRound(opacity) : base;
+}
+
+// Paint list -> "#FFFFFF" | "#000000@0.5, IMAGE" | null; figma.mixed -> "mixed".
+function readPaints(paints) {
+  if (paints === figma.mixed) return "mixed";
+  if (!Array.isArray(paints) || paints.length === 0) return null;
+  const visible = paints.filter(p => p && p.visible !== false);
+  if (visible.length === 0) return null;
+  return visible.map(p => p.type === "SOLID" ? readHex(p.color, p.opacity) : p.type).join(", ");
+}
+
+function readLayout(n) {
+  if (!("layoutMode" in n) || !n.layoutMode || n.layoutMode === "NONE") return null;
+  const pads = [n.paddingTop, n.paddingRight, n.paddingBottom, n.paddingLeft].map(readRound);
+  const sizing = [n.layoutSizingHorizontal, n.layoutSizingVertical].filter(Boolean).map(x => String(x).toLowerCase()).join("/");
+  return (n.layoutMode === "VERTICAL" ? "V" : n.layoutMode === "HORIZONTAL" ? "H" : n.layoutMode) +
+    " gap" + readRound(n.itemSpacing) +
+    (pads.every(p => p === pads[0]) ? " pad" + pads[0] : " pad" + pads.join(",")) +
+    (sizing ? " " + sizing : "");
+}
+
+function readFont(n) {
+  if (n.type !== "TEXT") return null;
+  const f = n.fontName !== figma.mixed ? n.fontName : null;
+  const size = n.fontSize !== figma.mixed ? readRound(n.fontSize) : "mixed";
+  return f ? f.family + "/" + f.style + " " + size : "mixed " + size;
+}
+
+// One node as one line: TYPE "name" #id WxH @x,y [layout] fill:… r8 "text…"
+function describeNodeLine(n, textChars) {
+  if (!n) return "MISSING";
+  const parts = [n.type, JSON.stringify(n.name), "#" + n.id];
+  if (typeof n.width === "number") parts.push(readRound(n.width) + "x" + readRound(n.height));
+  if (typeof n.x === "number" && n.type !== "PAGE") parts.push("@" + readRound(n.x) + "," + readRound(n.y));
+  const layout = readLayout(n);
+  if (layout) parts.push("[" + layout + "]");
+  if ("fills" in n) { const f = readPaints(n.fills); if (f) parts.push("fill:" + f); }
+  if ("strokes" in n) { const st = readPaints(n.strokes); if (st) parts.push("stroke:" + st + (typeof n.strokeWeight === "number" ? "/" + readRound(n.strokeWeight) : "")); }
+  if (typeof n.cornerRadius === "number" && n.cornerRadius) parts.push("r" + readRound(n.cornerRadius));
+  if (typeof n.opacity === "number" && n.opacity < 1) parts.push("op" + readRound(n.opacity));
+  if (n.visible === false) parts.push("hidden");
+  if (n.type === "TEXT") {
+    const chars = String(n.characters || "");
+    const max = textChars || 40;
+    parts.push(readFont(n));
+    parts.push(JSON.stringify(chars.length > max ? chars.slice(0, max) + "…" : chars));
+  }
+  if (n.type === "INSTANCE") {
+    try { if (n.mainComponent) parts.push("→" + JSON.stringify(n.mainComponent.name)); } catch (e) {}
+    if (n.variantProperties) parts.push(Object.keys(n.variantProperties).map(k => k + "=" + n.variantProperties[k]).join(","));
+  }
+  return parts.join(" ");
+}
+
+// Indented outline, one line per node. opts: depth (2), maxChildren (15), text (40).
+function summarizeNodes(refs, opts) {
+  const o = opts || {};
+  const depth = Number.isFinite(o.depth) ? o.depth : 2;
+  const maxChildren = Number.isFinite(o.maxChildren) ? o.maxChildren : 15;
+  const lines = [];
+  const walk = (n, level) => {
+    lines.push("  ".repeat(level) + describeNodeLine(n, o.text));
+    if (!n || level >= depth || !("children" in n) || !n.children) return;
+    const kids = n.children;
+    kids.slice(0, maxChildren).forEach(k => walk(k, level + 1));
+    if (kids.length > maxChildren) lines.push("  ".repeat(level + 1) + "… +" + (kids.length - maxChildren) + " more children");
+  };
+  (Array.isArray(refs) ? refs : [refs]).forEach(ref => {
+    const n = readNode(ref);
+    if (n) walk(n, 0); else lines.push("MISSING " + ref);
+  });
+  return lines.join("\n");
+}
+
+// Named read-outs for inspect() and check(). Anything else is read straight
+// off the node (width, itemSpacing, layoutSizingHorizontal, ...).
+const READ_PROPS = {
+  fill: n => ("fills" in n ? readPaints(n.fills) : null),
+  fills: n => ("fills" in n ? readPaints(n.fills) : null),
+  stroke: n => ("strokes" in n ? readPaints(n.strokes) : null),
+  strokes: n => ("strokes" in n ? readPaints(n.strokes) : null),
+  text: n => (n.type === "TEXT" ? n.characters : null),
+  characters: n => (n.type === "TEXT" ? n.characters : null),
+  font: n => readFont(n),
+  fontFamily: n => (n.type === "TEXT" && n.fontName !== figma.mixed ? n.fontName.family : null),
+  fontStyle: n => (n.type === "TEXT" && n.fontName !== figma.mixed ? n.fontName.style : null),
+  layout: n => readLayout(n),
+  padding: n => ("paddingTop" in n ? [n.paddingTop, n.paddingRight, n.paddingBottom, n.paddingLeft].map(readRound) : null),
+  parent: n => (n.parent ? n.parent.id : null),
+  parentName: n => (n.parent ? n.parent.name : null),
+  children: n => ("children" in n && n.children ? n.children.length : 0),
+  main: n => { try { return n.type === "INSTANCE" && n.mainComponent ? n.mainComponent.name : null; } catch (e) { return null; } },
+  mainId: n => { try { return n.type === "INSTANCE" && n.mainComponent ? n.mainComponent.id : null; } catch (e) { return null; } },
+  variant: n => n.variantProperties || null,
+  props: n => {
+    if (!n.componentProperties) return null;
+    const out = {};
+    Object.keys(n.componentProperties).forEach(k => { out[k.replace(/#\d+:\d+$/, "")] = n.componentProperties[k].value; });
+    return out;
+  },
+  absolute: n => (n.absoluteBoundingBox ? ["x", "y", "width", "height"].map(k => readRound(n.absoluteBoundingBox[k])) : null)
+};
+
+function readProp(n, key) {
+  if (READ_PROPS[key]) return READ_PROPS[key](n);
+  const v = n[key];
+  if (v === figma.mixed) return "mixed";
+  if (v && typeof v === "object") {
+    try { return JSON.parse(JSON.stringify(v)); } catch (e) { return String(v); }
+  }
+  return readRound(v);
+}
+
+const INSPECT_DEFAULT_PROPS = ["type", "name", "width", "height", "x", "y"];
+
+// { id: { prop: value } | "MISSING" } for exactly the props asked for.
+function inspectNodes(refs, props) {
+  const keys = Array.isArray(props) && props.length ? props : INSPECT_DEFAULT_PROPS;
+  const out = {};
+  (Array.isArray(refs) ? refs : [refs]).forEach(ref => {
+    const n = readNode(ref);
+    const id = typeof ref === "string" ? ref : (n ? n.id : String(ref));
+    if (!n) { out[id] = "MISSING"; return; }
+    const row = {};
+    keys.forEach(k => { try { row[k] = readProp(n, k); } catch (e) { row[k] = "ERR: " + (e.message || e); } });
+    out[id] = row;
+  });
+  return out;
+}
+
+// Name search under a root (default: current page). query: substring
+// (case-insensitive) or RegExp. opts: root, type (string or array), limit (20).
+function findNodes(query, opts) {
+  const o = opts || {};
+  const root = o.root ? readNode(o.root) : figma.currentPage;
+  if (!root) throw new Error("bridge.find: root " + o.root + " does not exist");
+  const types = o.type ? (Array.isArray(o.type) ? o.type : [o.type]) : null;
+  const limit = Number.isFinite(o.limit) ? o.limit : 20;
+  const test = query instanceof RegExp
+    ? (name) => query.test(name)
+    : (name) => String(name).toLowerCase().indexOf(String(query == null ? "" : query).toLowerCase()) !== -1;
+  const matches = "findAll" in root
+    ? root.findAll(n => (!types || types.indexOf(n.type) !== -1) && test(n.name))
+    : [];
+  const out = matches.slice(0, limit).map(n => ({ id: n.id, name: n.name, type: n.type }));
+  if (matches.length > limit) out.push("… +" + (matches.length - limit) + " more (" + matches.length + " total) — narrow with root/type/limit");
+  return out;
+}
+
+function checkEquals(want, got, tolerance) {
+  if (want instanceof RegExp) return typeof got === "string" && want.test(got);
+  if (typeof want === "number" && typeof got === "number") return Math.abs(want - got) <= tolerance;
+  if (typeof want === "string" && typeof got === "string" && /^#[0-9a-f]{6}/i.test(want)) {
+    return got.toUpperCase().indexOf(want.toUpperCase()) === 0;
+  }
+  if (Array.isArray(want)) {
+    return Array.isArray(got) && want.length === got.length && want.every((w, i) => checkEquals(w, got[i], tolerance));
+  }
+  if (want && typeof want === "object") {
+    return !!got && typeof got === "object" && Object.keys(want).every(k => checkEquals(want[k], got[k], tolerance));
+  }
+  return want === got;
+}
+
+// Declarative verification. specs: { "12:3": { width: 320, fill: "#FFFFFF",
+// text: /Submit/ }, ... } or [{ id: "12:3", width: 320 }, ...]. Returns
+// { pass, fail: [{ id, key, want, got }], missing: [ids] } — `fail` and
+// `missing` are empty when everything matches. opts.tolerance (0.5) for numbers.
+function checkNodes(specs, opts) {
+  const tolerance = opts && Number.isFinite(opts.tolerance) ? opts.tolerance : 0.5;
+  const list = Array.isArray(specs)
+    ? specs
+    : Object.keys(specs || {}).map(id => Object.assign({ id: id }, specs[id]));
+  const result = { pass: 0, fail: [], missing: [] };
+  list.forEach(spec => {
+    const n = readNode(spec.id);
+    if (!n) { result.missing.push(spec.id); return; }
+    Object.keys(spec).forEach(key => {
+      if (key === "id") return;
+      let got;
+      try { got = readProp(n, key); } catch (e) { got = "ERR: " + (e.message || e); }
+      if (checkEquals(spec[key], got, tolerance)) result.pass++;
+      else result.fail.push({ id: spec.id, key: key, want: spec[key] instanceof RegExp ? String(spec[key]) : spec[key], got: got });
+    });
+  });
+  return result;
+}
+
 function createBridgeApi() {
   const api = {};
 
@@ -548,6 +760,13 @@ function createBridgeApi() {
     return node;
   };
 
+  // --- cheap reads: facts as short text / flat maps instead of raw dumps ----
+  api.summarize = function (refs, opts) { return summarizeNodes(refs, opts); };
+  api.inspect = function (refs, props) { return inspectNodes(refs, props); };
+  api.find = function (query, opts) { return findNodes(query, opts); };
+  api.check = function (specs, opts) { return checkNodes(specs, opts); };
+  api.hex = function (color, opacity) { return readHex(color, opacity); };
+
   // --- self-description, so an agent can ask instead of guessing -----------
   api.info = function () {
     return {
@@ -572,6 +791,16 @@ function createBridgeApi() {
         "mutate it. cp.commit() closes it; bridge.rollback(id | \"last\") undoes creations and " +
         "restores snapshotted properties. Deletions are never recoverable. The journal lives in " +
         "memory only — it is cleared when the plugin reloads.",
+      cheapReads: {
+        "bridge.summarize(idOrNode | ids, { depth: 2, maxChildren: 15, text: 40 })":
+          "indented outline, one line per node: TYPE \"name\" #id WxH @x,y [V gap8 pad16 fill/hug] fill:#FFF r8 font \"text…\"",
+        "bridge.inspect(ids, [props])":
+          "{ id: { prop: value } | \"MISSING\" }; props also accept fill, stroke, text, font, layout, padding, parent, children, main, variant, props, absolute",
+        "bridge.find(query | RegExp, { root, type, limit: 20 })": "[{ id, name, type }] by name under root (default: current page)",
+        "bridge.check(specs, { tolerance: 0.5 })":
+          "specs { id: { width: 320, fill: \"#FFFFFF\", text: /Submit/, layout: \"V gap8 pad16\" } } -> { pass, fail: [{ id, key, want, got }], missing }",
+        "bridge.state.lastResult": "full value of the previous call's return, even when the server shrank what you saw"
+      },
       injected: ["figma", "ensureFont", "bridge", "getFreePosition", "notify", "log", "progress"],
       modules: api.list(),
       storeKeys: api.store.keys(),
@@ -694,21 +923,31 @@ function enrichBridgeError(err) {
 // pushing it into the model's context either timed out or flooded the window.
 const MAX_CAPTURE_PIXELS = 4_000_000;   // ~2000x2000
 const MAX_CAPTURE_BASE64 = 8 * 1024 * 1024;
+// A model is billed for an image by its pixel area (~w*h/750 tokens), and the
+// image stays in its context for the rest of the session. 1024px on the long
+// side keeps a full screen legible at ~1k tokens; a caller can raise it.
+const DEFAULT_CAPTURE_MAX_PX = 1024;
 
-async function exportNodeToPngBase64(node, scale = 1.5) {
+// Pure, so tests/bridge-runtime.test.js can pin it: the export scale that
+// honours the requested scale, then the longest-side cap, then the pixel cap.
+function computeCaptureScale(width, height, scale, maxPx) {
+  let s = Number.isFinite(scale) && scale > 0 ? scale : 1;
+  const w = Number(width) || 0;
+  const h = Number(height) || 0;
+  if (w > 0 && h > 0) {
+    const cap = Number.isFinite(maxPx) && maxPx > 0 ? maxPx : DEFAULT_CAPTURE_MAX_PX;
+    const longest = Math.max(w, h);
+    if (longest * s > cap) s = cap / longest;
+    if (w * h * s * s > MAX_CAPTURE_PIXELS) s = Math.sqrt(MAX_CAPTURE_PIXELS / (w * h));
+  }
+  return Math.max(0.01, s);
+}
+
+async function exportNodeToPngBase64(node, scale = 1, maxPx = DEFAULT_CAPTURE_MAX_PX) {
   if (!node) return null;
 
-  let effectiveScale = Number.isFinite(scale) && scale > 0 ? scale : 1.5;
-
   // Shrink instead of refusing: a smaller screenshot is still a useful one.
-  const w = typeof node.width === 'number' ? node.width : 0;
-  const h = typeof node.height === 'number' ? node.height : 0;
-  if (w > 0 && h > 0) {
-    const pixels = w * h * effectiveScale * effectiveScale;
-    if (pixels > MAX_CAPTURE_PIXELS) {
-      effectiveScale = Math.max(0.1, Math.sqrt(MAX_CAPTURE_PIXELS / (w * h)));
-    }
-  }
+  const effectiveScale = computeCaptureScale(node.width, node.height, scale, maxPx);
 
   try {
     const bytes = await node.exportAsync({
@@ -731,9 +970,9 @@ async function exportNodeToPngBase64(node, scale = 1.5) {
 }
 
 // A failed capture must never fail the canvas edit that already succeeded.
-async function captureSafe(node, scale) {
+async function captureSafe(node, scale, maxPx) {
   try {
-    return { base64: await exportNodeToPngBase64(node, scale), error: null };
+    return { base64: await exportNodeToPngBase64(node, scale, maxPx), error: null };
   } catch (err) {
     return { base64: null, error: err.message || String(err) };
   }
@@ -1197,9 +1436,9 @@ function resolveCaptureTargets(captureNodeIds, checkpointCreated, checkpointModi
 
 // Degrades in order: (1) single node → direct export, (2) multiple nodes that
 // share a real frame → export just that frame (tight crop instead of the
-// whole page), (3) no shared frame → export up to 4 nodes individually rather
+// whole page), (3) no shared frame → export up to 3 nodes individually rather
 // than falling back to a giant whole-page screenshot.
-async function exportCaptureTargets(nodes, scale) {
+async function exportCaptureTargets(nodes, scale, maxPx) {
   const cleaned = (nodes || []).filter(n => n && typeof n.exportAsync === 'function');
   if (cleaned.length === 0) {
     return { images: [], note: null, targetName: null, targetId: null };
@@ -1207,7 +1446,7 @@ async function exportCaptureTargets(nodes, scale) {
 
   if (cleaned.length === 1) {
     const n = cleaned[0];
-    const shot = await captureSafe(n, scale);
+    const shot = await captureSafe(n, scale, maxPx);
     return {
       images: shot.base64 ? [{ base64: shot.base64, label: n.name || n.type }] : [],
       note: shot.error,
@@ -1218,7 +1457,7 @@ async function exportCaptureTargets(nodes, scale) {
 
   const ancestor = findCommonAncestor(cleaned);
   if (ancestor && ancestor.type !== 'PAGE' && ancestor.type !== 'DOCUMENT' && typeof ancestor.exportAsync === 'function') {
-    const shot = await captureSafe(ancestor, scale);
+    const shot = await captureSafe(ancestor, scale, maxPx);
     if (shot.base64) {
       return {
         images: [{ base64: shot.base64, label: ancestor.name || ancestor.type }],
@@ -1230,11 +1469,11 @@ async function exportCaptureTargets(nodes, scale) {
     }
   }
 
-  const capped = cleaned.slice(0, 4);
+  const capped = cleaned.slice(0, 3); // the server sends at most 3 images per call anyway
   const images = [];
   const notes = [];
   for (const n of capped) {
-    const shot = await captureSafe(n, scale);
+    const shot = await captureSafe(n, scale, maxPx);
     if (shot.base64) images.push({ base64: shot.base64, label: n.name || n.type });
     if (shot.error) notes.push(`${n.name || n.id}: ${shot.error}`);
   }
@@ -1515,7 +1754,7 @@ figma.ui.onmessage = async (msg) => {
   // ==========================================
   if (msg.type === 'EXECUTE') {
     const {
-      id, code, description, capture, scale = 1.5, autoZoom = true, startTime,
+      id, code, description, capture, scale = 1, max_px, autoZoom = true, startTime,
       capture_node_ids, diff
     } = msg;
     const actionLabel = description || "AI Command Execution";
@@ -1554,7 +1793,7 @@ figma.ui.onmessage = async (msg) => {
     if (diff === true && Array.isArray(capture_node_ids) && capture_node_ids.length > 0) {
       const before = capture_node_ids.map(nid => figma.getNodeById(nid)).filter(Boolean);
       if (before.length > 0) {
-        const shot = await exportCaptureTargets(before, scale);
+        const shot = await exportCaptureTargets(before, scale, max_px);
         if (shot.images.length > 0) beforeShot = shot.images[0];
       }
     }
@@ -1580,6 +1819,11 @@ figma.ui.onmessage = async (msg) => {
 
       const cpResult = cp.commit();
 
+      // The server may shrink an oversized result before it reaches the model;
+      // keeping the full value here lets the next call filter it instead of
+      // re-running (and re-paying for) the whole traversal.
+      BRIDGE_STATE.lastResult = result;
+
       const selection = figma.currentPage.selection;
       if (selection.length > 0) {
         for (const selNode of selection) {
@@ -1601,7 +1845,7 @@ figma.ui.onmessage = async (msg) => {
       if (capture) {
         const targets = resolveCaptureTargets(capture_node_ids, cpResult.created, cpResult.modified, selection);
         if (targets.length > 0) {
-          const shot = await exportCaptureTargets(targets, scale);
+          const shot = await exportCaptureTargets(targets, scale, max_px);
           targetName = shot.targetName;
           targetId = shot.targetId;
           captureNote = shot.note;
@@ -1641,6 +1885,7 @@ figma.ui.onmessage = async (msg) => {
         success: true,
         description: actionLabel,
         result: result !== undefined ? result : "Execution finished successfully",
+        resultStashed: result !== undefined,
         screenshot: screenshot,
         screenshots: screenshots,
         beforeScreenshot: beforeShot ? beforeShot.base64 : null,
@@ -1677,7 +1922,7 @@ figma.ui.onmessage = async (msg) => {
   // 2. High-Performance Canvas Screenshot
   // ==========================================
   else if (msg.type === 'SCREENSHOT') {
-    const { id, nodeIds, scale = 1.5, description = "Screenshot capture", autoZoom = true, startTime } = msg;
+    const { id, nodeIds, scale = 1, max_px, description = "Screenshot capture", autoZoom = true, startTime } = msg;
 
     let targets = [];
     if (nodeIds && typeof nodeIds === 'string' && nodeIds.trim().length > 0) {
@@ -1701,7 +1946,7 @@ figma.ui.onmessage = async (msg) => {
     try {
       const screenshots = [];
       for (const target of targets) {
-        const shot = await captureSafe(target, scale);
+        const shot = await captureSafe(target, scale, max_px);
         screenshots.push({
           id: target.id,
           name: target.name || "Node",
@@ -1860,8 +2105,9 @@ figma.ui.onmessage = async (msg) => {
       text_overrides = {},
       target_parent_id,
       position,
-      capture = true,
-      scale = 1.5,
+      capture = false,
+      scale = 1,
+      max_px,
       startTime
     } = msg;
 
@@ -2052,7 +2298,7 @@ figma.ui.onmessage = async (msg) => {
       let screenshot = null;
       let captureNote = null;
       if (capture) {
-        const shot = await captureSafe(instance, scale);
+        const shot = await captureSafe(instance, scale, max_px);
         screenshot = shot.base64;
         captureNote = shot.error;
       }
@@ -2191,7 +2437,7 @@ figma.ui.onmessage = async (msg) => {
   // 6. Design System: Set Variables Mode
   // ==========================================
   else if (msg.type === 'SET_VARIABLES_MODE') {
-    const { id, collection_name, mode_name, target_id, capture = true, scale = 1.5, startTime } = msg;
+    const { id, collection_name, mode_name, target_id, capture = false, scale = 1, max_px, startTime } = msg;
     const actionLabel = `Set Variable Mode "${mode_name}" on "${collection_name}"`;
 
     try {
@@ -2225,7 +2471,7 @@ figma.ui.onmessage = async (msg) => {
       let screenshot = null;
       let captureNote = null;
       if (capture) {
-        const shot = await captureSafe(targetNode, scale);
+        const shot = await captureSafe(targetNode, scale, max_px);
         screenshot = shot.base64;
         captureNote = shot.error;
       }
@@ -2274,8 +2520,9 @@ figma.ui.onmessage = async (msg) => {
       target_parent_id,
       position,
       as_component = false,
-      capture = true,
+      capture = false,
       scale = 2.0,
+      max_px,
       startTime
     } = msg;
 
@@ -2366,7 +2613,7 @@ figma.ui.onmessage = async (msg) => {
       let screenshot = null;
       let captureNote = null;
       if (capture) {
-        const shot = await captureSafe(finalNode, scale);
+        const shot = await captureSafe(finalNode, scale, max_px);
         screenshot = shot.base64;
         captureNote = shot.error;
       }

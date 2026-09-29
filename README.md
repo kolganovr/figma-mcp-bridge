@@ -46,13 +46,14 @@ with a real design file.
 | | **This bridge** | [Figma Dev Mode MCP](https://help.figma.com/hc/en-us/articles/32132100833559-Guide-to-the-Figma-MCP-server) (official) | [Framelink](https://github.com/GLips/Figma-Context-MCP) | [Talk to Figma](https://github.com/sonnylazuardi/cursor-talk-to-figma-mcp) |
 |---|:---:|:---:|:---:|:---:|
 | **Writes to the canvas** | ✅ arbitrary JS in the sandbox | ✅ code-to-canvas | ❌ read-only | ✅ fixed command set |
-| **Visual feedback loop** | ✅ auto-framed PNG on every write | ⚠️ separate screenshot call | ❌ | ❌ |
+| **Visual feedback loop** | ✅ auto-framed PNG on any write (`capture: true`) | ⚠️ separate screenshot call | ❌ | ❌ |
 | **Undo the agent's work** | ✅ `figma_rollback` | ❌ | n/a | ❌ |
 | **Works on the Figma Free plan** | ✅ | ❌ Dev/Full seat, paid plan[¹](#sources) | ✅ | ✅ |
 | **Tool-call quota** | none — it's local | 6 / month on Starter seats[¹](#sources) | inherits REST rate limits | none |
 | **Token-optimized read of the *live* doc** | ✅ 86–91% smaller[²](#sources) | ⚠️ partial | ❌ REST only | ❌ |
 | **Persistent code modules in-sandbox** | ✅ `bridge.define/require` | ❌ | ❌ | ❌ |
-| **Long jobs survive their own timeout** | ✅ async `job_id` + progress | ❌ | n/a | ❌ |
+| **Long jobs survive their own timeout** | ✅ async `job_id`, one blocking wait | ❌ | n/a | ❌ |
+| **Token budget per call** | ✅ capped text, sized images, compact JSON | ❌ | ⚠️ read-side only | ❌ |
 | **Install footprint** | 0 npm deps, `npx` *or* `git clone`, Node only | Figma desktop + paid seat | `npx` + access token | Bun + a second server process |
 
 **The short version:** Framelink is the best choice if you only want to turn an existing design
@@ -228,9 +229,31 @@ const { label } = bridge.require("kit");
 
 ### 5. Long jobs that don't die at the timeout
 
-A generation still running after 30s hands back a `job_id` instead of failing while the plugin
-keeps working. Poll `figma_job_status` for live progress — the sandbox reports it via
-`progress(step, of, note)`.
+A generation still running after 45s hands back a `job_id` instead of failing while the plugin
+keeps working. `figma_job_status` then **blocks** until the job finishes (up to `wait_ms`, 45s by
+default) — one call, not a polling loop. Progress from `progress(step, of, note)` is included while
+it runs; a job silent for 2 minutes is flagged `stalled`, and one whose plugin disconnected fails
+at once with `PLUGIN_DISCONNECTED` instead of running out the clock. A call that times out behind a
+still-running job says so (`PLUGIN_BUSY`, naming the job) instead of inviting a blind retry.
+
+### 6. Built for the token bill
+
+In an agent loop a tool call is paid for twice: once when it returns, and again on every later
+turn, because its output stays in the context that each turn re-reads. So the bridge optimizes
+for *fewer turns* and *smaller residue*:
+
+| | Default | Why |
+|---|---|---|
+| Screenshots | `scale: 1`, longest side `max_px: 1024`, at most 3 images per call | image tokens scale with pixel area (~w·h/750); each image is described as `800x600 ~640tok` |
+| `capture` on insert/mode tools | off | the auto-lint `warnings` catch mechanical defects without an image |
+| Text results | compact JSON; `figma_execute_code` results over `max_output_chars` (6000) are shrunk structurally | the full value stays in `bridge.state.lastResult` for the next call to filter |
+| Cheap reads in the sandbox | `bridge.summarize` / `inspect` / `find` / `check` | one-line-per-node outlines and pass/fail lists instead of raw node dumps |
+| Plugin reloads | calls wait up to 8s for the plugin to reconnect | a failure costs a turn to read and another to retry |
+| Server instructions | ≈1.9k chars, economy rules first | some clients truncate instructions at ~2000 chars |
+
+Every default is overridable per call, and per install through env: `FIGMA_MCP_SCALE`,
+`FIGMA_MCP_MAX_PX`, `FIGMA_MCP_MAX_IMAGES`, `FIGMA_MCP_MAX_OUTPUT_CHARS`, `FIGMA_MCP_JOB_WAIT_MS`,
+`FIGMA_MCP_ESCALATE_MS`, `FIGMA_MCP_RECONNECT_GRACE_MS`.
 
 ---
 
@@ -256,9 +279,9 @@ something that would only return `REST_TOKEN_MISSING`.
 
 | Tool | Description |
 | :--- | :--- |
-| `figma_execute_code` | Run JS in the Figma sandbox. Injects `figma`, `ensureFont`, `getFreePosition`, `progress`, `bridge`. Supports `capture`, `capture_node_ids`, `diff`, `async`, `target`. |
+| `figma_execute_code` | Run JS in the Figma sandbox. Injects `figma`, `ensureFont`, `getFreePosition`, `progress`, `bridge`. Supports `capture`, `capture_node_ids`, `diff`, `max_px`, `max_output_chars`, `async`, `target`. |
 | `figma_read_canvas` | Token-optimized read of the **live** document (`jsx` / `tree` / `json`) with `budget_tokens`. |
-| `figma_screenshot` | PNG of specific `node_ids` or the current selection. |
+| `figma_screenshot` | PNG of specific `node_ids` or the current selection, sized by `max_px`. |
 | `figma_find_components` | Cached, tokenized, fuzzy component search — variants, properties, keys. |
 | `figma_insert_component_instance` | Instantiate a component/variant, apply text overrides, place into AutoLayout. |
 | `figma_insert_svg` | Insert raw SVG with proportional scaling, recoloring, optional component wrapping. |
@@ -272,7 +295,7 @@ something that would only return `REST_TOKEN_MISSING`.
 | `figma_get_selection` | Geometry, compact hex fills, parent/page, AutoLayout context of the selection. |
 | `figma_get_canvas_layout` | Artboard bounds + a safe `suggestedNextPosition`. `layout:"grid"` shelf-packs. |
 | `figma_set_variables_mode` | Switch theme mode (Dark/Light/Brand) on a frame or page. |
-| `figma_job_status` | Poll an escalated background job. |
+| `figma_job_status` | Wait (blocking, `wait_ms`) for an escalated background job. |
 | `figma_list_targets` | List connected Figma documents for multi-file targeting. |
 
 #### REST — Figma Cloud (needs a token)
@@ -400,7 +423,7 @@ locked-down machines the previous note is about.
 
 ## Testing
 
-Five dependency-free suites, all runnable with bare `node`:
+Six dependency-free suites, all runnable with bare `node`:
 
 ```bash
 node tests/bridge-runtime.test.js   # sandbox runtime, module persistence, checkpoint/rollback
@@ -408,6 +431,7 @@ node tests/layout-packer.test.js    # row/grid packing, collision grid
 node tests/optimizer.test.js        # jsx/tree/json serialization, budget truncation
 node tests/mcp-protocol.test.js     # real server over stdio: initialize, tools/list, tiering
 node tests/install.test.js          # config merge/reuse, token persistence, stale-file cleanup
+node tests/token-economy.test.js    # fake plugin over a real WebSocket: budgets, long-poll, proxy
 ```
 
 `mcp-protocol.test.js` spawns the actual server as a child process and speaks NDJSON to it — the

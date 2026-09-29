@@ -6,7 +6,8 @@ const fs = require("fs");
 const path = require("path");
 
 const ROOT = path.join(__dirname, "..");
-const src = fs.readFileSync(path.join(ROOT, "figma-plugin", "code.js"), "utf8");
+// CRLF-normalized: a Windows checkout (core.autocrlf) must not hide the markers below.
+const src = fs.readFileSync(path.join(ROOT, "figma-plugin", "code.js"), "utf8").replace(/\r\n/g, "\n");
 
 const start = src.indexOf("// ==========================================================================\n// Bridge Runtime");
 const endMarker = "async function exportNodeToPngBase64";
@@ -34,6 +35,11 @@ const nodeProto = {
   },
   createInstance() {
     return makeNode("INSTANCE", "Instance of " + this.name);
+  },
+  findAll(pred) {
+    const out = [];
+    (function walk(n) { for (const c of n.children || []) { if (pred(c)) out.push(c); walk(c); } })(this);
+    return out;
   }
 };
 function makeNode(type, name, extra) {
@@ -80,8 +86,8 @@ const figma = {
 async function ensureFont() {}
 
 // --- load the runtime ------------------------------------------------------
-const load = new Function("figma", "ensureFont", runtime + "\n;return { createBridgeApi, enrichBridgeError, bridgeWrite, bridgeRead, createTrackingFigma };");
-const { createBridgeApi, enrichBridgeError, createTrackingFigma } = load(figma, ensureFont);
+const load = new Function("figma", "ensureFont", runtime + "\n;return { createBridgeApi, enrichBridgeError, bridgeWrite, bridgeRead, createTrackingFigma, computeCaptureScale };");
+const { createBridgeApi, enrichBridgeError, createTrackingFigma, computeCaptureScale } = load(figma, ensureFont);
 
 let failures = 0;
 function check(name, cond, extra) {
@@ -273,6 +279,58 @@ console.log("\n== checkpoint journal: clone()/createInstance() tracking (Undo La
   const untrackedClone = template.clone(); // outside any open checkpoint
   check("clone() outside an open checkpoint is not journaled",
     !cpResult.created.includes(untrackedClone.id) && figma.getNodeById(untrackedClone.id) !== null);
+}
+
+console.log("\n== capture scale (max_px budget) ==");
+check("small node keeps requested scale", computeCaptureScale(320, 200, 1, 1024) === 1);
+check("desktop frame is capped to 1024 on the long side",
+  Math.round(1440 * computeCaptureScale(1440, 900, 1.5, 1024)) === 1024, computeCaptureScale(1440, 900, 1.5, 1024));
+check("tall strip is capped by height", Math.round(3000 * computeCaptureScale(375, 3000, 1, 1024)) === 1024);
+check("missing max_px falls back to the 1024 default", Math.round(2048 * computeCaptureScale(2048, 100, 1)) === 1024);
+check("explicit larger max_px is honoured", Math.round(2000 * computeCaptureScale(2000, 1000, 1, 2000)) === 2000);
+check("pixel cap still applies above max_px", 20000 * 20000 * Math.pow(computeCaptureScale(20000, 20000, 1, 100000), 2) <= 4000001);
+
+console.log("\n== cheap reads: summarize / inspect / find / check ==");
+{
+  const api = createBridgeApi();
+  const card = makeNode("FRAME", "Card", {
+    width: 320, height: 200, x: 10, y: 20,
+    layoutMode: "VERTICAL", itemSpacing: 8, paddingTop: 16, paddingRight: 16, paddingBottom: 16, paddingLeft: 16,
+    layoutSizingHorizontal: "FIXED", layoutSizingVertical: "HUG",
+    fills: [{ type: "SOLID", color: { r: 1, g: 1, b: 1 }, visible: true }], cornerRadius: 8
+  });
+  const title = makeNode("TEXT", "Title", {
+    width: 288, height: 24, x: 16, y: 16, characters: "Submit your application form today please",
+    fontName: { family: "Inter", style: "Bold" }, fontSize: 16, fills: [{ type: "SOLID", color: { r: 0, g: 0, b: 0 }, opacity: 0.5 }]
+  });
+  card.appendChild(title);
+  for (let i = 0; i < 20; i++) card.appendChild(makeNode("RECTANGLE", "Row " + i, { width: 10, height: 10 }));
+  figma.currentPage.appendChild(card);
+
+  const outline = api.summarize(card.id, { depth: 1, maxChildren: 3 });
+  const lines = outline.split("\n");
+  check("summarize: one line for the node, capped children, and a +more marker", lines.length === 5 && /\+18 more children/.test(lines[4]), outline);
+  check("summarize: layout, fill and radius in the node line",
+    /FRAME "Card" #\S+ 320x200 @10,20 \[V gap8 pad16 fixed\/hug\] fill:#FFFFFF r8/.test(lines[0]), lines[0]);
+  check("summarize: text line carries font and truncated text",
+    /TEXT "Title" .*Inter\/Bold 16 "Submit your application form today pleas…"/.test(lines[1]), lines[1]);
+  check("summarize: missing id is reported, not thrown", api.summarize(["nope:1"]) === "MISSING nope:1");
+
+  const info = api.inspect([card.id, "0:404"], ["width", "fill", "layout", "children"]);
+  check("inspect: only the requested props", JSON.stringify(info[card.id]) === JSON.stringify({ width: 320, fill: "#FFFFFF", layout: "V gap8 pad16 fixed/hug", children: 21 }), info);
+  check("inspect: missing id -> MISSING", info["0:404"] === "MISSING", info);
+  check("inspect: semi-transparent fill keeps opacity", api.inspect(title.id, ["fill"])[title.id].fill === "#000000@0.5");
+
+  const found = api.find("row", { root: card.id, limit: 5 });
+  check("find: capped matches plus a total marker", found.length === 6 && /\+15 more \(20 total\)/.test(found[5]), found);
+  check("find: type filter", api.find("", { root: card.id, type: "TEXT" }).length === 1);
+
+  const ok = api.check({ [card.id]: { width: 320.3, fill: "#FFFFFF", layout: "V gap8 pad16 fixed/hug" }, [title.id]: { text: /Submit/, fontStyle: "Bold" } });
+  check("check: all-pass result is tiny", ok.pass === 5 && ok.fail.length === 0 && ok.missing.length === 0, ok);
+  const bad = api.check([{ id: card.id, width: 300, cornerRadius: 8 }, { id: "9:9", width: 1 }]);
+  check("check: failures name key, want and got", bad.fail.length === 1 && bad.fail[0].key === "width" && bad.fail[0].got === 320 && bad.pass === 1, bad);
+  check("check: missing nodes are listed", bad.missing.join() === "9:9", bad);
+  check("info() documents the cheap reads", Object.keys(api.info().cheapReads || {}).length >= 5);
 }
 
 console.log(failures === 0 ? "\nALL PASS" : "\n" + failures + " FAILURES");

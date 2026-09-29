@@ -8,7 +8,8 @@ const fs = require("fs");
 const path = require("path");
 
 const ROOT = path.join(__dirname, "..");
-const src = fs.readFileSync(path.join(ROOT, "figma-plugin", "code.js"), "utf8");
+// CRLF-normalized: a Windows checkout (core.autocrlf) must not hide the markers below.
+const src = fs.readFileSync(path.join(ROOT, "figma-plugin", "code.js"), "utf8").replace(/\r\n/g, "\n");
 
 const startMarker = "// ==========================================================================\n// Layout Packer";
 const endMarker = "// ==========================================================================\n// Component Index";
