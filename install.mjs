@@ -417,6 +417,83 @@ function installOrUpdate({ token = "", isUpdate = false, home, appdata } = {}) {
     }
   }
   console.log("==================================================");
+  reportFigmaPluginRegistration(home, appdata);
+}
+
+// ==========================================================================
+// Which plugin copy Figma actually runs. Figma Desktop remembers every
+// imported dev plugin in its settings.json (localFileExtensions[].manifestPath)
+// and loads it from exactly there. Only the copies this installer writes carry
+// the bridge token, so a registration pointing anywhere else — typically the
+// repository checkout, imported by hand — can never connect. Agents that only
+// saw "not connected" have "fixed" that by writing the token into the repo's
+// ui.html; saying where Figma looks, and what to import instead, prevents it.
+// ==========================================================================
+const PLUGIN_ID = "antigravity-figma-bridge";
+
+function figmaSettingsPath(home, appdata) {
+  if (process.platform === "win32") return appdata ? path.join(appdata, "Figma", "settings.json") : null;
+  if (process.platform === "darwin") return path.join(home, "Library", "Application Support", "Figma", "settings.json");
+  return path.join(home, ".config", "Figma", "settings.json"); // unofficial Linux builds
+}
+
+/** Manifest paths Figma has registered for this plugin, or null when Figma's
+ * settings can't be found/read (Figma not installed, unknown layout). */
+function findBridgePluginRegistrations(settingsPath) {
+  if (!settingsPath || !fs.existsSync(settingsPath)) return null;
+  let data;
+  try {
+    data = JSON.parse(fs.readFileSync(settingsPath, "utf-8"));
+  } catch (e) {
+    return null;
+  }
+  const entries = Array.isArray(data?.localFileExtensions) ? data.localFileExtensions : [];
+  const found = [];
+  for (const entry of entries) {
+    const manifestPath = entry?.manifestPath;
+    if (typeof manifestPath !== "string") continue;
+    let id = null;
+    try { id = JSON.parse(fs.readFileSync(manifestPath, "utf-8")).id; } catch (e) {}
+    // A manifest that no longer exists can still be ours if it sat in a figma-plugin/ folder.
+    if (id === PLUGIN_ID || (id === null && /figma-plugin[\\/]manifest\.json$/i.test(manifestPath))) {
+      found.push(manifestPath);
+    }
+  }
+  return found;
+}
+
+/** -> { status: "ok" | "wrong" | "none" | "unknown", registered, wrong, manifest } */
+function checkFigmaPluginRegistration(home, appdata) {
+  const locations = installLocations(home);
+  const manifest = path.join(locations[CANONICAL_KEY], "figma-plugin", "manifest.json");
+  const registered = findBridgePluginRegistrations(figmaSettingsPath(home, appdata));
+  if (registered === null) return { status: "unknown", registered: [], wrong: [], manifest };
+  if (registered.length === 0) return { status: "none", registered, wrong: [], manifest };
+  const norm = (p) => {
+    const r = path.resolve(p);
+    return process.platform === "win32" ? r.toLowerCase() : r;
+  };
+  const installedDirs = Object.values(locations).map((dir) => norm(path.join(dir, "figma-plugin")));
+  const wrong = registered.filter((p) => !installedDirs.includes(norm(path.dirname(p))));
+  return { status: wrong.length ? "wrong" : "ok", registered, wrong, manifest };
+}
+
+function reportFigmaPluginRegistration(home, appdata) {
+  const reg = checkFigmaPluginRegistration(home, appdata);
+  if (reg.status === "wrong") {
+    for (const p of reg.wrong) {
+      console.log(`[!] Figma loads the 'Antigravity Bridge' plugin from ${p}`);
+    }
+    console.log("    That copy was not written by install.mjs, so it has no bridge token and cannot connect.");
+    console.log("    In Figma: Plugins > Development > Import plugin from manifest... >");
+    console.log(`      ${reg.manifest}`);
+    console.log("    then remove the old entry. Never paste the token into that copy's ui.html.");
+  } else if (reg.status === "ok") {
+    console.log(`[✓] Figma runs the installed plugin copy: ${reg.registered.join(", ")}`);
+  } else if (reg.status === "none") {
+    console.log(`[*] Figma has no 'Antigravity Bridge' plugin imported yet — import ${reg.manifest}`);
+  }
+  return reg;
 }
 
 function runDoctor(home, appdata) {
@@ -458,6 +535,10 @@ function runDoctor(home, appdata) {
     } else {
       console.log(`  - ${cfg} [NOT CREATED YET]`);
     }
+  }
+  console.log("\n[*] Figma plugin registration:");
+  if (reportFigmaPluginRegistration(home, appdata).status === "unknown") {
+    console.log("  (Figma Desktop settings not found — import the plugin manually)");
   }
   console.log("==================================================");
 }
@@ -514,4 +595,7 @@ export {
   installOrUpdate,
   runDoctor,
   parseArgs,
+  figmaSettingsPath,
+  findBridgePluginRegistrations,
+  checkFigmaPluginRegistration,
 };

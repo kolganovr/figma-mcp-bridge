@@ -28,6 +28,9 @@ Instruct the user:
 3. Press **`Ctrl + Alt + P`** (macOS: **`Cmd + Option + P`**) to launch/reload **Antigravity Bridge**.
 4. The plugin status indicator will turn green: **`CONNECTED`** (`ws://127.0.0.1:8765`).
 
+> [!CAUTION]
+> **Never import `figma-plugin/` from this repository into Figma, and never write the bridge token into its `ui.html`.** Only the copies `install.mjs` writes carry the token. If a call fails with `PLUGIN_TOKEN_REJECTED`, or `--doctor` says Figma loads the plugin from somewhere else, the user re-imports the manifest the error/doctor names — that is the whole fix. A token pasted into the source copy ends up committed.
+
 ### 3. Verify Connection with Doctor
 Run the diagnostic check:
 ```bash
@@ -49,7 +52,7 @@ When interacting with the Figma canvas:
 4. **Smart Placement:** Use `getFreePosition(width, height, { gap: 80, direction: "RIGHT" })` or let the automatic collision engine place new artboards safely without overlapping existing work.
 5. **Color normalization:** Colors in Figma API are floats from `0` to `1` (e.g. `{ r: 0.1, g: 0.5, b: 0.9 }`), not `0-255`.
 6. **Font safety:** Always load fonts before setting text via `await ensureFont("Inter", "Regular")` or `await ensureFont("Inter", "Bold")`.
-7. **Read before you screenshot:** Prefer `figma_read_canvas`, or inside code `bridge.summarize(id, { depth })`, `bridge.inspect(ids, props)`, `bridge.find(query, { root, type })`, over hand-writing a tree walk — never return raw node dumps. Results over `max_output_chars` (6000) are shrunk; the full value stays in `bridge.state.lastResult` for the next call.
+7. **Read before you screenshot:** Prefer `figma_inspect` (every id you need in ONE call: outline, `props`, `find`, `check`), or inside code `bridge.summarize(id, { depth })`, `bridge.inspect(ids, props)`, `bridge.find(query, { root, type })`, over hand-writing a tree walk — never return raw node dumps. Responses over `max_output_bytes` (3500 UTF-8 bytes) are shrunk; the full value stays in `bridge.state.lastResult` for the next call.
 8. **Every write call is undoable:** it returns a `checkpoint_id`; `figma_rollback({ checkpoint_id })` (or `"last"`) undoes it. Use this instead of asking the user to `Ctrl+Z`.
 9. **Long-running code doesn't need special handling:** past 45s a call auto-escalates to `{ status: "running", job_id }`; call `figma_job_status` ONCE — it blocks until the job finishes (`wait_ms`, default 45s). `PLUGIN_BUSY` means another job still holds the single-threaded sandbox: wait for that job, don't retry. `stalled: true` means ask the user. Call `progress(step, of, note)` inside multi-step code.
 10. **Multiple Figma files open:** check `figma_list_targets` and pass `target: "<fileName>"` on any LIVE tool if a call fails with `AMBIGUOUS_TARGET`.

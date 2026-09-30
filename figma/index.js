@@ -59,7 +59,55 @@ function hasValidToken(req) {
 }
 
 function isAuthorized(req) {
-  return isOriginAllowed(req) && hasValidToken(req);
+  if (!isOriginAllowed(req)) return false;
+  if (hasValidToken(req)) return true;
+  noteRejectedPlugin(req);
+  return false;
+}
+
+// ------------------------------------------------------------------
+// Wrong plugin copy. Figma runs whichever manifest.json the user imported;
+// only the copies install.mjs writes carry the bridge token, so a plugin that
+// passes the Origin gate but brings no/another token is almost always the
+// repository checkout imported by hand. Agents that only see "not connected"
+// have "fixed" that by writing the token into the repo's ui.html — so the
+// rejection is remembered and the connect error names the real fix.
+// ------------------------------------------------------------------
+const INSTALLED_PLUGIN_MANIFEST = path.join(__dirname, "..", "figma-plugin", "manifest.json");
+let lastRejectedPlugin = null; // { at, tokenless }
+let lastRejectLogAt = 0;
+
+function presentedToken(req) {
+  const header = req.headers && req.headers["x-bridge-token"];
+  if (typeof header === "string" && header) return header;
+  try {
+    return new URL(req.url, `http://127.0.0.1:${BRIDGE_PORT}`).searchParams.get("token") || "";
+  } catch (e) {
+    return "";
+  }
+}
+
+function noteRejectedPlugin(req) {
+  const tokenless = !presentedToken(req);
+  lastRejectedPlugin = { at: Date.now(), tokenless };
+  if (Date.now() - lastRejectLogAt > 60000) {
+    lastRejectLogAt = Date.now();
+    console.error("[Figma MCP Bridge] " + wrongPluginCopyMessage(lastRejectedPlugin));
+  }
+}
+
+function wrongPluginCopyMessage(rejected) {
+  const ago = Math.max(0, Math.round((Date.now() - rejected.at) / 1000));
+  return `A Figma plugin tried to connect ${ago}s ago and was REJECTED: it brought ` +
+    (rejected.tokenless ? "no bridge token" : "a different bridge token") +
+    ", so Figma is running a plugin copy install.mjs did not produce (typically this repository's figma-plugin/ imported directly" +
+    (rejected.tokenless ? "" : ", or a copy from an older install") +
+    `).\n\nHINT: the user fixes it once: Figma → Plugins → Development → Import plugin from manifest… → ${INSTALLED_PLUGIN_MANIFEST}, then remove the old "Antigravity Bridge" entry. ` +
+    "Do NOT write the token into ui.html or any other source file — it would leak into the repository.";
+}
+
+function recentlyRejectedPlugin() {
+  return lastRejectedPlugin && Date.now() - lastRejectedPlugin.at < 10 * 60 * 1000 ? lastRejectedPlugin : null;
 }
 
 // Commands queue instead of overwriting a single slot: two tool calls issued
@@ -89,7 +137,7 @@ const TIMEOUTS = {
   heavy: envNumber("FIGMA_MCP_TIMEOUT_HEAVY_MS", 120000),
   escalate: envNumber("FIGMA_MCP_ESCALATE_MS", 45000)
 };
-const SERVER_VERSION = "4.1.0";
+const SERVER_VERSION = "4.2.0";
 
 // ------------------------------------------------------------------
 // Token economy. In an agent loop the price of a tool call is not its own
@@ -103,7 +151,12 @@ const ECONOMY = {
   scale: envNumber("FIGMA_MCP_SCALE", 1),                        // screenshot scale when the caller passes none
   maxPx: envNumber("FIGMA_MCP_MAX_PX", 1024),                    // longest image side; ~1k tokens at 1024x1024
   maxImages: envNumber("FIGMA_MCP_MAX_IMAGES", 3),               // images per tool response
-  maxOutputChars: envNumber("FIGMA_MCP_MAX_OUTPUT_CHARS", 6000), // text result budget (~1.5-2k tokens)
+  // Text budget for a whole tool response, in UTF-8 BYTES — not chars: some
+  // clients spill any tool output over ~4 KB into a file the model then has to
+  // open with a second tool call (Antigravity does, measured at ~4.1 KB), and
+  // Cyrillic/CJK text is 2-3 bytes per char, so a 6000-char cap spilled
+  // constantly. 3500 stays under that with room for the envelope.
+  maxOutputBytes: envNumber("FIGMA_MCP_MAX_OUTPUT_BYTES", envNumber("FIGMA_MCP_MAX_OUTPUT_CHARS", 3500)),
   jobWaitMs: envNumber("FIGMA_MCP_JOB_WAIT_MS", 45000),          // how long figma_job_status blocks by default
   jobWaitMaxMs: 55000,                                           // keep under ~60s client tool timeouts
   reconnectGraceMs: envNumber("FIGMA_MCP_RECONNECT_GRACE_MS", 8000), // wait for a reloading plugin instead of failing
@@ -781,6 +834,12 @@ async function sendCommandToPlugin(payload, timeoutMs = 45000, options = {}) {
   // instead. A poll-based client that pinged inside the last 60s still gets
   // the benefit of the doubt and the command is queued normally.
   if (!targetClient && (Date.now() - lastPluginPing) >= 60000) {
+    const rejected = recentlyRejectedPlugin();
+    if (rejected) {
+      const err = new Error("No Figma plugin is connected to the bridge. " + wrongPluginCopyMessage(rejected));
+      err.code = "PLUGIN_TOKEN_REJECTED";
+      throw err;
+    }
     const err = new Error(
       "No Figma plugin is connected to the bridge. Ask the user to open Figma DESKTOP (not the browser) and launch the Antigravity Bridge plugin (Ctrl+Alt+P / Cmd+Option+P) until the status shows CONNECTED, then retry."
     );
@@ -1013,10 +1072,12 @@ const TOOLS = [
   // 1. Live Canvas Tools
   {
     name: "figma_execute_code",
-    // Kept deliberately short. The full execution model lives in
-    // SERVER_INSTRUCTIONS, which the client receives once on `initialize`;
-    // repeating it here re-sent ~1.2k tokens of identical prose on every turn.
-    description: "EXECUTE LIVE JAVASCRIPT inside the open Figma document to create, edit, move, style, color or delete canvas elements (requires the 'Antigravity Bridge' plugin running in Figma Desktop). Injected globals: `figma`, `await ensureFont(family, style)`, `getFreePosition(w, h)`, `bridge`. Each call is a FRESH async function body — declarations do not survive into the next call; persist helpers with `bridge.define`/`bridge.require` and never use `eval`. Run `return bridge.info()` for the full runtime contract, or read this server's instructions. Set `capture: true` to get a PNG back for visual verification. Return only what you need: results over max_output_chars are shrunk (the full value stays in bridge.state.lastResult for your next call).",
+    // Kept short, but the few rules that decide how many turns a task takes
+    // live HERE, not only in SERVER_INSTRUCTIONS: some clients never show a
+    // server's instructions to the model (Antigravity sessions made 0 bridge.*
+    // calls in ~220 figma_execute_code runs), while tool descriptions always
+    // reach it. The long-form contract stays in instructions + bridge.info().
+    description: "Run JavaScript in the open Figma document (Figma Desktop + 'Antigravity Bridge' plugin) to create, edit, move, style or delete nodes. Every call is a full model turn, so do a whole stage per call — read, change and verify together — and put capture_node_ids on that same call instead of a separate figma_screenshot. Reads only: use figma_inspect. Globals: `figma`, `await ensureFont(family, style)`, `getFreePosition(w, h)`, `bridge`: bridge.check({ '1:2': { width: 320, fill: '#FFFFFF' } }) -> pass/fail list; bridge.define(name, src) + bridge.require(name) keep helpers between calls (each call is a fresh function body — never eval); `return bridge.info()` lists the rest. Return only the ids/flags you need: responses over max_output_bytes (3500) are shrunk, the full value stays in bridge.state.lastResult.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1049,9 +1110,9 @@ const TOOLS = [
           type: "number",
           description: "Longest side of each returned image in px (default: 1024). Image tokens grow with pixel count, not file size."
         },
-        max_output_chars: {
+        max_output_bytes: {
           type: "number",
-          description: "Cap on the returned result's JSON text (default: 6000; 0 = no cap). Larger results are shrunk: long arrays/strings/deep objects are cut with markers."
+          description: "Cap on the whole text response in UTF-8 bytes (default: 3500 — under the ~4 KB at which some clients spill output to a file and cost an extra turn; 0 = no cap). Larger results are shrunk structurally, cuts marked with …."
         },
         async: {
           type: "boolean",
@@ -1066,8 +1127,55 @@ const TOOLS = [
     }
   },
   {
+    name: "figma_inspect",
+    description: "READ the live Figma document in ONE call — pass every node id you need at once instead of one call per node. Default: a compact outline, one line per node (TYPE \"name\" #id WxH @x,y [V gap8 pad16] fill:#FFF r8 font \"text…\"), `depth` levels down. `props` returns exact values instead: { id: { prop: value } } (also fill, stroke, text, font, layout, padding, parent, children, main, variant, props, absolute). `find` searches node names under node_ids (or the current page). `check` returns only mismatches. Combine them freely. Changes nothing.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        node_ids: {
+          type: "array",
+          items: { type: "string" },
+          description: "Node ids to read (\"12:34\" or \"12-34\"). Omit to use the current page."
+        },
+        depth: {
+          type: "number",
+          description: "Outline levels below each node (default 1; 0 = the nodes only). Max 6."
+        },
+        props: {
+          type: "array",
+          items: { type: "string" },
+          description: "Return these properties per node instead of an outline, e.g. [\"width\", \"layoutSizingHorizontal\", \"fill\", \"text\"]."
+        },
+        find: {
+          type: "string",
+          description: "Case-insensitive substring of node names to search for under node_ids (or the current page). Matches come back as outline lines."
+        },
+        find_type: {
+          type: "string",
+          description: "Restrict find to one node type, e.g. FRAME, TEXT, INSTANCE."
+        },
+        limit: {
+          type: "number",
+          description: "Max find matches (default 30)."
+        },
+        check: {
+          type: "object",
+          description: "Expectations to verify: { \"12:34\": { \"width\": 320, \"fill\": \"#FFFFFF\", \"layout\": \"V gap8 pad16\" } }. Returns { pass, fail: [{ id, key, want, got }], missing }."
+        },
+        max_output_bytes: {
+          type: "number",
+          description: "Cap on the text response in UTF-8 bytes (default 3500; 0 = no cap)."
+        },
+        target: {
+          type: "string",
+          description: "fileName of a specific connected Figma document, when more than one is open (see figma_list_targets)."
+        }
+      }
+    }
+  },
+  {
     name: "figma_screenshot",
-    description: "Capture PNG screenshots of specific nodes or the current selection in Figma, to check layout, contrast, typography and spacing. Each image costs ~1k tokens at the default max_px, and stays in context: check mechanical things through write-call `warnings` or bridge.check first, and take one screenshot per finished stage rather than after every edit.",
+    description: "Capture PNG screenshots of specific nodes or the current selection in Figma, to check layout, contrast, typography and spacing. Each image costs ~1k tokens at the default max_px, and stays in context: check mechanical things through write-call `warnings` or bridge.check first, and take one screenshot per finished stage rather than after every edit. Right after a figma_execute_code edit, put capture_node_ids on that call instead — this tool is then an extra turn.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1570,6 +1678,7 @@ const TOOLS = [
 // ==========================================================================
 const TOOL_TIERS = {
   figma_execute_code: "core",
+  figma_inspect: "core",
   figma_read_canvas: "core",
   figma_screenshot: "core",
   figma_find_components: "core",
@@ -1622,7 +1731,7 @@ const SERVER_INSTRUCTIONS = [
   "TOKEN ECONOMY — every call re-reads the whole conversation, and what it returns stays there:",
   "1. Do a whole stage in ONE figma_execute_code call (read, change, verify), not a call per step. Return only the ids/flags/numbers you need.",
   "2. Read cheaply: figma_read_canvas, or inside code bridge.summarize(id,{depth}), bridge.inspect(ids,[props]), bridge.find(query,{root,type}), bridge.check(specs) for pass/fail. Never return raw node dumps.",
-  "3. Results over max_output_chars (6000) are shrunk; the full value stays in bridge.state.lastResult for your next call.",
+  "3. Responses over max_output_bytes (3500 UTF-8 bytes) are shrunk; the full value stays in bridge.state.lastResult for your next call.",
   "4. A screenshot is ~1k tokens (scale 1, max_px 1024) and never leaves context: trust write-call `warnings` and bridge.check, capture once per finished stage via capture_node_ids.",
   "5. Past 45s a call returns { status: \"running\", job_id }: call figma_job_status once — it blocks until done. PLUGIN_BUSY: wait for the named job, never retry blindly. `stalled`: ask the user.",
   "",
@@ -1720,32 +1829,65 @@ function pruneValue(value, lvl, depth) {
   return out;
 }
 
-// -> { value, truncated: null | { from, to } } ; maxChars <= 0 disables.
-function shrinkToBudget(value, maxChars) {
+function byteLength(text) {
+  return Buffer.byteLength(String(text), "utf8");
+}
+
+// Longest prefix of `text` that fits in maxBytes of UTF-8 without splitting a
+// character.
+function cutToBytes(text, maxBytes) {
+  const s = String(text);
+  if (byteLength(s) <= maxBytes) return s;
+  let lo = 0, hi = s.length;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (byteLength(s.slice(0, mid)) <= maxBytes) lo = mid; else hi = mid - 1;
+  }
+  if (lo > 0 && /[\uD800-\uDBFF]/.test(s[lo - 1])) lo -= 1; // don't end on half a surrogate pair
+  return s.slice(0, lo);
+}
+
+// -> { value, truncated: null | { from, to } } in UTF-8 bytes; maxBytes <= 0 disables.
+function shrinkToBudget(value, maxBytes) {
   let full;
   try { full = toJson(value); } catch (e) { full = String(value); }
-  if (!(maxChars > 0) || full === undefined || full.length <= maxChars) return { value, truncated: null };
+  if (!(maxBytes > 0) || full === undefined) return { value, truncated: null };
+  const fullBytes = byteLength(full);
+  if (fullBytes <= maxBytes) return { value, truncated: null };
   if (typeof value === "string") {
-    return { value: value.slice(0, maxChars) + `…(+${value.length - maxChars} chars)`, truncated: { from: full.length, to: maxChars } };
+    const cut = cutToBytes(value, Math.max(0, maxBytes - 24));
+    return { value: cut + `…(+${value.length - cut.length} chars)`, truncated: { from: fullBytes, to: maxBytes } };
   }
   for (const lvl of SHRINK_LEVELS) {
     const pruned = pruneValue(value, lvl, 0);
-    const text = toJson(pruned);
-    if (text.length <= maxChars) return { value: pruned, truncated: { from: full.length, to: text.length } };
+    const bytes = byteLength(toJson(pruned));
+    if (bytes <= maxBytes) return { value: pruned, truncated: { from: fullBytes, to: bytes } };
   }
   // Nothing structural fits (thousands of top-level keys, say): plain cut.
-  return { value: full.slice(0, maxChars) + "…", truncated: { from: full.length, to: maxChars } };
+  return { value: cutToBytes(full, maxBytes) + "…", truncated: { from: fullBytes, to: maxBytes } };
 }
 
+// max_output_chars is the pre-4.2 name of max_output_bytes, still honoured.
 function outputBudget(args) {
-  const n = Number(args && args.max_output_chars);
-  return Number.isFinite(n) && n >= 0 ? n : ECONOMY.maxOutputChars;
+  for (const key of ["max_output_bytes", "max_output_chars"]) {
+    const n = Number(args && args[key]);
+    if (args && args[key] !== undefined && Number.isFinite(n) && n >= 0) return n;
+  }
+  return ECONOMY.maxOutputBytes;
 }
 
 function truncationNote(truncated, stashed) {
-  return `result shrunk ${truncated.from}→${truncated.to} chars (long arrays/strings/deep objects cut, marked with …). ` +
-    (stashed ? "The full value is in bridge.state.lastResult — filter it in your next call instead of re-running. " : "") +
-    "Return less, or pass max_output_chars (0 = no cap).";
+  return `result shrunk ${truncated.from}→${truncated.to} bytes (cuts marked with …). ` +
+    (stashed ? "Full value: bridge.state.lastResult — filter it next call, don't re-run. " : "") +
+    "Return less, or pass max_output_bytes (0 = no cap).";
+}
+
+// Room the rest of an envelope leaves for its `result` inside `budget`.
+// Never below a floor that still shows the shape of what came back.
+function resultBudget(budget, envelopeWithoutResult, noteBytes) {
+  if (!(budget > 0)) return budget;
+  const overhead = byteLength(toJson({ ...envelopeWithoutResult, result: null })) + noteBytes;
+  return Math.max(budget - overhead, 600);
 }
 
 // ------------------------------------------------------------------
@@ -1800,26 +1942,38 @@ function collectImages(response, maxImages = ECONOMY.maxImages) {
 // Every successful write/read tool renders through this so an agent gets the
 // same envelope shape regardless of which tool it called: { ok, result,
 // created, modified, warnings, checkpoint_id, duration_ms, ...extra }.
+//
+// The byte budget covers the WHOLE envelope, not just `result`: a client that
+// spills oversized tool output to a file measures everything it was handed.
 function buildStructuredResult(response, extra, options = {}) {
-  const budget = Number.isFinite(options.maxOutputChars) ? options.maxOutputChars : ECONOMY.maxOutputChars;
-  const shrunk = shrinkToBudget(response && response.result !== undefined ? response.result : null, budget);
-  const envelope = { ok: true, result: shrunk.value };
-  if (shrunk.truncated) envelope.truncated = truncationNote(shrunk.truncated, !!(response && response.resultStashed));
+  const budget = Number.isFinite(options.maxOutputBytes) ? options.maxOutputBytes : ECONOMY.maxOutputBytes;
+  // Side lists get a share of the budget so they can never crowd out result.
+  const sideCap = budget > 0 ? Math.min(1500, Math.floor(budget / 4)) : 0;
+  const rest = {};
   if (response) {
-    if (Array.isArray(response.created) && response.created.length) envelope.created = shrinkToBudget(response.created, 1500).value;
-    if (Array.isArray(response.modified) && response.modified.length) envelope.modified = shrinkToBudget(response.modified, 1500).value;
-    if (Array.isArray(response.warnings) && response.warnings.length) envelope.warnings = shrinkToBudget(response.warnings, 2000).value;
-    if (response.checkpointId) envelope.checkpoint_id = response.checkpointId;
-    if (typeof response.durationMs === "number") envelope.duration_ms = response.durationMs;
-    if (response.captureNote) envelope.capture_note = response.captureNote;
+    if (Array.isArray(response.created) && response.created.length) rest.created = shrinkToBudget(response.created, sideCap).value;
+    if (Array.isArray(response.modified) && response.modified.length) rest.modified = shrinkToBudget(response.modified, sideCap).value;
+    if (Array.isArray(response.warnings) && response.warnings.length) rest.warnings = shrinkToBudget(response.warnings, sideCap).value;
+    if (response.checkpointId) rest.checkpoint_id = response.checkpointId;
+    if (typeof response.durationMs === "number") rest.duration_ms = response.durationMs;
+    if (response.captureNote) rest.capture_note = response.captureNote;
   }
   if (options.images) {
-    if (options.images.meta.length) envelope.images = options.images.meta;
-    if (options.images.skipped) envelope.images_skipped = `${options.images.skipped} more image(s) not sent (max ${ECONOMY.maxImages} per call) — capture those nodes separately if you need them.`;
-    if (options.images.errors.length) envelope.image_errors = options.images.errors;
+    if (options.images.meta.length) rest.images = options.images.meta;
+    if (options.images.skipped) rest.images_skipped = `${options.images.skipped} more image(s) not sent (max ${ECONOMY.maxImages} per call) — capture those nodes separately if you need them.`;
+    if (options.images.errors.length) rest.image_errors = options.images.errors;
   }
-  if (extra) Object.assign(envelope, extra);
-  return toJson(envelope);
+  if (extra) Object.assign(rest, extra);
+
+  const stashed = !!(response && response.resultStashed);
+  const noteBytes = byteLength(toJson(truncationNote({ from: 9999999, to: 9999999 }, stashed))) + 16;
+  const shrunk = shrinkToBudget(
+    response && response.result !== undefined ? response.result : null,
+    resultBudget(budget, rest, noteBytes)
+  );
+  const envelope = { ok: true, result: shrunk.value };
+  if (shrunk.truncated) envelope.truncated = truncationNote(shrunk.truncated, stashed);
+  return toJson(Object.assign(envelope, rest));
 }
 
 // Text envelope + image parts, the shape every capture-capable tool returns.
@@ -1853,32 +2007,91 @@ function buildErrorEnvelope(error) {
 }
 
 // Plain data results (list/find/variables/layout...) under the same budget.
+const NARROW_HINT = " Narrow the query (query/limit/collection_name/node_ids) to see the rest.";
+
 function jsonResult(value, args) {
-  const shrunk = shrinkToBudget(value, outputBudget(args));
+  const noteBytes = byteLength(truncationNote({ from: 9999999, to: 9999999 }, false) + NARROW_HINT) + 16;
+  const shrunk = shrinkToBudget(value, resultBudget(outputBudget(args), {}, noteBytes));
   const body = { ok: true, result: shrunk.value };
-  if (shrunk.truncated) body.truncated = truncationNote(shrunk.truncated, false) + " Narrow the query (query/limit/collection_name/node_ids) to see the rest.";
+  if (shrunk.truncated) body.truncated = truncationNote(shrunk.truncated, false) + NARROW_HINT;
   return { content: [{ type: "text", text: toJson(body) }] };
 }
 
 // Shared by figma_read_canvas AND get_file/get_node: serialize at the
-// requested depth, and if that overshoots budget_tokens, re-serialize the
+// requested depth, and if that overshoots the byte budget, re-serialize the
 // SAME already-fetched tree at a shallower maxDepth (cheap — pure JS, no
 // extra network/plugin round trip) until it fits or depth bottoms out at 0.
-function applyTokenBudget(rawData, { format, includeHidden, maxDepth, budgetTokens }) {
+// Still too big at depth 0 (hundreds of top-level frames): cut, and say so.
+function applyTokenBudget(rawData, { format, includeHidden, maxDepth, budgetBytes }) {
   let depthTry = maxDepth;
   let output = optimizeFigmaData(rawData, { format, simplify: true, maxDepth: depthTry, includeHidden });
-  let estTokens = Math.ceil(output.length / 4);
 
-  while (estTokens > budgetTokens && depthTry > 0) {
+  while (budgetBytes > 0 && byteLength(output) > budgetBytes && depthTry > 0) {
     depthTry -= 1;
     output = optimizeFigmaData(rawData, { format, simplify: true, maxDepth: depthTry, includeHidden });
-    estTokens = Math.ceil(output.length / 4);
   }
 
-  if (depthTry < maxDepth) {
-    output += `\n\n<!-- truncated at depth=${depthTry} (budget ${budgetTokens} tok, ~${estTokens} tok emitted). Raise budget_tokens or fetch a specific node_id for full depth there. -->`;
+  let cut = false;
+  if (budgetBytes > 0 && byteLength(output) > budgetBytes) {
+    output = cutToBytes(output, budgetBytes - 200);
+    cut = true;
+  }
+  if (depthTry < maxDepth || cut) {
+    output += `\n\n<!-- ${cut ? "cut" : "truncated"} at depth=${depthTry} to fit ${budgetBytes} bytes. Read a specific node_id for more depth, or raise budget_tokens. -->`;
   }
   return output;
+}
+
+// budget_tokens (the public knob) -> bytes at ~4 bytes/token; absent -> the
+// server-wide byte budget.
+function budgetBytesFromTokens(budgetTokens) {
+  return Number.isFinite(budgetTokens) ? budgetTokens * 4 : ECONOMY.maxOutputBytes;
+}
+
+// figma_inspect runs as ordinary plugin code over the bridge's cheap-read
+// helpers (bridge.find / summarize / inspect / check), so it needs no plugin
+// message type of its own and inherits the job ledger, target routing and
+// bridge.state.lastResult. Arguments travel as a JSON literal, never spliced
+// in as code.
+function buildInspectCode(args = {}) {
+  const ids = normalizeNodeIds(args.node_ids || args.node_id || args.ids);
+  const depth = Number(args.depth);
+  const limit = Number(args.limit);
+  const spec = {
+    ids: ids ? ids.split(",") : [],
+    depth: Number.isFinite(depth) ? Math.max(0, Math.min(6, Math.floor(depth))) : null,
+    props: Array.isArray(args.props) && args.props.length ? args.props.map(String) : null,
+    find: typeof args.find === "string" && args.find ? args.find : null,
+    type: typeof args.find_type === "string" && args.find_type ? args.find_type.toUpperCase() : null,
+    limit: Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 30,
+    check: args.check && typeof args.check === "object" ? args.check : null
+  };
+  const literal = JSON.stringify(spec); // ES2019+: U+2028/2029 are legal in string literals
+  return [
+    `const a = ${literal};`,
+    "const out = {};",
+    "let targets = a.ids;",
+    "if (a.find) {",
+    "  let hits = [], more = [];",
+    "  for (const root of (a.ids.length ? a.ids : [null])) {",
+    "    const opts = { limit: a.limit };",
+    "    if (root) opts.root = root;",
+    "    if (a.type) opts.type = a.type;",
+    "    for (const f of bridge.find(a.find, opts)) (typeof f === 'string' ? more : hits).push(f);",
+    "  }",
+    "  targets = hits.map(f => f.id);",
+    "  if (!targets.length) out.found = 'no matches';",
+    "  if (more.length) out.found_more = more;",
+    "}",
+    "const wantsRead = a.props || a.find || a.ids.length || !a.check;",
+    "if (wantsRead && (targets.length || !a.find)) {",
+    "  const refs = targets.length ? targets : [figma.currentPage];",
+    "  if (a.props) out.props = bridge.inspect(refs, a.props);",
+    "  else out[a.find ? 'found' : 'outline'] = bridge.summarize(refs, { depth: a.depth !== null ? a.depth : (a.find ? 0 : 1) });",
+    "}",
+    "if (a.check) out.check = bridge.check(a.check);",
+    "return out;"
+  ].join("\n");
 }
 
 async function handleCallTool(name, args = {}) {
@@ -1914,7 +2127,21 @@ async function handleCallTool(name, args = {}) {
           };
         }
 
-        return renderPluginResponse(response, null, { maxOutputChars: outputBudget(args) });
+        return renderPluginResponse(response, null, { maxOutputBytes: outputBudget(args) });
+      }
+
+      case "figma_inspect": {
+        const response = await sendCommandToPlugin({
+          code: buildInspectCode(args),
+          description: "Inspect",
+          target: args.target
+        }, TIMEOUTS.normal);
+        // A read has nothing to roll back or lint — keep only what was read.
+        return renderPluginResponse(
+          { result: response.result, resultStashed: response.resultStashed },
+          null,
+          { maxOutputBytes: outputBudget(args) }
+        );
       }
 
       case "figma_job_status": {
@@ -1926,7 +2153,7 @@ async function handleCallTool(name, args = {}) {
             });
 
         if (snap.status === "done") {
-          return renderPluginResponse(snap.response, { status: "done", job_id: snap.job_id }, { maxOutputChars: outputBudget(args) });
+          return renderPluginResponse(snap.response, { status: "done", job_id: snap.job_id }, { maxOutputBytes: outputBudget(args) });
         }
         if (snap.ok === false) {
           return {
@@ -1942,7 +2169,7 @@ async function handleCallTool(name, args = {}) {
         const format = args.format || "jsx";
         const requestedDepth = Number.isFinite(args.depth) ? args.depth : 6;
         const includeHidden = args.include_hidden === true;
-        const budgetTokens = Number.isFinite(args.budget_tokens) ? args.budget_tokens : 4000;
+        const budgetBytes = budgetBytesFromTokens(args.budget_tokens);
 
         const response = await sendCommandToPlugin({
           type: "READ_CANVAS",
@@ -1953,7 +2180,7 @@ async function handleCallTool(name, args = {}) {
         }, TIMEOUTS.normal);
 
         const rawData = response.result;
-        let output = applyTokenBudget(rawData, { format, includeHidden, maxDepth: requestedDepth, budgetTokens });
+        let output = applyTokenBudget(rawData, { format, includeHidden, maxDepth: requestedDepth, budgetBytes });
         if (rawData && rawData.truncatedTop) {
           output += `\n\n<!-- canvas traversal capped at 4000 nodes; some siblings were not sent. Narrow with node_ids. -->`;
         }
@@ -2305,7 +2532,7 @@ async function handleCallTool(name, args = {}) {
         const maxDepth = args.max_depth || 25;
         const includeHidden = args.include_hidden === true;
         const output = (simplify && format !== "raw" && Number.isFinite(args.budget_tokens))
-          ? applyTokenBudget(data, { format, includeHidden, maxDepth, budgetTokens: args.budget_tokens })
+          ? applyTokenBudget(data, { format, includeHidden, maxDepth, budgetBytes: budgetBytesFromTokens(args.budget_tokens) })
           : optimizeFigmaData(data, { format, simplify, maxDepth, includeHidden });
         return { content: [{ type: "text", text: output }] };
       }
@@ -2321,7 +2548,7 @@ async function handleCallTool(name, args = {}) {
         const maxDepth = args.max_depth || 25;
         const includeHidden = args.include_hidden === true;
         const output = (simplify && format !== "raw" && Number.isFinite(args.budget_tokens))
-          ? applyTokenBudget(data, { format, includeHidden, maxDepth, budgetTokens: args.budget_tokens })
+          ? applyTokenBudget(data, { format, includeHidden, maxDepth, budgetBytes: budgetBytesFromTokens(args.budget_tokens) })
           : optimizeFigmaData(data, { format, simplify, maxDepth, includeHidden });
         return { content: [{ type: "text", text: output }] };
       }
@@ -2630,6 +2857,7 @@ if (require.main === module) {
   // Pure helpers for tests (tests/token-economy.test.js); nothing is bound.
   module.exports = {
     TOOLS, SERVER_INSTRUCTIONS, ECONOMY, TIMEOUTS,
-    shrinkToBudget, pngSize, collectImages, buildStructuredResult, captureOptions, getActiveTools
+    shrinkToBudget, pngSize, collectImages, buildStructuredResult, captureOptions, getActiveTools,
+    buildInspectCode, applyTokenBudget, byteLength
   };
 }

@@ -51,6 +51,8 @@ async function main() {
     installOrUpdate,
     installLocations,
     CANONICAL_KEY,
+    figmaSettingsPath,
+    checkFigmaPluginRegistration,
   } = installer;
 
   console.log("\n== fresh install ==");
@@ -191,6 +193,51 @@ async function main() {
     const targets = getConfigTargets(home, undefined);
     check("nothing detected on a bare home dir", targets.length === 0, targets);
     fs.rmSync(home, { recursive: true, force: true });
+  }
+
+  console.log("\n== which plugin copy Figma runs ==");
+  {
+    const home = mkTempDir("figma-mcp-home-");
+    const appdata = path.join(home, "AppData", "Roaming");
+    check("no Figma settings -> unknown, not a false alarm", checkFigmaPluginRegistration(home, appdata).status === "unknown");
+
+    const settingsPath = figmaSettingsPath(home, appdata);
+    fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+    const writeSettings = (manifestPaths) => fs.writeFileSync(settingsPath, JSON.stringify({
+      localFileExtensions: [
+        { id: 1, manifestPath: path.join(home, "other-plugin", "manifest.json") },
+        ...manifestPaths.map((p, i) => ({ id: 10 + i, manifestPath: p }))
+      ]
+    }));
+    const seedManifest = (dir, id) => {
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, "manifest.json"), JSON.stringify({ id }));
+      return path.join(dir, "manifest.json");
+    };
+    seedManifest(path.join(home, "other-plugin"), "someone-else");
+
+    writeSettings([]);
+    check("Figma without our plugin -> none", checkFigmaPluginRegistration(home, appdata).status === "none");
+
+    const repoManifest = seedManifest(path.join(home, "src", "figma-mcp-bridge", "figma-plugin"), "antigravity-figma-bridge");
+    writeSettings([repoManifest]);
+    const wrong = checkFigmaPluginRegistration(home, appdata);
+    check("repo checkout registered -> wrong, naming it", wrong.status === "wrong" && wrong.wrong[0] === repoManifest, wrong);
+    check("...and pointing at the installed manifest", wrong.manifest === path.join(installLocations(home)[CANONICAL_KEY], "figma-plugin", "manifest.json"), wrong.manifest);
+
+    const installedManifest = seedManifest(path.join(installLocations(home).antigravity, "figma-plugin"), "antigravity-figma-bridge");
+    writeSettings([installedManifest]);
+    check("any installed copy registered -> ok", checkFigmaPluginRegistration(home, appdata).status === "ok");
+
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+
+  console.log("\n== repository plugin carries no token ==");
+  {
+    // install.mjs bakes the token into the INSTALLED copies only. A token in
+    // the source ui.html would be committed and pushed.
+    const ui = fs.readFileSync(path.join(__dirname, "..", "figma-plugin", "ui.html"), "utf-8");
+    check("figma-plugin/ui.html keeps the empty BRIDGE_TOKEN placeholder", ui.includes('const BRIDGE_TOKEN = "";'));
   }
 
   console.log(`\n${failures === 0 ? "All install.mjs checks passed." : failures + " check(s) FAILED."}`);

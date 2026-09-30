@@ -246,13 +246,13 @@ for *fewer turns* and *smaller residue*:
 |---|---|---|
 | Screenshots | `scale: 1`, longest side `max_px: 1024`, at most 3 images per call | image tokens scale with pixel area (~w·h/750); each image is described as `800x600 ~640tok` |
 | `capture` on insert/mode tools | off | the auto-lint `warnings` catch mechanical defects without an image |
-| Text results | compact JSON; `figma_execute_code` results over `max_output_chars` (6000) are shrunk structurally | the full value stays in `bridge.state.lastResult` for the next call to filter |
-| Cheap reads in the sandbox | `bridge.summarize` / `inspect` / `find` / `check` | one-line-per-node outlines and pass/fail lists instead of raw node dumps |
+| Text results | compact JSON; every response is kept under `max_output_bytes` (3500 UTF-8 bytes, whole envelope) by structural shrinking | some clients (Antigravity) spill output over ~4 KB into a file the model must open with an extra call; the full value stays in `bridge.state.lastResult` |
+| Cheap reads | `figma_inspect` (many ids per call), and `bridge.summarize` / `inspect` / `find` / `check` inside code | one-line-per-node outlines and pass/fail lists instead of one hand-written dump per call |
 | Plugin reloads | calls wait up to 8s for the plugin to reconnect | a failure costs a turn to read and another to retry |
 | Server instructions | ≈1.9k chars, economy rules first | some clients truncate instructions at ~2000 chars |
 
 Every default is overridable per call, and per install through env: `FIGMA_MCP_SCALE`,
-`FIGMA_MCP_MAX_PX`, `FIGMA_MCP_MAX_IMAGES`, `FIGMA_MCP_MAX_OUTPUT_CHARS`, `FIGMA_MCP_JOB_WAIT_MS`,
+`FIGMA_MCP_MAX_PX`, `FIGMA_MCP_MAX_IMAGES`, `FIGMA_MCP_MAX_OUTPUT_BYTES`, `FIGMA_MCP_JOB_WAIT_MS`,
 `FIGMA_MCP_ESCALATE_MS`, `FIGMA_MCP_RECONNECT_GRACE_MS`.
 
 ---
@@ -279,8 +279,9 @@ something that would only return `REST_TOKEN_MISSING`.
 
 | Tool | Description |
 | :--- | :--- |
-| `figma_execute_code` | Run JS in the Figma sandbox. Injects `figma`, `ensureFont`, `getFreePosition`, `progress`, `bridge`. Supports `capture`, `capture_node_ids`, `diff`, `max_px`, `max_output_chars`, `async`, `target`. |
-| `figma_read_canvas` | Token-optimized read of the **live** document (`jsx` / `tree` / `json`) with `budget_tokens`. |
+| `figma_execute_code` | Run JS in the Figma sandbox. Injects `figma`, `ensureFont`, `getFreePosition`, `progress`, `bridge`. Supports `capture`, `capture_node_ids`, `diff`, `max_px`, `max_output_bytes`, `async`, `target`. |
+| `figma_inspect` | Read many live nodes in one call: compact outline, exact `props`, name `find`, or `check` expectations (mismatches only). Changes nothing. |
+| `figma_read_canvas` | Token-optimized read of the **live** document (`jsx` / `tree` / `json`) with `budget_tokens` (default: the server's byte budget). |
 | `figma_screenshot` | PNG of specific `node_ids` or the current selection, sized by `max_px`. |
 | `figma_find_components` | Cached, tokenized, fuzzy component search — variants, properties, keys. |
 | `figma_insert_component_instance` | Instantiate a component/variant, apply text overrides, place into AutoLayout. |

@@ -291,6 +291,7 @@ check("explicit larger max_px is honoured", Math.round(2000 * computeCaptureScal
 check("pixel cap still applies above max_px", 20000 * 20000 * Math.pow(computeCaptureScale(20000, 20000, 1, 100000), 2) <= 4000001);
 
 console.log("\n== cheap reads: summarize / inspect / find / check ==");
+let inspectDone = Promise.resolve();
 {
   const api = createBridgeApi();
   const card = makeNode("FRAME", "Card", {
@@ -331,7 +332,29 @@ console.log("\n== cheap reads: summarize / inspect / find / check ==");
   check("check: failures name key, want and got", bad.fail.length === 1 && bad.fail[0].key === "width" && bad.fail[0].got === 320 && bad.pass === 1, bad);
   check("check: missing nodes are listed", bad.missing.join() === "9:9", bad);
   check("info() documents the cheap reads", Object.keys(api.info().cheapReads || {}).length >= 5);
+
+  // figma_inspect is server-generated code over these same helpers: run what
+  // the server would send, against the real runtime.
+  const { buildInspectCode } = require(path.join(ROOT, "figma", "index.js"));
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+  const inspect = (args) => new AsyncFunction("figma", "bridge", buildInspectCode(args))(figma, api);
+  inspectDone = (async () => {
+    const two = await inspect({ node_ids: [card.id, title.id], depth: 0 });
+    check("figma_inspect: several ids -> one outline, one line each", two.outline.split("\n").length === 2 && !two.props, two);
+    const props = await inspect({ node_ids: [card.id], props: ["width", "fill"] });
+    check("figma_inspect: props -> exact values, no outline", props.props[card.id].width === 320 && props.props[card.id].fill === "#FFFFFF" && !props.outline, props);
+    const found = await inspect({ node_ids: [card.id], find: "row 1", props: ["width"] });
+    check("figma_inspect: find + props reads the matches", Object.keys(found.props).length === 11, found);
+    const miss = await inspect({ find: "no such layer" });
+    check("figma_inspect: find with no hits says so", miss.found === "no matches" && !miss.outline, miss);
+    const onlyCheck = await inspect({ check: { [card.id]: { width: 300 } } });
+    check("figma_inspect: check alone reads nothing else", onlyCheck.check.fail.length === 1 && !onlyCheck.outline, onlyCheck);
+    const page = await inspect({});
+    check("figma_inspect: no args outlines the current page", /^PAGE "Page 1"/.test(page.outline), page);
+  })();
 }
 
-console.log(failures === 0 ? "\nALL PASS" : "\n" + failures + " FAILURES");
-process.exit(failures ? 1 : 0);
+inspectDone.then(() => {
+  console.log(failures === 0 ? "\nALL PASS" : "\n" + failures + " FAILURES");
+  process.exit(failures ? 1 : 0);
+}, (e) => { console.error(e); process.exit(1); });

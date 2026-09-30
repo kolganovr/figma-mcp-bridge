@@ -1127,7 +1127,7 @@
     // Bumped alongside SERVER_VERSION in figma/index.js — an installed plugin
     // reporting a different version than the connected server is how the
     // Diagnostics banner catches "server was updated, plugin wasn't reloaded".
-    const PLUGIN_VERSION = "4.1.0";
+    const PLUGIN_VERSION = "4.2.0";
 
     // Material Symbols path data (Apache-2.0, Google) inlined as <svg> — the
     // panel previously leaned on emoji for status icons, which render as a
@@ -1743,7 +1743,9 @@
         const res = await fetch(withToken(`${SERVER_URL}/status`));
         if (res.status === 403) {
           tokenMismatchShown = true;
-          setOfflineState('Bridge token mismatch. Close and re-open this plugin (Ctrl+Alt+P / Cmd+Option+P) to pick up the current token, or re-run install.py --update.');
+          setOfflineState(BRIDGE_TOKEN
+            ? 'Bridge token mismatch. Close and re-open this plugin (Ctrl+Alt+P / Cmd+Option+P) to pick up the current token, or re-run node install.mjs --update.'
+            : 'This plugin copy has no bridge token: it is the source checkout, not the installed copy. Import manifest.json from the folder install.mjs created (node install.mjs --doctor prints it) and remove this entry. Do not paste the token into ui.html.');
         }
       } catch (e) {}
     }

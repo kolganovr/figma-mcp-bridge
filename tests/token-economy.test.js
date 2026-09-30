@@ -108,6 +108,14 @@ function startFakePlugin() {
         const rows = Array.from({ length: 400 }, (_, i) => ({ id: "1:" + i, name: "Row " + i, fills: [{ type: "SOLID", color: { r: 1, g: 1, b: 1 } }] }));
         return reply({ id: cmd.id, result: { rows }, resultStashed: true });
       }
+      if (cmd.code === "cyr") { // Cyrillic is 2 bytes per char in UTF-8
+        const rows = Array.from({ length: 120 }, (_, i) => ({ id: "2:" + i, name: "Строка таблицы сотрудников " + i }));
+        return reply({ id: cmd.id, result: { rows }, resultStashed: true, checkpointId: "cp_3",
+          created: Array.from({ length: 300 }, (_, i) => "3:" + i) });
+      }
+      if (/^const a = /.test(cmd.code || "")) { // figma_inspect's generated read
+        return reply({ id: cmd.id, result: { outline: "FRAME \"Card\" #1:2 320x200" }, resultStashed: true, checkpointId: "cp_2" });
+      }
       const slow = /^slow:(\d+)$/.exec(cmd.code || "");
       if (slow) { await sleep(Number(slow[1])); return reply({ id: cmd.id, result: { slept: Number(slow[1]) }, resultStashed: true }); }
       if (cmd.code === "hang") { busy = true; return; } // never answers, like a frozen sandbox
@@ -156,8 +164,11 @@ async function main() {
   const byName = Object.fromEntries(list.result.tools.map(t => [t.name, t]));
   check("figma_job_status takes wait_ms", !!byName.figma_job_status.inputSchema.properties.wait_ms);
   check("figma_screenshot takes max_px", !!byName.figma_screenshot.inputSchema.properties.max_px);
-  check("figma_execute_code takes max_output_chars and max_px",
-    !!byName.figma_execute_code.inputSchema.properties.max_output_chars && !!byName.figma_execute_code.inputSchema.properties.max_px);
+  check("figma_execute_code takes max_output_bytes and max_px",
+    !!byName.figma_execute_code.inputSchema.properties.max_output_bytes && !!byName.figma_execute_code.inputSchema.properties.max_px);
+  check("figma_inspect is listed and takes many node_ids", byName.figma_inspect && byName.figma_inspect.inputSchema.properties.node_ids.type === "array");
+  check("execute_code's own description steers reads to figma_inspect and captures onto the write call",
+    /figma_inspect/.test(byName.figma_execute_code.description) && /capture_node_ids/.test(byName.figma_execute_code.description));
 
   await sleep(300); // let the master bind before the plugin dials in
   let plugin = startFakePlugin();
@@ -173,13 +184,24 @@ async function main() {
     check("plugin is sent scale 1 and max_px 1024 by default", execCmd.scale === 1 && execCmd.max_px === 1024, execCmd);
 
     const big = await master.tool("figma_execute_code", { code: "big" });
-    check("oversized result is shrunk under the default budget", big.text.length < 6800, big.text.length);
+    check("oversized result: whole response fits the default 3500-byte budget", Buffer.byteLength(big.text) <= 3500, Buffer.byteLength(big.text));
     check("shrunk result says so and points at bridge.state.lastResult",
       big.body && /shrunk \d+→\d+/.test(big.body.truncated) && /bridge\.state\.lastResult/.test(big.body.truncated), big.body && big.body.truncated);
     check("shrunk result keeps its shape (rows array + more-marker)",
       Array.isArray(big.body.result.rows) && /more \(400 total\)/.test(big.body.result.rows[big.body.result.rows.length - 1]));
-    const full = await master.tool("figma_execute_code", { code: "big", max_output_chars: 0 });
-    check("max_output_chars: 0 disables the cap", full.body && full.body.result.rows.length === 400 && !full.body.truncated);
+    const full = await master.tool("figma_execute_code", { code: "big", max_output_bytes: 0 });
+    check("max_output_bytes: 0 disables the cap", full.body && full.body.result.rows.length === 400 && !full.body.truncated);
+    const legacy = await master.tool("figma_execute_code", { code: "big", max_output_chars: 0 });
+    check("pre-4.2 max_output_chars is still honoured", legacy.body && legacy.body.result.rows.length === 400);
+    const cyr = await master.tool("figma_execute_code", { code: "cyr" });
+    check("Cyrillic result + long created list: the WHOLE envelope stays under budget in bytes",
+      Buffer.byteLength(cyr.text) <= 3500 && cyr.body.truncated && cyr.body.checkpoint_id === "cp_3", Buffer.byteLength(cyr.text));
+
+    console.log("\n== figma_inspect ==");
+    const insp = await master.tool("figma_inspect", { node_ids: ["1-2", "3:4"], props: ["width"] });
+    const inspCmd = plugin.received[plugin.received.length - 1];
+    check("figma_inspect runs as one EXECUTE over the bridge helpers", /bridge\.inspect/.test(inspCmd.code) && /"ids":\["1:2","3:4"\]/.test(inspCmd.code), inspCmd.code);
+    check("figma_inspect returns the read without checkpoint noise", insp.body && insp.body.result.outline && !insp.body.checkpoint_id, insp.text);
 
     console.log("\n== long-poll jobs ==");
     const t0 = Date.now();
@@ -256,6 +278,30 @@ async function main() {
   } finally {
     try { plugin.close(); } catch (e) {}
     await master.stop();
+  }
+
+  console.log("\n== wrong plugin copy (no token) is named, not reported as offline ==");
+  {
+    const REJECT_PORT = PORT + 2;
+    const server = startServer({ FIGMA_BRIDGE_PORT: String(REJECT_PORT) });
+    try {
+      await server.call("initialize", { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "test", version: "0" } });
+      await sleep(300);
+      // What the repo checkout's ui.html does: dial in with no token at all.
+      await new Promise((resolve) => {
+        const ws = new WebSocket(`ws://127.0.0.1:${REJECT_PORT}/`);
+        ws.onopen = () => { ws.close(); resolve(); };
+        ws.onerror = () => resolve();
+        ws.onclose = () => resolve();
+      });
+      const res = await server.tool("figma_execute_code", { code: "ok" });
+      check("a tokenless plugin -> PLUGIN_TOKEN_REJECTED", res.isError && res.body && res.body.code === "PLUGIN_TOKEN_REJECTED", res.body);
+      check("...naming the installed manifest and forbidding a token in source",
+        res.body && /Import plugin from manifest/.test(res.body.error) && /figma-plugin[\\/]manifest\.json/.test(res.body.error) && /Do NOT write the token/.test(res.body.error), res.body && res.body.error);
+      check("...without the generic 'launch the plugin' hint on top", res.body && !/launch the Antigravity Bridge plugin/.test(res.body.error), res.body && res.body.error);
+    } finally {
+      await server.stop();
+    }
   }
 
   console.log(failures === 0 ? "\nALL PASS" : "\n" + failures + " FAILURES");
