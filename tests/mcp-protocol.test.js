@@ -86,6 +86,7 @@ async function main() {
     const init = await server.call("initialize", { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "test", version: "0" } });
     check("initialize responds with serverInfo.name", init.result && init.result.serverInfo && init.result.serverInfo.name === "figma-mcp", init);
     check("initialize advertises tools capability", init.result && init.result.capabilities && "tools" in init.result.capabilities, init);
+    check("serverInfo.version is 4.2.1", init.result.serverInfo.version === "4.2.1", init.result.serverInfo);
     check("initialize instructions mention figma_read_canvas", /figma_read_canvas/.test(init.result.instructions || ""), init.result && init.result.instructions);
 
     const list = await server.call("tools/list", {});
@@ -94,6 +95,14 @@ async function main() {
     check("REST tools are HIDDEN without a token (tool-tiering, §4.7)", !names.includes("get_file") && !names.includes("get_styles"), names);
     check("legacy tools are hidden by default", !names.includes("figma_create_ui_card") && !names.includes("get_me"), names);
     check("no duplicate tool names", new Set(names).size === names.length, names);
+    const byName = Object.fromEntries(list.result.tools.map(t => [t.name, t]));
+    const inspectProps = (byName.figma_inspect && byName.figma_inspect.inputSchema.properties) || {};
+    check("figma_inspect declares view (outline|map), context, find_text and offset",
+      inspectProps.view && inspectProps.view.enum.join() === "outline,map" && inspectProps.context.type === "boolean" &&
+      inspectProps.find_text.type === "string" && inspectProps.offset.type === "number", Object.keys(inspectProps));
+    check("figma_inspect props description mentions reactions and connector", /reactions/.test(inspectProps.props.description) && /connector/.test(inspectProps.props.description));
+    check("figma_execute_code description lists the bridge macros",
+      /replaceWithInstance/.test(byName.figma_execute_code.description) && /fitSection/.test(byName.figma_execute_code.description) && /bridge\.context/.test(byName.figma_execute_code.description));
     for (const t of list.result.tools) {
       check(`tool "${t.name}" has a non-empty description`, typeof t.description === "string" && t.description.length > 10);
       check(`tool "${t.name}" declares an object inputSchema`, t.inputSchema && t.inputSchema.type === "object");
@@ -127,6 +136,14 @@ async function main() {
       check("figma_execute_code fails fast (< 5s) with no plugin connected", execElapsed < 5000, execElapsed);
       check("figma_execute_code with no plugin connected is flagged isError", exec.result.isError === true, exec.result);
       check("figma_execute_code with no plugin connected carries NO_CONNECTED_CLIENTS", execBody.ok === false && execBody.code === "NO_CONNECTED_CLIENTS", execBody);
+
+      // A syntax error must be caught BEFORE the plugin is involved: with no
+      // plugin connected it would otherwise come back as NO_CONNECTED_CLIENTS.
+      const bad = await masterServer.call("tools/call", { name: "figma_execute_code", arguments: { code: "const a = 1;\nconst b = 2;\nconst c = ;\nreturn a;" } });
+      const badBody = JSON.parse(bad.result.content[0].text);
+      check("a syntax error is reported as SCRIPT_SYNTAX_ERROR without reaching the plugin", bad.result.isError === true && badBody.code === "SCRIPT_SYNTAX_ERROR", badBody);
+      check("...with the line of the agent's code (3) and that line", badBody.line === 3 && badBody.at === "const c = ;", badBody);
+      check("...and the async-function-body hint", /async function body/.test(badBody.error) && /import\/export/.test(badBody.error), badBody);
     } finally {
       await masterServer.stop();
     }

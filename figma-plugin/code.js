@@ -522,14 +522,26 @@ function describeNodeLine(n, textChars) {
   return parts.join(" ");
 }
 
-// Indented outline, one line per node. opts: depth (2), maxChildren (15), text (40).
+// view:"map" — the cheapest useful line: TYPE "name" #id WxH @x,y children:N.
+// No fills/fonts/text, so a whole page outline costs a fraction of the full view.
+function describeMapLine(n) {
+  if (!n) return "MISSING";
+  const parts = [n.type, JSON.stringify(n.name), "#" + n.id];
+  if (typeof n.width === "number") parts.push(readRound(n.width) + "x" + readRound(n.height));
+  if (typeof n.x === "number" && n.type !== "PAGE") parts.push("@" + readRound(n.x) + "," + readRound(n.y));
+  if ("children" in n && n.children && n.children.length) parts.push("children:" + n.children.length);
+  return parts.join(" ");
+}
+
+// Indented outline, one line per node. opts: depth (2), maxChildren (15), text (40),
+// view ("map" = geometry only, see describeMapLine).
 function summarizeNodes(refs, opts) {
   const o = opts || {};
   const depth = Number.isFinite(o.depth) ? o.depth : 2;
   const maxChildren = Number.isFinite(o.maxChildren) ? o.maxChildren : 15;
   const lines = [];
   const walk = (n, level) => {
-    lines.push("  ".repeat(level) + describeNodeLine(n, o.text));
+    lines.push("  ".repeat(level) + (o.view === "map" ? describeMapLine(n) : describeNodeLine(n, o.text)));
     if (!n || level >= depth || !("children" in n) || !n.children) return;
     const kids = n.children;
     kids.slice(0, maxChildren).forEach(k => walk(k, level + 1));
@@ -568,8 +580,37 @@ const READ_PROPS = {
     Object.keys(n.componentProperties).forEach(k => { out[k.replace(/#\d+:\d+$/, "")] = n.componentProperties[k].value; });
     return out;
   },
-  absolute: n => (n.absoluteBoundingBox ? ["x", "y", "width", "height"].map(k => readRound(n.absoluteBoundingBox[k])) : null)
+  absolute: n => (n.absoluteBoundingBox ? ["x", "y", "width", "height"].map(k => readRound(n.absoluteBoundingBox[k])) : null),
+  reactions: n => readReactions(n),
+  connector: n => (n.type === "CONNECTOR"
+    ? { start: connectorEndpoint(n.connectorStart), end: connectorEndpoint(n.connectorEnd) }
+    : null)
 };
+
+function connectorEndpoint(ep) {
+  return ep && ep.endpointNodeId ? ep.endpointNodeId : null;
+}
+
+// Prototype links as short strings: "ON_CLICK→NODE/OVERLAY #183:80012". Handles
+// reactions[].actions[] (current API) and the legacy reaction.action.
+function readReactions(n) {
+  if (!Array.isArray(n.reactions)) return null;
+  const out = [];
+  n.reactions.forEach(r => {
+    if (!r) return;
+    const trigger = r.trigger && r.trigger.type ? r.trigger.type : "?";
+    const actions = Array.isArray(r.actions) && r.actions.length ? r.actions : (r.action ? [r.action] : []);
+    if (actions.length === 0) out.push(trigger);
+    actions.forEach(a => {
+      if (!a) return;
+      let s = trigger + "→" + (a.type || "?") + (a.navigation ? "/" + a.navigation : "");
+      if (a.destinationId) s += " #" + a.destinationId;
+      else if (a.url) s += " " + a.url;
+      out.push(s);
+    });
+  });
+  return out;
+}
 
 function readProp(n, key) {
   if (READ_PROPS[key]) return READ_PROPS[key](n);
@@ -598,21 +639,69 @@ function inspectNodes(refs, props) {
   return out;
 }
 
-// Name search under a root (default: current page). query: substring
-// (case-insensitive) or RegExp. opts: root, type (string or array), limit (20).
+// Runs fn with figma.skipInvisibleInstanceChildren = true and puts the previous
+// value back in `finally`. NEVER left on globally: agents legitimately toggle
+// hidden layers inside instances, and those would vanish from every later read.
+function withSkipInvisible(fn) {
+  const canSkip = typeof figma.skipInvisibleInstanceChildren === "boolean";
+  const prev = canSkip ? figma.skipInvisibleInstanceChildren : undefined;
+  try {
+    if (canSkip) figma.skipInvisibleInstanceChildren = true;
+    return fn();
+  } finally {
+    if (canSkip) {
+      try { figma.skipInvisibleInstanceChildren = prev; } catch (e) {}
+    }
+  }
+}
+
+// All descendants of `root` (never root itself) of the given types (or every
+// node when types is empty), narrowed by pred. Uses findAllWithCriteria — much
+// faster than findAll on big files — when the method exists.
+function scanNodes(root, types, pred) {
+  if (!root || typeof root.findAll !== "function") return [];
+  const typed = types && types.length ? types : null;
+  const ok = n => (!typed || typed.indexOf(n.type) !== -1) && (!pred || pred(n));
+  if (typed && typeof root.findAllWithCriteria === "function") {
+    return root.findAllWithCriteria({ types: typed }).filter(ok);
+  }
+  return root.findAll(ok);
+}
+
+// The top-level frame/section (direct child of the page) that holds `n`.
+function topContainerOf(n) {
+  let cur = n;
+  while (cur && cur.parent && cur.parent.type !== "PAGE" && cur.parent.type !== "DOCUMENT") cur = cur.parent;
+  return cur;
+}
+
+// Search under a root (default: current page). query: substring
+// (case-insensitive) or RegExp. opts: root, type (string or array), limit (20),
+// text (true = match TEXT `characters` instead of layer names).
 function findNodes(query, opts) {
   const o = opts || {};
   const root = o.root ? readNode(o.root) : figma.currentPage;
   if (!root) throw new Error("bridge.find: root " + o.root + " does not exist");
-  const types = o.type ? (Array.isArray(o.type) ? o.type : [o.type]) : null;
+  const textMode = o.text === true;
+  const types = textMode ? ["TEXT"] : (o.type ? (Array.isArray(o.type) ? o.type : [o.type]) : null);
   const limit = Number.isFinite(o.limit) ? o.limit : 20;
   const test = query instanceof RegExp
-    ? (name) => query.test(name)
-    : (name) => String(name).toLowerCase().indexOf(String(query == null ? "" : query).toLowerCase()) !== -1;
-  const matches = "findAll" in root
-    ? root.findAll(n => (!types || types.indexOf(n.type) !== -1) && test(n.name))
-    : [];
-  const out = matches.slice(0, limit).map(n => ({ id: n.id, name: n.name, type: n.type }));
+    ? (s) => { query.lastIndex = 0; return query.test(s); }
+    : (s) => String(s).toLowerCase().indexOf(String(query == null ? "" : query).toLowerCase()) !== -1;
+  // Page-wide searches skip invisible instance children (the slow part on big
+  // files); a scoped search (root given) still sees hidden layers inside
+  // instances, which agents look up to toggle them on.
+  const scan = () => scanNodes(root, types, n => (textMode ? test(String(n.characters == null ? "" : n.characters)) : test(n.name)));
+  const matches = root.type === "PAGE" ? withSkipInvisible(scan) : scan();
+  const out = matches.slice(0, limit).map(n => {
+    if (!textMode) return { id: n.id, name: n.name, type: n.type };
+    const top = topContainerOf(n);
+    return {
+      id: n.id, name: n.name, type: n.type,
+      text: String(n.characters || "").slice(0, 40),
+      frame: top ? top.name + " #" + top.id : null
+    };
+  });
   if (matches.length > limit) out.push("… +" + (matches.length - limit) + " more (" + matches.length + " total) — narrow with root/type/limit");
   return out;
 }
@@ -656,8 +745,201 @@ function checkNodes(specs, opts) {
   return result;
 }
 
+// Loads every distinct font a text node uses, once.
+// The previous version walked a mixed-font node character by character and
+// awaited loadFontAsync for each one: a 4000-character paragraph meant 4000
+// sequential round-trips and the whole tool call timed out.
+async function loadFontsForTextNode(textNode) {
+  const wanted = [];
+  const seen = new Set();
+
+  const remember = (font) => {
+    if (!font || !font.family) return;
+    const id = font.family + "|" + font.style;
+    if (seen.has(id)) return;
+    seen.add(id);
+    wanted.push(font);
+  };
+
+  if (textNode.fontName === figma.mixed) {
+    if (typeof textNode.getStyledTextSegments === 'function') {
+      for (const segment of textNode.getStyledTextSegments(['fontName'])) {
+        remember(segment.fontName);
+      }
+    } else {
+      // Fallback for older plugin API builds. getRangeFontName is synchronous
+      // and cheap — it was the per-character *await* that made this quadratic,
+      // so collecting first and awaiting the deduped set is enough.
+      const len = textNode.characters.length;
+      for (let i = 0; i < len; i++) {
+        const font = textNode.getRangeFontName(i, i + 1);
+        if (font !== figma.mixed) remember(font);
+      }
+    }
+  } else {
+    remember(textNode.fontName);
+  }
+
+  for (const font of wanted) {
+    await ensureFont(font.family, font.style);
+  }
+}
+
+// ==========================================================================
+// Macros + context — one call instead of a hand-written recipe
+// --------------------------------------------------------------------------
+// setProps / setText / replaceWithInstance / shift / moveInto / fitSection are
+// the operations agents kept re-deriving (and getting subtly wrong) inside
+// figma_execute_code. Each snapshots the EXISTING nodes it changes through the
+// same journal as bridge.snapshot, so figma_rollback can restore them.
+// ==========================================================================
+function macroNodes(refs, who) {
+  return (Array.isArray(refs) ? refs : [refs]).map(ref => {
+    const n = readNode(ref);
+    if (!n) throw new Error("bridge." + who + ": node " + (typeof ref === "string" ? ref : String(ref)) + " does not exist");
+    return n;
+  });
+}
+
+function propBaseName(key) {
+  return String(key).replace(/#\d+:\d+$/, "");
+}
+
+// The definitions live on the COMPONENT_SET for variants, on the component otherwise.
+function propHolderOf(component) {
+  if (!component) return null;
+  return component.parent && component.parent.type === "COMPONENT_SET" ? component.parent : component;
+}
+
+function describeInstanceProps(inst) {
+  const current = inst.componentProperties || {};
+  let defs = null;
+  try {
+    const holder = propHolderOf(inst.mainComponent);
+    defs = holder ? holder.componentPropertyDefinitions : null;
+  } catch (e) {}
+  return Object.keys(current).map(k => {
+    const t = current[k].type;
+    const d = defs && defs[k];
+    const opts = t === "VARIANT" && d && Array.isArray(d.variantOptions) ? ": " + d.variantOptions.join("|") : "";
+    return propBaseName(k) + " (" + t + opts + ")";
+  }).join(", ");
+}
+
+// COMPONENT -> itself, COMPONENT_SET -> defaultVariant, INSTANCE -> mainComponent; ids resolved.
+function resolveComponent(ref, who) {
+  const n = readNode(ref);
+  if (!n) throw new Error("bridge." + who + ": component " + (typeof ref === "string" ? ref : String(ref)) + " does not exist");
+  if (n.type === "COMPONENT") return n;
+  if (n.type === "COMPONENT_SET") {
+    if (!n.defaultVariant) throw new Error("bridge." + who + ": component set \"" + n.name + "\" has no default variant");
+    return n.defaultVariant;
+  }
+  if (n.type === "INSTANCE") {
+    let main = null;
+    try { main = n.mainComponent; } catch (e) {}
+    if (!main) throw new Error("bridge." + who + ": instance \"" + n.name + "\" has no main component");
+    return main;
+  }
+  throw new Error("bridge." + who + ": expected COMPONENT, COMPONENT_SET or INSTANCE, got " + n.type + " \"" + n.name + "\"");
+}
+
+function insideInstance(node) {
+  for (let p = node.parent; p; p = p.parent) if (p.type === "INSTANCE") return p;
+  return null;
+}
+
+function hasAutoLayout(n) {
+  return !!n && "layoutMode" in n && !!n.layoutMode && n.layoutMode !== "NONE";
+}
+
+function widthFrequencies(nodes, types, limit) {
+  const freq = new Map();
+  nodes.forEach(n => {
+    if (!n || types.indexOf(n.type) === -1 || typeof n.width !== "number") return;
+    const w = readRound(n.width);
+    freq.set(w, (freq.get(w) || 0) + 1);
+  });
+  return Array.from(freq.entries())
+    .sort((a, b) => b[1] - a[1] || a[0] - b[0])
+    .slice(0, limit)
+    .map(e => ({ w: e[0], n: e[1] }));
+}
+
+function nodeRef(n) {
+  return n.type + " " + JSON.stringify(n.name) + " #" + n.id;
+}
+
+// Component sets (or plain components) whose instances live inside `node`, most
+// used first: { set: "name #id", used, props: { Status: [options] | "BOOLEAN" | ... } }.
+function usedComponentSets(node, limit) {
+  const insts = [];
+  if (node.type === "INSTANCE") insts.push(node);
+  withSkipInvisible(() => { scanNodes(node, ["INSTANCE"]).forEach(i => insts.push(i)); });
+  const groups = new Map();
+  insts.forEach(inst => {
+    let main = null;
+    try { main = inst.mainComponent; } catch (e) {}
+    const holder = propHolderOf(main);
+    if (!holder) return;
+    const g = groups.get(holder.id) || { holder: holder, used: 0 };
+    g.used++;
+    groups.set(holder.id, g);
+  });
+  return Array.from(groups.values())
+    .sort((a, b) => b.used - a.used)
+    .slice(0, limit)
+    .map(g => {
+      const entry = { set: g.holder.name + " #" + g.holder.id, used: g.used };
+      let defs = null;
+      try { defs = g.holder.componentPropertyDefinitions; } catch (e) {}
+      const props = {};
+      Object.keys(defs || {}).slice(0, 10).forEach(k => {
+        const d = defs[k];
+        if (d.type === "VARIANT" && Array.isArray(d.variantOptions)) {
+          props[propBaseName(k)] = d.variantOptions.length > 8 ? d.variantOptions.slice(0, 8).concat("…") : d.variantOptions.slice();
+        } else {
+          props[propBaseName(k)] = d.type;
+        }
+      });
+      if (Object.keys(props).length) entry.props = props;
+      return entry;
+    });
+}
+
+// Layout context of one node, compact enough to read before every build step.
+function contextOf(node, conventions) {
+  const ancestors = [];
+  let page = null;
+  for (let p = node.parent; p && p.type !== "DOCUMENT"; p = p.parent) {
+    ancestors.unshift(nodeRef(p));
+    if (p.type === "PAGE") page = p;
+  }
+  if (!page) page = figma.currentPage;
+
+  const FRAMES = ["FRAME", "COMPONENT"];
+  const siblings = node.parent && node.parent.children
+    ? widthFrequencies(node.parent.children.filter(c => c !== node), FRAMES, 6)
+    : [];
+
+  const top = (page.children || []).slice();
+  const pool = top.slice();
+  top.forEach(t => { if (t.type === "SECTION" && t.children) t.children.forEach(c => pool.push(c)); });
+
+  const out = {
+    node: { id: node.id, name: node.name, type: node.type, w: readRound(node.width), h: readRound(node.height) },
+    ancestors: ancestors,
+    siblings: siblings,
+    pageWidths: widthFrequencies(pool, FRAMES, 6),
+    components: usedComponentSets(node, 12),
+    conventions: conventions === undefined ? null : conventions
+  };
+  return out;
+}
+
 function createBridgeApi() {
   const api = {};
+  let proxy = null;   // the object handed out; module sources get it too
 
   // --- ephemeral scratch: survives calls, dies on plugin reload ------------
   api.state = BRIDGE_STATE;
@@ -683,7 +965,7 @@ function createBridgeApi() {
 
   // --- reusable code modules ----------------------------------------------
   api.define = function (name, source) {
-    const exported = bridgeCompile(name, source, api);   // fail fast before saving
+    const exported = bridgeCompile(name, source, proxy || api);   // fail fast before saving
     bridgeWrite("mod:" + name, source);
     bridgeIndexAdd("mod", name);
     return exported;
@@ -698,7 +980,7 @@ function createBridgeApi() {
         "Create it with bridge.define(\"" + name + "\", \"...source ending in module.exports = {...}...\")."
       );
     }
-    return bridgeCompile(name, source, api);
+    return bridgeCompile(name, source, proxy || api);
   };
 
   api.list = function () {
@@ -760,12 +1042,205 @@ function createBridgeApi() {
     return node;
   };
 
+  // --- write macros ---------------------------------------------------------
+  // Set component properties by readable name: "Label" matches "Label#12:3"
+  // (case-insensitive), INSTANCE_SWAP takes a component node or id.
+  api.setProps = function (instance, props) {
+    const inst = readNode(instance);
+    if (!inst || inst.type !== "INSTANCE") {
+      throw new Error("bridge.setProps: expected an INSTANCE, got " + (inst ? inst.type + " \"" + inst.name + "\"" : String(instance)));
+    }
+    const current = inst.componentProperties || {};
+    const keys = Object.keys(current);
+    const norm = s => propBaseName(s).trim().toLowerCase();
+    const patch = {};
+    Object.keys(props || {}).forEach(name => {
+      let key = keys.indexOf(name) !== -1 ? name : null;
+      if (!key) {
+        const want = norm(name);
+        key = keys.find(k => norm(k) === want) || null;
+      }
+      if (!key) {
+        throw new Error(
+          "bridge.setProps: instance \"" + inst.name + "\" has no property \"" + name + "\". Available: " +
+          (describeInstanceProps(inst) || "none")
+        );
+      }
+      let val = props[name];
+      if (current[key].type === "INSTANCE_SWAP" && val !== null && val !== undefined) {
+        try { val = resolveComponent(val, "setProps").id; } catch (e) { /* raw id of a not-yet-imported component */ }
+      }
+      patch[key] = val;
+    });
+    if (Object.keys(patch).length) {
+      trackModification(inst);
+      inst.setProperties(patch);
+    }
+    return inst;
+  };
+
+  // Sets text by layer id or exact layer name under root (or root itself).
+  // Async: every font used by a node is loaded first. Nothing is written unless
+  // every key resolved.
+  api.setText = async function (root, map) {
+    const r = macroNodes(root, "setText")[0];
+    const texts = (r.type === "TEXT" ? [r] : []).concat(scanNodes(r, ["TEXT"]));
+    const plan = [];
+    Object.keys(map || {}).forEach(key => {
+      const id = key.replace(/-/g, ":");
+      let hits = texts.filter(t => t.id === id);
+      if (hits.length === 0) hits = texts.filter(t => t.name === key);
+      if (hits.length === 0) {
+        const names = texts.slice(0, 20).map(t => JSON.stringify(t.name) + " #" + t.id).join(", ");
+        throw new Error(
+          "bridge.setText: no TEXT layer \"" + key + "\" under \"" + r.name + "\". Text layers: " +
+          (names || "none") + (texts.length > 20 ? ", … +" + (texts.length - 20) + " more" : "")
+        );
+      }
+      hits.forEach(t => plan.push({ node: t, value: String(map[key]) }));
+    });
+    const set = [];
+    for (const step of plan) {
+      await loadFontsForTextNode(step.node);
+      trackModification(step.node);
+      step.node.characters = step.value;
+      set.push(step.node.id);
+    }
+    return { set: set };
+  };
+
+  // Swap a placeholder for a real component instance in the same slot.
+  api.replaceWithInstance = async function (target, component, opts) {
+    const o = opts || {};
+    const keepSize = o.keepSize === true;
+    const remove = o.remove !== false;
+    const t = macroNodes(target, "replaceWithInstance")[0];
+    const host = insideInstance(t);
+    if (host) {
+      throw new Error(
+        "bridge.replaceWithInstance: \"" + t.name + "\" lives inside INSTANCE \"" + host.name +
+        "\" and cannot be replaced there. Edit the master component, or use bridge.setProps / bridge.setText on the instance."
+      );
+    }
+    const parent = t.parent;
+    if (!parent || typeof parent.insertChild !== "function") {
+      throw new Error("bridge.replaceWithInstance: \"" + t.name + "\" has no parent that can hold an instance");
+    }
+    const inst = resolveComponent(component, "replaceWithInstance").createInstance();
+    try {
+      parent.insertChild(parent.children.indexOf(t), inst);
+      const attempt = fn => { try { fn(); } catch (e) { /* property not applicable to this pair */ } };
+      if (hasAutoLayout(parent)) {
+        ["layoutSizingHorizontal", "layoutSizingVertical", "layoutAlign", "layoutGrow", "layoutPositioning"].forEach(k => {
+          if (k in t && k in inst) attempt(() => { inst[k] = t[k]; });
+        });
+        if (t.layoutPositioning === "ABSOLUTE") attempt(() => { inst.x = t.x; inst.y = t.y; });
+      } else {
+        attempt(() => { inst.x = t.x; inst.y = t.y; });
+      }
+      if (keepSize) inst.resize(t.width, t.height);
+      if (o.props) api.setProps(inst, o.props);
+      if (o.text) await api.setText(inst, o.text);
+    } catch (e) {
+      try { inst.remove(); } catch (e2) {}
+      throw e;
+    }
+    if (remove) t.remove();
+    return inst;
+  };
+
+  api.shift = function (nodesOrIds, opts) {
+    const o = opts || {};
+    const dx = Number(o.dx) || 0;
+    const dy = Number(o.dy) || 0;
+    const nodes = macroNodes(nodesOrIds, "shift");
+    nodes.forEach(n => {
+      trackModification(n);
+      api.setPosition(n, n.x + dx, n.y + dy);
+    });
+    return nodes.length;
+  };
+
+  // Reparent into container. layout "none" keeps each node where it was on the
+  // canvas; "row"/"column" lay them out one after another from `padding`.
+  api.moveInto = function (nodesOrIds, container, opts) {
+    const o = opts || {};
+    const layout = o.layout || "none";
+    const gap = Number.isFinite(o.gap) ? o.gap : 100;
+    const padding = Number.isFinite(o.padding) ? o.padding : 0;
+    if (["none", "row", "column"].indexOf(layout) === -1) {
+      throw new Error("bridge.moveInto: layout must be \"none\", \"row\" or \"column\", got " + JSON.stringify(layout));
+    }
+    const nodes = macroNodes(nodesOrIds, "moveInto");
+    const box = macroNodes(container, "moveInto")[0];
+    if (typeof box.appendChild !== "function") throw new Error("bridge.moveInto: " + box.type + " \"" + box.name + "\" cannot hold children");
+    const flow = hasAutoLayout(box);
+    let cursor = padding;
+    nodes.forEach(n => {
+      trackModification(n);
+      const before = n.absoluteTransform;
+      box.appendChild(n);
+      if (flow) return;                       // AutoLayout places it itself
+      if (layout === "none") {
+        const after = n.absoluteTransform;
+        if (before && after) {
+          n.x += before[0][2] - after[0][2];
+          n.y += before[1][2] - after[1][2];
+        }
+      } else if (layout === "row") {
+        n.x = cursor; n.y = padding;
+        cursor += n.width + gap;
+      } else {
+        n.x = padding; n.y = cursor;
+        cursor += n.height + gap;
+      }
+    });
+    return nodes.map(n => n.id);
+  };
+
+  // Size a SECTION/FRAME to its children's bbox + padding without moving anything
+  // on the canvas: the container shifts, the children shift back.
+  api.fitSection = function (section, opts) {
+    const padding = opts && Number.isFinite(opts.padding) ? opts.padding : 100;
+    const box = macroNodes(section, "fitSection")[0];
+    if (["SECTION", "FRAME", "COMPONENT"].indexOf(box.type) === -1) {
+      throw new Error("bridge.fitSection: expected SECTION or FRAME, got " + box.type + " \"" + box.name + "\"");
+    }
+    const kids = (box.children || []).slice();
+    if (kids.length === 0) return box;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    kids.forEach(k => {
+      minX = Math.min(minX, k.x); minY = Math.min(minY, k.y);
+      maxX = Math.max(maxX, k.x + k.width); maxY = Math.max(maxY, k.y + k.height);
+    });
+    const shiftX = padding - minX;
+    const shiftY = padding - minY;
+    trackModification(box);
+    kids.forEach(k => trackModification(k));
+    if (shiftX !== 0 || shiftY !== 0) {
+      box.x -= shiftX; box.y -= shiftY;
+      kids.forEach(k => { k.x += shiftX; k.y += shiftY; });
+    }
+    const w = Math.max(1, maxX - minX + 2 * padding);
+    const h = Math.max(1, maxY - minY + 2 * padding);
+    // SECTION only has resizeWithoutConstraints; for a FRAME it is also the safe
+    // choice (plain resize() would re-apply children's constraints and shift them).
+    if (typeof box.resizeWithoutConstraints === "function") box.resizeWithoutConstraints(w, h);
+    else box.resize(w, h);
+    return box;
+  };
+
   // --- cheap reads: facts as short text / flat maps instead of raw dumps ----
   api.summarize = function (refs, opts) { return summarizeNodes(refs, opts); };
   api.inspect = function (refs, props) { return inspectNodes(refs, props); };
   api.find = function (query, opts) { return findNodes(query, opts); };
   api.check = function (specs, opts) { return checkNodes(specs, opts); };
   api.hex = function (color, opacity) { return readHex(color, opacity); };
+  api.context = function (ref) {
+    const n = readNode(ref);
+    if (!n) throw new Error("bridge.context: node " + ref + " does not exist");
+    return contextOf(n, api.store.get("conventions", null));
+  };
 
   // --- self-description, so an agent can ask instead of guessing -----------
   api.info = function () {
@@ -780,7 +1255,7 @@ function createBridgeApi() {
         "with eval — use bridge.define / bridge.require.",
       persistence: {
         "bridge.state": "in-memory object, survives calls, cleared on plugin reload",
-        "bridge.store": "JSON key/value inside the .fig document, survives everything",
+        "bridge.store": "JSON key/value inside the .fig document, survives everything. Key \"conventions\": breakpoints, working section, grid steps — write it once, bridge.context() returns it",
         "bridge.define/require": "reusable code modules stored in the document",
         "globalThis": "shared and persists between calls, but prefer bridge.state"
       },
@@ -792,14 +1267,25 @@ function createBridgeApi() {
         "restores snapshotted properties. Deletions are never recoverable. The journal lives in " +
         "memory only — it is cleared when the plugin reloads.",
       cheapReads: {
-        "bridge.summarize(idOrNode | ids, { depth: 2, maxChildren: 15, text: 40 })":
-          "indented outline, one line per node: TYPE \"name\" #id WxH @x,y [V gap8 pad16 fill/hug] fill:#FFF r8 font \"text…\"",
+        "bridge.summarize(idOrNode | ids, { depth: 2, maxChildren: 15, text: 40, view })":
+          "indented outline, one line per node: TYPE \"name\" #id WxH @x,y [V gap8 pad16 fill/hug] fill:#FFF r8 font \"text…\"; view:\"map\" = only TYPE \"name\" #id WxH @x,y children:N (cheapest page overview)",
+        "bridge.context(idOrNode)":
+          "{ node, ancestors, siblings: [{w,n}], pageWidths: top-6 frame widths (breakpoints), components: [{ set, used, props }] used inside the node, conventions } — read this before building next to existing design",
         "bridge.inspect(ids, [props])":
-          "{ id: { prop: value } | \"MISSING\" }; props also accept fill, stroke, text, font, layout, padding, parent, children, main, variant, props, absolute",
-        "bridge.find(query | RegExp, { root, type, limit: 20 })": "[{ id, name, type }] by name under root (default: current page)",
+          "{ id: { prop: value } | \"MISSING\" }; props also accept fill, stroke, text, font, layout, padding, parent, children, main, variant, props, absolute, reactions (prototype links as short strings), connector ({ start, end } ids)",
+        "bridge.find(query | RegExp, { root, type, limit: 20, text })": "[{ id, name, type }] by name under root (default: current page); text:true searches TEXT characters and returns [{ id, name, type, text, frame }]",
         "bridge.check(specs, { tolerance: 0.5 })":
           "specs { id: { width: 320, fill: \"#FFFFFF\", text: /Submit/, layout: \"V gap8 pad16\" } } -> { pass, fail: [{ id, key, want, got }], missing }",
         "bridge.state.lastResult": "full value of the previous call's return, even when the server shrank what you saw"
+      },
+      macros: {
+        "bridge.setProps(instance, { Name: value })": "sets component properties by readable name (\"Label\" matches \"Label#12:3\", case-insensitive); INSTANCE_SWAP takes a component node or id; unknown name -> error listing the real properties and variants; returns the instance",
+        "await bridge.setText(root, { layerNameOrId: \"text\" })": "loads every font of the node, sets characters on TEXT layers found by id or exact name under root; unknown layer -> error listing text layers; returns { set: [ids] }",
+        "await bridge.replaceWithInstance(target, component, { props, text, keepSize: false, remove: true })": "puts an instance of COMPONENT / COMPONENT_SET (default variant) / INSTANCE / id into target's slot (same index, position or AutoLayout sizing), applies props/text, removes target; returns the instance",
+        "bridge.shift(nodesOrIds, { dx: 0, dy: 0 })": "moves nodes by an offset; returns the count",
+        "bridge.moveInto(nodesOrIds, container, { layout: \"none\" | \"row\" | \"column\", gap: 100, padding: 0 })": "reparents nodes; none keeps their canvas position, row/column lays them out; returns ids",
+        "bridge.fitSection(section, { padding: 100 })": "resizes a SECTION/FRAME to its children's bbox + padding, children keep their canvas position; returns the section",
+        "note": "existing nodes these change are snapshotted into the open checkpoint; an unknown bridge.<name> throws with the list of real helpers"
       },
       injected: ["figma", "ensureFont", "bridge", "getFreePosition", "notify", "log", "progress"],
       modules: api.list(),
@@ -854,8 +1340,24 @@ function createBridgeApi() {
     return trackModification(node);
   };
 
-  return api;
+  // Reading a helper that does not exist used to yield undefined and a cryptic
+  // "bridge.foo is not a function" one line later. Fail at the call instead,
+  // naming what does exist. Symbols and probe keys used by promises/serializers
+  // must stay undefined or awaiting/serializing the bridge would break.
+  proxy = new Proxy(api, {
+    get(target, key, receiver) {
+      if (typeof key !== "string" || key in target || BRIDGE_PROBE_KEYS.indexOf(key) !== -1) {
+        return Reflect.get(target, key, receiver);
+      }
+      return function () {
+        throw new Error("bridge." + key + " does not exist. Available: " + Object.keys(target).sort().join(", "));
+      };
+    }
+  });
+  return proxy;
 }
+
+const BRIDGE_PROBE_KEYS = ["then", "toJSON", "constructor", "prototype", "$$typeof", "asymmetricMatch", "nodeType"];
 
 // Rewrites raw sandbox/platform errors into messages that tell an agent what
 // to do differently.
@@ -918,6 +1420,107 @@ function enrichBridgeError(err) {
   return { message, hint: null, code: null };
 }
 
+// --- error line numbers -----------------------------------------------------
+// The agent's code runs as `new AsyncFunction(...EXECUTE_PARAM_NAMES, code)`.
+// The engine adds a few wrapper lines above the body, and the stack format
+// differs per engine (V8: "at f (<anonymous>:3:7)", QuickJS: "at <anonymous>
+// (<input>:3)"), so the offset is CALIBRATED once at runtime with a probe that
+// throws on body line 1, instead of being hard-coded.
+const EXECUTE_PARAM_NAMES = ["figma", "ensureFont", "notify", "log", "getFreePosition", "getFreeCanvasPosition", "bridge", "progress"];
+
+// Stack text -> [{ file, line, column }] for every "at ..." frame that ends in a position.
+function parseStackFrames(stack) {
+  const frames = [];
+  String(stack || "").split("\n").forEach(raw => {
+    if (!/^\s*at\s/.test(raw)) return;
+    const m = /([^\s()]*?):(\d+)(?::(\d+))?\)?\s*$/.exec(raw);
+    if (!m) return;
+    frames.push({ file: m[1], line: parseInt(m[2], 10), column: m[3] ? parseInt(m[3], 10) : null });
+  });
+  return frames;
+}
+
+// From the probe's stack: which "file" token marks frames of the anonymous
+// function, and how many wrapper lines sit above the body. null = unknown.
+function calibrateFromProbeStack(stack) {
+  const first = parseStackFrames(stack)[0];
+  if (!first || !(first.line >= 1)) return null;
+  return { file: first.file, offset: first.line - 1 };
+}
+
+// { line, column, at } for the first frame that belongs to the agent's code, or null.
+function locateErrorInCode(stack, code, calibration) {
+  if (!calibration || typeof code !== "string") return null;
+  const lines = code.split("\n");
+  const frames = parseStackFrames(stack);
+  for (const f of frames) {
+    if (f.file !== calibration.file) continue;
+    const line = f.line - calibration.offset;
+    if (line < 1 || line > lines.length) continue;      // a plugin frame that happens to share the token
+    return { line: line, column: f.column, at: lines[line - 1].trim().slice(0, 160) };
+  }
+  return null;
+}
+
+let ANON_CALIBRATION;   // undefined = not measured yet, null = engine gave us nothing usable
+async function getAnonCalibration(AsyncFunction) {
+  if (ANON_CALIBRATION !== undefined) return ANON_CALIBRATION;
+  ANON_CALIBRATION = null;
+  try {
+    const probe = new AsyncFunction(...EXECUTE_PARAM_NAMES, 'throw new Error("probe")');
+    await probe();
+  } catch (e) {
+    try { ANON_CALIBRATION = calibrateFromProbeStack(e && e.stack); } catch (e2) {}
+  }
+  return ANON_CALIBRATION;
+}
+
+// --- result sanitizing --------------------------------------------------------
+// figma.ui.postMessage structured-clones the envelope. figma.mixed is a Symbol
+// (and nodes / functions are not cloneable either), so a perfectly good edit
+// used to end in "Cannot unwrap symbol" AFTER the mutation ran — the agent saw
+// an error and repeated the edit. This makes any return value transferable.
+function sanitizeForTransfer(value) {
+  const path = [];
+  const walk = (v, depth) => {
+    if (v === null || v === undefined) return v;
+    const t = typeof v;
+    if (t === "string" || t === "number" || t === "boolean") return v;
+    if (t === "symbol") return "mixed";
+    if (t === "bigint") return String(v);
+    if (t === "function") return undefined;
+    if (ArrayBuffer.isView(v) || v instanceof ArrayBuffer) return "[bytes " + v.byteLength + "]";
+    if (depth > 12) return "[deep]";
+    if (path.indexOf(v) !== -1) return "[circular]";
+    if (v instanceof Error) return String(v.name || "Error") + ": " + String(v.message);
+    if (v instanceof Date) return v.toISOString();
+    let isNode = false;
+    try { isNode = typeof v.id === "string" && typeof v.type === "string" && "parent" in v; } catch (e) {}
+    if (isNode) {
+      const brief = {};
+      ["id", "name", "type"].forEach(k => { try { brief[k] = v[k]; } catch (e) {} });
+      return brief;
+    }
+    path.push(v);
+    try {
+      if (Array.isArray(v)) return v.map(x => { const r = walk(x, depth + 1); return r === undefined ? null : r; });
+      if (v instanceof Set) return Array.from(v).map(x => { const r = walk(x, depth + 1); return r === undefined ? null : r; });
+      const src = v instanceof Map ? Object.fromEntries(v) : v;
+      const out = {};
+      Object.keys(src).forEach(k => {
+        let child;
+        try { child = src[k]; } catch (e) { out[k] = "[unreadable]"; return; }
+        const r = walk(child, depth + 1);
+        if (r !== undefined) out[k] = r;
+      });
+      return out;
+    } finally {
+      path.pop();
+    }
+  };
+  return walk(value, 0);
+}
+
 // Ceiling on what a single capture may render. A whole page at 1.5x on a real
 // design file is tens of megapixels; base64-encoding that in the sandbox and
 // pushing it into the model's context either timed out or flooded the window.
@@ -975,46 +1578,6 @@ async function captureSafe(node, scale, maxPx) {
     return { base64: await exportNodeToPngBase64(node, scale, maxPx), error: null };
   } catch (err) {
     return { base64: null, error: err.message || String(err) };
-  }
-}
-
-// Loads every distinct font a text node uses, once.
-// The previous version walked a mixed-font node character by character and
-// awaited loadFontAsync for each one: a 4000-character paragraph meant 4000
-// sequential round-trips and the whole tool call timed out.
-async function loadFontsForTextNode(textNode) {
-  const wanted = [];
-  const seen = new Set();
-
-  const remember = (font) => {
-    if (!font || !font.family) return;
-    const id = font.family + "|" + font.style;
-    if (seen.has(id)) return;
-    seen.add(id);
-    wanted.push(font);
-  };
-
-  if (textNode.fontName === figma.mixed) {
-    if (typeof textNode.getStyledTextSegments === 'function') {
-      for (const segment of textNode.getStyledTextSegments(['fontName'])) {
-        remember(segment.fontName);
-      }
-    } else {
-      // Fallback for older plugin API builds. getRangeFontName is synchronous
-      // and cheap — it was the per-character *await* that made this quadratic,
-      // so collecting first and awaiting the deduped set is enough.
-      const len = textNode.characters.length;
-      for (let i = 0; i < len; i++) {
-        const font = textNode.getRangeFontName(i, i + 1);
-        if (font !== figma.mixed) remember(font);
-      }
-    }
-  } else {
-    remember(textNode.fontName);
-  }
-
-  for (const font of wanted) {
-    await ensureFont(font.family, font.style);
   }
 }
 
@@ -1435,9 +1998,18 @@ function resolveCaptureTargets(captureNodeIds, checkpointCreated, checkpointModi
 }
 
 // Degrades in order: (1) single node → direct export, (2) multiple nodes that
-// share a real frame → export just that frame (tight crop instead of the
-// whole page), (3) no shared frame → export up to 3 nodes individually rather
-// than falling back to a giant whole-page screenshot.
+// share a real frame → export that frame ONLY when it is not much bigger than
+// the targets themselves (area <= 3x the sum of their areas — otherwise the
+// crop is mostly unrelated pixels), (3) otherwise up to 4 nodes individually,
+// each at maxPx / sqrt(n) so the whole set costs about one image.
+const CAPTURE_MAX_INDIVIDUAL = 4;
+const CAPTURE_MIN_EACH_PX = 384;
+const CAPTURE_ANCESTOR_AREA_FACTOR = 3;
+
+function nodeArea(n) {
+  return (Number(n && n.width) || 0) * (Number(n && n.height) || 0);
+}
+
 async function exportCaptureTargets(nodes, scale, maxPx) {
   const cleaned = (nodes || []).filter(n => n && typeof n.exportAsync === 'function');
   if (cleaned.length === 0) {
@@ -1457,29 +2029,34 @@ async function exportCaptureTargets(nodes, scale, maxPx) {
 
   const ancestor = findCommonAncestor(cleaned);
   if (ancestor && ancestor.type !== 'PAGE' && ancestor.type !== 'DOCUMENT' && typeof ancestor.exportAsync === 'function') {
-    const shot = await captureSafe(ancestor, scale, maxPx);
-    if (shot.base64) {
-      return {
-        images: [{ base64: shot.base64, label: ancestor.name || ancestor.type }],
-        note: shot.error,
-        targetName: ancestor.name || ancestor.type,
-        targetId: ancestor.id,
-        framed: 'common-ancestor'
-      };
+    const targetsArea = cleaned.reduce((sum, n) => sum + nodeArea(n), 0);
+    if (nodeArea(ancestor) <= CAPTURE_ANCESTOR_AREA_FACTOR * targetsArea) {
+      const shot = await captureSafe(ancestor, scale, maxPx);
+      if (shot.base64) {
+        return {
+          images: [{ base64: shot.base64, label: ancestor.name || ancestor.type }],
+          note: shot.error,
+          targetName: ancestor.name || ancestor.type,
+          targetId: ancestor.id,
+          framed: 'common-ancestor'
+        };
+      }
     }
   }
 
-  const capped = cleaned.slice(0, 3); // the server sends at most 3 images per call anyway
+  const capped = cleaned.slice(0, CAPTURE_MAX_INDIVIDUAL);
+  const budget = Number.isFinite(maxPx) && maxPx > 0 ? maxPx : DEFAULT_CAPTURE_MAX_PX;
+  const eachPx = Math.max(CAPTURE_MIN_EACH_PX, Math.round(budget / Math.sqrt(capped.length)));
   const images = [];
   const notes = [];
   for (const n of capped) {
-    const shot = await captureSafe(n, scale, maxPx);
+    const shot = await captureSafe(n, scale, eachPx);
     if (shot.base64) images.push({ base64: shot.base64, label: n.name || n.type });
     if (shot.error) notes.push(`${n.name || n.id}: ${shot.error}`);
   }
   const note = [
     cleaned.length > capped.length
-      ? `Captured ${capped.length} of ${cleaned.length} affected nodes individually (no single shared frame to export).`
+      ? `Captured ${capped.length} of ${cleaned.length} affected nodes individually (no compact shared frame to export).`
       : null,
     notes.length ? notes.join(' | ') : null
   ].filter(Boolean).join(' ') || null;
@@ -1807,10 +2384,7 @@ figma.ui.onmessage = async (msg) => {
       // No wrapper newline/indent: keeps reported error line numbers aligned
       // with the code the agent actually sent.
       const bridgeApi = createBridgeApi();
-      const fn = new AsyncFunction(
-        'figma', 'ensureFont', 'notify', 'log', 'getFreePosition', 'getFreeCanvasPosition', 'bridge', 'progress',
-        code
-      );
+      const fn = new AsyncFunction(...EXECUTE_PARAM_NAMES, code);
 
       const result = await fn(
         trackingFigma, ensureFont, notifyCanvas, logToUi,
@@ -1879,17 +2453,28 @@ figma.ui.onmessage = async (msg) => {
         }
       }
 
-      figma.ui.postMessage({
+      // The mutation already happened, so nothing below may turn into a failure
+      // envelope: an untransferable value (figma.mixed, nodes, ...) degrades to a
+      // placeholder and the call still reports success.
+      let safeResult = result;
+      let transferNote = null;
+      try {
+        safeResult = sanitizeForTransfer(result);
+      } catch (sanErr) {
+        safeResult = "[unserializable result]";
+        transferNote = "Result could not be sanitized: " + ((sanErr && sanErr.message) || String(sanErr));
+      }
+      const envelope = {
         type: 'RESULT',
         id: id,
         success: true,
         description: actionLabel,
-        result: result !== undefined ? result : "Execution finished successfully",
+        result: safeResult !== undefined ? safeResult : "Execution finished successfully",
         resultStashed: result !== undefined,
         screenshot: screenshot,
         screenshots: screenshots,
         beforeScreenshot: beforeShot ? beforeShot.base64 : null,
-        captureNote: captureNote,
+        captureNote: [captureNote, transferNote].filter(Boolean).join(' ') || null,
         targetName: targetName,
         targetId: targetId,
         checkpointId: cpResult.checkpoint_id,
@@ -1898,23 +2483,40 @@ figma.ui.onmessage = async (msg) => {
         warnings: warnings,
         durationMs: Date.now() - execStart,
         startTime: startTime
-      });
+      };
+      try {
+        figma.ui.postMessage(envelope);
+      } catch (postErr) {
+        envelope.result = "[unserializable result]";
+        envelope.captureNote = [captureNote, `Result could not be transferred (${(postErr && postErr.message) || String(postErr)}); the canvas changes above did apply.`].filter(Boolean).join(' ');
+        figma.ui.postMessage(envelope);
+      }
     } catch (err) {
       cp.commit(); // whatever WAS created before the throw is still on canvas and rollback-eligible
       if (runningToast) runningToast.cancel();
       const enriched = enrichBridgeError(err);
       try { figma.notify(`Error: ${enriched.message}`, { error: true, timeout: 6000 }); } catch (e) {}
 
-      figma.ui.postMessage({
+      // Where in the agent's code it failed (best effort — the stack format is engine-dependent).
+      let loc = null;
+      try {
+        const AsyncFn = Object.getPrototypeOf(async function(){}).constructor;
+        loc = locateErrorInCode(err && err.stack, code, await getAnonCalibration(AsyncFn));
+      } catch (locErr) {}
+      const atText = loc ? `\n  at line ${loc.line}: ${loc.at}` : '';
+
+      const failure = {
         type: 'RESULT',
         id: id,
         success: false,
         description: actionLabel,
-        error: enriched.hint ? `${enriched.message}\n\nHINT: ${enriched.hint}` : enriched.message,
+        error: enriched.hint ? `${enriched.message}${atText}\n\nHINT: ${enriched.hint}` : enriched.message + atText,
         code: enriched.code,
         durationMs: Date.now() - execStart,
         startTime: startTime
-      });
+      };
+      if (loc) { failure.line = loc.line; failure.column = loc.column; failure.at = loc.at; }
+      figma.ui.postMessage(failure);
     }
   }
 

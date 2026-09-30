@@ -244,16 +244,62 @@ for *fewer turns* and *smaller residue*:
 
 | | Default | Why |
 |---|---|---|
-| Screenshots | `scale: 1`, longest side `max_px: 1024`, at most 3 images per call | image tokens scale with pixel area (~w·h/750); each image is described as `800x600 ~640tok` |
+| Screenshots | `scale: 1`, longest side `max_px: 1024`, at most 4 images per call | image tokens scale with pixel area (~w·h/750); each image is described as `800x600 ~640tok` |
 | `capture` on insert/mode tools | off | the auto-lint `warnings` catch mechanical defects without an image |
-| Text results | compact JSON; every response is kept under `max_output_bytes` (3500 UTF-8 bytes, whole envelope) by structural shrinking | some clients (Antigravity) spill output over ~4 KB into a file the model must open with an extra call; the full value stays in `bridge.state.lastResult` |
+| Text results | compact JSON; every response is kept under `max_output_bytes` (3500 UTF-8 bytes, whole envelope) by structural shrinking; a requested value above the 3900-byte ceiling is capped to it, `0` = no limit | some clients (Antigravity) spill output over ~4 KB into a file the model must open with an extra call; the full value stays in `bridge.state.lastResult` |
 | Cheap reads | `figma_inspect` (many ids per call), and `bridge.summarize` / `inspect` / `find` / `check` inside code | one-line-per-node outlines and pass/fail lists instead of one hand-written dump per call |
 | Plugin reloads | calls wait up to 8s for the plugin to reconnect | a failure costs a turn to read and another to retry |
 | Server instructions | ≈1.9k chars, economy rules first | some clients truncate instructions at ~2000 chars |
 
 Every default is overridable per call, and per install through env: `FIGMA_MCP_SCALE`,
-`FIGMA_MCP_MAX_PX`, `FIGMA_MCP_MAX_IMAGES`, `FIGMA_MCP_MAX_OUTPUT_BYTES`, `FIGMA_MCP_JOB_WAIT_MS`,
+`FIGMA_MCP_MAX_PX`, `FIGMA_MCP_MAX_IMAGES`, `FIGMA_MCP_MAX_OUTPUT_BYTES`, `FIGMA_MCP_MAX_OUTPUT_CEILING` (`0` = no ceiling), `FIGMA_MCP_JOB_WAIT_MS`,
 `FIGMA_MCP_ESCALATE_MS`, `FIGMA_MCP_RECONNECT_GRACE_MS`.
+
+---
+
+## What's new in 4.2.1
+
+Theme: fewer model turns per task. Server side:
+
+- **An outline is no longer cut mid-string.** Multi-line results (the `figma_inspect` outline) shrink
+  by whole lines: the deepest indent levels collapse first (`… +N deeper`), then the tail is cut on a
+  line boundary and ends with `… +N more lines (T total) — pass offset=K`. A 25-line outline now
+  arrives whole; before, one long string was chopped at 400 characters and the child tree was lost.
+- **`figma_inspect` grows without a new tool:** `offset` pages a cut outline, `view: "map"` returns
+  a canvas map, `context: true` adds ancestor sections / breakpoints / component variants,
+  `find_text` searches text content, `props` also accepts `reactions` and `connector`.
+- **Output ceiling, per client.** In clients that spill large tool output to a file (Antigravity,
+  and any client that doesn't identify itself as one that keeps it inline) a requested
+  `max_output_bytes` above 3900 — or `0` — is capped to 3900 with a short note, so a reply never
+  crosses the ~4.1 KB spill line. Claude Code, Cursor, Windsurf, Cline and similar keep the old
+  behaviour. The client comes from `initialize` `clientInfo.name` (logged to stderr);
+  `FIGMA_MCP_MAX_OUTPUT_CEILING` forces a value for every client (`0` = off).
+- **Truncation notes point at the cheap next step:** `return bridge.state.lastResult.slice(40, 80)`
+  (or `offset` for an outline) — they no longer advertise `max_output_bytes: 0` where it would spill.
+- **A one-time tip in the reply.** Antigravity never shows the model the server instructions, but the
+  model reads every response: the first read-only script with a hand-written tree walk gets one line
+  pointing at `figma_inspect` `view` / `context` / `find_text` and the write macros.
+- **`figma/instructions.md` opens with "Fewest calls"** — the 3–5-call path for a typical task (agents
+  in Antigravity read this file when stuck).
+- **Syntax errors never reach the plugin.** `figma_execute_code` compiles the code first and
+  answers `SCRIPT_SYNTAX_ERROR` with `line` and `at` (the offending line) at once.
+- **Located errors.** A runtime failure reports the `line`, `column` and `at` sent by the plugin.
+- Up to 4 images per response (was 3); a call that escalates to a background job carries a hint to
+  scope `findAll` / `find` to a section.
+
+Plugin side:
+
+- **Result sanitizing.** `figma.mixed` and other unserializable values no longer sink the response
+  after a mutation has already happened.
+- **Fewer wasted retries.** A call to a `bridge` helper that does not exist now names the helper
+  (and lists the ones that exist) instead of failing as `undefined is not a function`.
+- **Screenshots per node.** Each `capture_node_ids` entry is rendered on its own (downscaled)
+  instead of one shared section image.
+- **Fast search.** `bridge.find` turns on `skipInvisibleInstanceChildren` for its duration and uses
+  `findAllWithCriteria` where it can; `find` also matches text content (`text: true`).
+- **New reads and macros.** `bridge.context(id)`, `bridge.summarize(..., { view: "map" })`,
+  `reactions` / `connector` in `props`, the `conventions` key of `bridge.store` (breakpoints, working section — returned by `bridge.context`), and the macros
+  `replaceWithInstance`, `setProps`, `setText`, `shift`, `moveInto`, `fitSection`.
 
 ---
 
@@ -280,7 +326,7 @@ something that would only return `REST_TOKEN_MISSING`.
 | Tool | Description |
 | :--- | :--- |
 | `figma_execute_code` | Run JS in the Figma sandbox. Injects `figma`, `ensureFont`, `getFreePosition`, `progress`, `bridge`. Supports `capture`, `capture_node_ids`, `diff`, `max_px`, `max_output_bytes`, `async`, `target`. |
-| `figma_inspect` | Read many live nodes in one call: compact outline, exact `props`, name `find`, or `check` expectations (mismatches only). Changes nothing. |
+| `figma_inspect` | Read many live nodes in one call: compact outline (or `view: "map"` canvas map), exact `props` (incl. `reactions`, `connector`), name `find` / text `find_text`, `context` (ancestor sections, breakpoints, component variants), `offset` paging, or `check` expectations (mismatches only). Changes nothing. |
 | `figma_read_canvas` | Token-optimized read of the **live** document (`jsx` / `tree` / `json`) with `budget_tokens` (default: the server's byte budget). |
 | `figma_screenshot` | PNG of specific `node_ids` or the current selection, sized by `max_px`. |
 | `figma_find_components` | Cached, tokenized, fuzzy component search — variants, properties, keys. |
@@ -424,7 +470,7 @@ locked-down machines the previous note is about.
 
 ## Testing
 
-Six dependency-free suites, all runnable with bare `node`:
+Seven dependency-free suites, all runnable with bare `node`:
 
 ```bash
 node tests/bridge-runtime.test.js   # sandbox runtime, module persistence, checkpoint/rollback
@@ -433,6 +479,7 @@ node tests/optimizer.test.js        # jsx/tree/json serialization, budget trunca
 node tests/mcp-protocol.test.js     # real server over stdio: initialize, tools/list, tiering
 node tests/install.test.js          # config merge/reuse, token persistence, stale-file cleanup
 node tests/token-economy.test.js    # fake plugin over a real WebSocket: budgets, long-poll, proxy
+node tests/output-shrink.test.js    # line-wise shrinking, offset paging, output ceiling, syntax pre-check
 ```
 
 `mcp-protocol.test.js` spawns the actual server as a child process and speaks NDJSON to it — the
@@ -452,7 +499,7 @@ figma-mcp-bridge/
 ├── figma-plugin/             # Figma Desktop plugin
 │   ├── code.js               # sandbox executor, bridge runtime, checkpoints, capture
 │   └── ui.html               # HUD — stream, settings, control (pause / undo)
-├── tests/                    # 5 suites, 0 dependencies
+├── tests/                    # 7 suites, 0 dependencies
 ├── install.mjs               # cross-platform installer, updater, doctor (Node only)
 └── AGENTS.md                 # onboarding protocol for AI agents
 ```

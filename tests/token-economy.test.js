@@ -81,6 +81,20 @@ function startServer(env) {
   return { call, tool, stop };
 }
 
+// Outline of `lines` lines, ~100 UTF-8 bytes each. Line 0 is the root; the rest
+// sit one level below it (flat) or cycle through levels 1,2,3,3 (nested).
+function treeOutline(lines, nested) {
+  const pattern = nested ? [1, 2, 3, 3] : [1];
+  const out = [];
+  for (let i = 0; i < lines; i++) {
+    const level = i === 0 ? 0 : pattern[(i - 1) % pattern.length];
+    const body = `FRAME "Node ${i}" #9:${i} 320x200 @0,${i * 10} [V gap8 pad16] fill:#FFFFFF r8`;
+    out.push("  ".repeat(level) + body.padEnd(100 - 2 * level, "."));
+  }
+  return out.join("\n");
+}
+const NODE_LINE = /^ *FRAME "Node \d+" #9:\d+ 320x200 @0,\d+ \[V gap8 pad16\] fill:#FFFFFF r8\.*$/;
+
 function fakePng(w, h) {
   const b = Buffer.alloc(33);
   Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(b, 0);
@@ -114,7 +128,15 @@ function startFakePlugin() {
           created: Array.from({ length: 300 }, (_, i) => "3:" + i) });
       }
       if (/^const a = /.test(cmd.code || "")) { // figma_inspect's generated read
-        return reply({ id: cmd.id, result: { outline: "FRAME \"Card\" #1:2 320x200" }, resultStashed: true, checkpointId: "cp_2" });
+        const spec = JSON.parse(/^const a = (.*);$/m.exec(cmd.code)[1]);
+        const outline = spec.ids[0] === "25:0" ? treeOutline(25, false)   // 25 lines of ~100 bytes: must fit whole
+          : spec.ids[0] === "80:0" ? treeOutline(80, false)                // 80 flat lines: cut by whole lines
+          : spec.ids[0] === "70:0" ? treeOutline(70, true)                 // 4 levels: deepest go first
+          : "FRAME \"Card\" #1:2 320x200";
+        return reply({ id: cmd.id, result: { outline }, resultStashed: true, checkpointId: "cp_2" });
+      }
+      if (cmd.code === "fail-line") { // a runtime error located by the plugin
+        return reply({ id: cmd.id, success: false, error: "ReferenceError: foo is not defined", code: "SCRIPT_RUNTIME_ERROR", line: 7, column: 3, at: "foo(1);" });
       }
       const slow = /^slow:(\d+)$/.exec(cmd.code || "");
       if (slow) { await sleep(Number(slow[1])); return reply({ id: cmd.id, result: { slept: Number(slow[1]) }, resultStashed: true }); }
@@ -190,12 +212,35 @@ async function main() {
     check("shrunk result keeps its shape (rows array + more-marker)",
       Array.isArray(big.body.result.rows) && /more \(400 total\)/.test(big.body.result.rows[big.body.result.rows.length - 1]));
     const full = await master.tool("figma_execute_code", { code: "big", max_output_bytes: 0 });
-    check("max_output_bytes: 0 disables the cap", full.body && full.body.result.rows.length === 400 && !full.body.truncated);
+    check("max_output_bytes: 0 is capped for a client that spills (would be written to a file)", Buffer.byteLength(full.text) <= 3900 && !!full.body.note && !!full.body.truncated, Buffer.byteLength(full.text));
     const legacy = await master.tool("figma_execute_code", { code: "big", max_output_chars: 0 });
-    check("pre-4.2 max_output_chars is still honoured", legacy.body && legacy.body.result.rows.length === 400);
+    check("pre-4.2 max_output_chars is still honoured (and capped the same way)", legacy.body && Buffer.byteLength(legacy.text) <= 3900 && !!legacy.body.note);
     const cyr = await master.tool("figma_execute_code", { code: "cyr" });
     check("Cyrillic result + long created list: the WHOLE envelope stays under budget in bytes",
       Buffer.byteLength(cyr.text) <= 3500 && cyr.body.truncated && cyr.body.checkpoint_id === "cp_3", Buffer.byteLength(cyr.text));
+
+    const under = await master.tool("figma_execute_code", { code: "big", max_output_bytes: 3000 });
+    check("a requested budget below the ceiling is honoured as asked", Buffer.byteLength(under.text) <= 3000 && !under.body.note, Buffer.byteLength(under.text));
+    const capped = await master.tool("figma_execute_code", { code: "big", max_output_bytes: 5000 });
+    check("max_output_bytes 5000 is capped to the 3900 ceiling (whole envelope, in bytes)",
+      Buffer.byteLength(capped.text) <= 3900 && !!capped.body.truncated, Buffer.byteLength(capped.text));
+    check("...with a short note saying so",
+      capped.body && /^max_output_bytes capped at 3900: .*offset.*bridge\.state\.lastResult/.test(capped.body.note), capped.body && capped.body.note);
+    const cappedLegacy = await master.tool("figma_execute_code", { code: "big", max_output_chars: 9000 });
+    check("the pre-4.2 max_output_chars is capped as well", Buffer.byteLength(cappedLegacy.text) <= 3900 && !!cappedLegacy.body.note, Buffer.byteLength(cappedLegacy.text));
+
+    console.log("\n== script errors ==");
+    plugin.received.length = 0;
+    const syn = await master.tool("figma_execute_code", { code: "const a = 1;\nconst b = 2;\nconst c = ;\nreturn a;" });
+    check("a syntax error on line 3 -> SCRIPT_SYNTAX_ERROR with line: 3 and that line's text",
+      syn.isError && syn.body.code === "SCRIPT_SYNTAX_ERROR" && syn.body.line === 3 && syn.body.at === "const c = ;", syn.body);
+    check("...with the async-function-body hint", syn.body && /async function body/.test(syn.body.error) && /import\/export/.test(syn.body.error), syn.body && syn.body.error);
+    check("...and the plugin was never asked", plugin.received.length === 0, plugin.received);
+    const awaited = await master.tool("figma_execute_code", { code: "const r = await Promise.resolve(1);\nreturn r;" });
+    check("top-level await and return still go through to the plugin", !awaited.isError && plugin.received.length === 1, awaited.text);
+    const runtime = await master.tool("figma_execute_code", { code: "fail-line" });
+    check("line/column/at from a plugin failure reach the error envelope",
+      runtime.isError && runtime.body.code === "SCRIPT_RUNTIME_ERROR" && runtime.body.line === 7 && runtime.body.column === 3 && runtime.body.at === "foo(1);", runtime.body);
 
     console.log("\n== figma_inspect ==");
     const insp = await master.tool("figma_inspect", { node_ids: ["1-2", "3:4"], props: ["width"] });
@@ -203,10 +248,33 @@ async function main() {
     check("figma_inspect runs as one EXECUTE over the bridge helpers", /bridge\.inspect/.test(inspCmd.code) && /"ids":\["1:2","3:4"\]/.test(inspCmd.code), inspCmd.code);
     check("figma_inspect returns the read without checkpoint noise", insp.body && insp.body.result.outline && !insp.body.checkpoint_id, insp.text);
 
+    const whole = await master.tool("figma_inspect", { node_ids: ["25-0"] });
+    check("an outline of 25 lines of ~100 bytes reaches the model whole in the default 3500 budget",
+      whole.body && !whole.body.truncated && whole.body.result.outline.split("\n").length === 25 && Buffer.byteLength(whole.text) <= 3500, whole.text.slice(0, 300));
+    const cut = await master.tool("figma_inspect", { node_ids: ["80-0"] });
+    const cutLines = cut.body.result.outline.split("\n");
+    const kept = cutLines.length - 1;
+    check("an 80-line outline is cut by whole lines and ends with a paging marker",
+      Buffer.byteLength(cut.text) <= 3500 && kept > 20 && cutLines[kept] === `… +${80 - kept} more lines (80 total) — pass offset=${kept}`, cutLines.slice(-2));
+    check("...every kept line is intact (nothing cut mid-line)", cutLines.slice(0, kept).every(l => NODE_LINE.test(l)), cutLines.find(l => !NODE_LINE.test(l)));
+    check("...and the truncation note still points at bridge.state.lastResult", /lastResult/.test(cut.body.truncated || ""), cut.body.truncated);
+    const paged = await master.tool("figma_inspect", { node_ids: ["80-0"], offset: kept });
+    const pagedLines = paged.body.result.outline.split("\n");
+    const last = pagedLines[pagedLines.length - 1];
+    check("offset drops the first K lines and says so on line one",
+      pagedLines[0] === `… lines 0–${kept - 1} skipped` && new RegExp(`^ *FRAME "Node ${kept}" `).test(pagedLines[1]), pagedLines.slice(0, 2));
+    check("...the next page's paging marker counts ORIGINAL lines", /\(80 total\) — pass offset=(\d+)$/.test(last) && Number(/offset=(\d+)$/.exec(last)[1]) > kept, last);
+    const deep = await master.tool("figma_inspect", { node_ids: ["70-0"] });
+    const deepLines = deep.body.result.outline.split("\n");
+    check("a deep outline drops its deepest levels first: one '… +N deeper' line per run, no tail cut",
+      Buffer.byteLength(deep.text) <= 3500 && deepLines.some(l => /^ +… \+\d+ deeper$/.test(l)) && !/more lines/.test(deep.body.result.outline) && /^FRAME "Node 0"/.test(deepLines[0]),
+      deepLines.slice(0, 5));
+
     console.log("\n== long-poll jobs ==");
     const t0 = Date.now();
     const escalated = await master.tool("figma_execute_code", { code: "slow:2000" });
     check("a call past the escalate window comes back as a job", escalated.body && escalated.body.status === "running" && /^cmd_/.test(escalated.body.job_id), escalated.text);
+    check("...with the scope-your-search hint", escalated.body && /^Slow call: .*findAll.*scope it to a section/.test(escalated.body.hint), escalated.body);
     const peek = await master.tool("figma_job_status", { job_id: escalated.body.job_id, wait_ms: 0 });
     check("wait_ms: 0 peeks without blocking", peek.body && peek.body.status === "running" && peek.body.elapsed_ms >= 500, peek.body);
     const done = await master.tool("figma_job_status", { job_id: escalated.body.job_id });
@@ -247,8 +315,8 @@ async function main() {
     const shotCmd = plugin.received[plugin.received.length - 1];
     check("node_id alias reaches the plugin as nodeIds (not the selection)", shotCmd.nodeIds === "1:2", shotCmd);
     check("screenshot defaults: scale 1, max_px 1024", shotCmd.scale === 1 && shotCmd.max_px === 1024, shotCmd);
-    check("at most 3 images per response", shot.images.length === 3, shot.images.length);
-    check("the rest is reported, not silently dropped", /2 more image/.test(shot.body.images_skipped || ""), shot.body);
+    check("at most 4 images per response", shot.images.length === 4, shot.images.length);
+    check("the rest is reported, not silently dropped", /1 more image/.test(shot.body.images_skipped || ""), shot.body);
     check("each image is described with size and token cost", shot.body.images[0] === "Frame 1 800x600 ~640tok", shot.body.images);
 
     console.log("\n== capture is opt-in for insert/mode tools ==");
