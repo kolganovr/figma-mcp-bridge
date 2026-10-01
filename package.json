@@ -1,6 +1,6 @@
 {
   "name": "@kolganovr/figma-mcp-bridge",
-  "version": "4.2.2",
+  "version": "4.2.3",
   "description": "Zero-dependency MCP bridge with write access to a live Figma canvas, auto-framed screenshot feedback, and one-call rollback. Works on the Figma free plan.",
   "mcpName": "io.github.kolganovr/figma-mcp-bridge",
   "bin": {
@@ -10,6 +10,8 @@
     "figma/",
     "figma-plugin/",
     "install.mjs",
+    "docs/",
+    "CHANGELOG.md",
     "README.md",
     "LICENSE"
   ],

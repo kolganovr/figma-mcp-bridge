@@ -381,6 +381,62 @@ let inspectDone = Promise.resolve();
   check("check: missing nodes are listed", bad.missing.join() === "9:9", bad);
   check("info() documents the cheap reads", Object.keys(api.info().cheapReads || {}).length >= 5);
 
+  // 4.2.3: the outline line carries what session 9672b93e fetched with ~20
+  // separate props calls — per-side stroke, per-corner radius, effects,
+  // alignment, child sizing, absolute positioning.
+  const dd = makeNode("FRAME", "Dropdown", {
+    width: 644, height: 275, x: 0, y: 0, layoutMode: "VERTICAL", itemSpacing: 0,
+    paddingTop: 0, paddingRight: 0, paddingBottom: 0, paddingLeft: 0,
+    layoutSizingHorizontal: "FIXED", layoutSizingVertical: "HUG", primaryAxisAlignItems: "MIN", counterAxisAlignItems: "CENTER",
+    strokes: [{ type: "SOLID", color: { r: 232 / 255, g: 234 / 255, b: 240 / 255 } }],
+    strokeWeight: figma.mixed, strokeTopWeight: 0, strokeRightWeight: 1, strokeBottomWeight: 1, strokeLeftWeight: 1,
+    cornerRadius: figma.mixed, topLeftRadius: 0, topRightRadius: 0, bottomRightRadius: 3, bottomLeftRadius: 3,
+    effects: [{ type: "DROP_SHADOW", visible: true, radius: 20, offset: { x: 0, y: 4 }, color: { r: 0, g: 0, b: 0, a: 0.1 } }],
+    clipsContent: true
+  });
+  dd.appendChild(makeNode("TEXT", "Label", { characters: "A", fontName: { family: "Inter", style: "Regular" }, fontSize: 14, layoutSizingHorizontal: "FILL", layoutSizingVertical: "HUG" }));
+  dd.appendChild(makeNode("RECTANGLE", "Bar", { layoutPositioning: "ABSOLUTE" }));
+  figma.currentPage.appendChild(dd);
+  const ddLine = api.summarize(dd.id, { depth: 0 });
+  check("outline: alignment inside the layout brackets", /\[V gap0 pad0 fixed\/hug a:start\/center\]/.test(ddLine), ddLine);
+  check("outline: per-side stroke weights when mixed", /stroke:#E8EAF0\/0,1,1,1/.test(ddLine), ddLine);
+  check("outline: per-corner radius when mixed", / r0,0,3,3/.test(ddLine), ddLine);
+  check("outline: drop shadow", /shadow:0,4\/20 #000000@0\.1/.test(ddLine), ddLine);
+  check("outline: a node cut off by depth says how many children it has", / children:2$/.test(ddLine), ddLine);
+  const ddKids = api.summarize(dd.id, { depth: 1 }).split("\n");
+  check("outline: child of an AutoLayout parent shows its sizing", /TEXT "Label" .* size:fill\/hug/.test(ddKids[1]), ddKids[1]);
+  check("outline: absolute child is marked", / abs$/.test(ddKids[2]), ddKids[2]);
+
+  const deep = makeNode("FRAME", "Deep", { width: 10, height: 10 });
+  let cur = deep;
+  for (let i = 0; i < 5; i++) { const c = makeNode("FRAME", "L" + i, { width: 10, height: 10 }); cur.appendChild(c); cur = c; }
+  figma.currentPage.appendChild(deep);
+  const autoBig = api.summarize(deep.id, { autoBytes: 5000 }).split("\n");
+  check("auto depth: goes as deep as the budget allows", autoBig.length === 6 && !/children:/.test(autoBig.join("\n")), autoBig);
+  const autoSmall = api.summarize(deep.id, { autoBytes: 120 }).split("\n");
+  check("auto depth: a tight budget stops early and marks the cut", autoSmall.length >= 2 && autoSmall.length < 6 && / children:1$/.test(autoSmall[autoSmall.length - 1]), autoSmall);
+
+  // bridge.compare: one call instead of prop-by-prop diffing a reference.
+  const ddBad = makeNode("FRAME", "Dropdown copy", {
+    width: 440, height: 300, layoutMode: "HORIZONTAL", itemSpacing: 18,
+    paddingTop: 0, paddingRight: 0, paddingBottom: 0, paddingLeft: 0,
+    layoutSizingHorizontal: "FIXED", layoutSizingVertical: "HUG", primaryAxisAlignItems: "MIN", counterAxisAlignItems: "CENTER",
+    strokes: [{ type: "SOLID", color: { r: 232 / 255, g: 234 / 255, b: 240 / 255 } }], strokeWeight: 1, cornerRadius: 0, effects: [], clipsContent: true
+  });
+  ddBad.appendChild(makeNode("TEXT", "Label", { characters: "Other text", fontName: { family: "Inter", style: "Regular" }, fontSize: 14, layoutSizingHorizontal: "HUG", layoutSizingVertical: "HUG" }));
+  ddBad.appendChild(makeNode("RECTANGLE", "Extra"));
+  figma.currentPage.appendChild(ddBad);
+  const diff = api.compare(dd.id, [ddBad.id]);
+  check("compare: header names target, reference and diff count", new RegExp("^#" + ddBad.id + " \"Dropdown copy\" vs ref #" + dd.id + ": \\d+ diffs").test(diff), diff);
+  check("compare: root layout and stroke differences, target first", /layout H gap18 pad0 fixed\/hug \(ref V gap0 pad0 fixed\/hug\)/.test(diff) && /stroke #E8EAF0\/1 \(ref #E8EAF0\/0,1,1,1\)/.test(diff) && /effects none \(ref shadow/.test(diff), diff);
+  check("compare: children matched by name, text content ignored", /Label #\S+: size hug\/hug \(ref fill\/hug\)$/m.test(diff) && !/Other text/.test(diff), diff);
+  check("compare: a renamed child of the same type is paired, the name shown", /Bar #\S+: name "Extra" \(ref "Bar"\); abs none \(ref yes\)/.test(diff), diff);
+  dd.appendChild(makeNode("ELLIPSE", "Dot"));
+  ddBad.appendChild(makeNode("VECTOR", "Icon"));
+  const diff2 = api.compare(dd.id, [ddBad.id]);
+  check("compare: missing and extra children", /Dot: missing in target \(ref #\S+ ELLIPSE\)/.test(diff2) && /Icon #\S+: extra in target \(VECTOR\)/.test(diff2), diff2);
+  check("compare: a node against itself is identical", /: identical$/.test(api.compare(dd.id, dd.id)), api.compare(dd.id, dd.id));
+
   // figma_inspect is server-generated code over these same helpers: run what
   // the server would send, against the real runtime.
   const { buildInspectCode } = require(path.join(ROOT, "figma", "index.js"));
@@ -404,7 +460,11 @@ let inspectDone = Promise.resolve();
     const ft = await inspect({ node_ids: [card.id], find_text: "application" });
     check("figma_inspect: find_text returns id, text and frame per hit", typeof ft.found === "string" && ft.found.indexOf("#" + title.id) === 0 && /«Submit your application/.test(ft.found) && / in /.test(ft.found), ft);
     const ctx = await inspect({ node_ids: [card.id], context: true });
-    check("figma_inspect: context keyed by id, next to the outline", ctx.context && ctx.context[card.id] && ctx.context[card.id].node.id === card.id && typeof ctx.outline === "string", ctx);
+    check("figma_inspect: context keyed by id, next to the outline", ctx.context && ctx.context[card.id] && ctx.context[card.id].node.indexOf("#" + card.id) !== -1 && typeof ctx.context[card.id].pageWidths === "string" && typeof ctx.outline === "string", ctx);
+    const cmp = await inspect({ node_ids: [ddBad.id], compare: dd.id });
+    check("figma_inspect: compare -> diff text, no outline", typeof cmp.compare === "string" && /diffs/.test(cmp.compare) && !cmp.outline, cmp);
+    const auto = await inspect({ node_ids: [deep.id] });
+    check("figma_inspect: no depth -> the whole small tree in one read", auto.outline.split("\n").length === 6, auto.outline);
     const reac = await inspect({ node_ids: [card.id], props: ["reactions"] });
     check("figma_inspect: props reactions reads without error", reac.props[card.id] && !/^ERR/.test(String(reac.props[card.id].reactions)), reac);
   })();

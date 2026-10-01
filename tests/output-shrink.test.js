@@ -256,10 +256,10 @@ console.log("\n== figma_inspect generated code ==");
   check("default: an outline over bridge.summarize, spec has no view/context/findText",
     /bridge\.summarize\(refs, so\)/.test(base) && specOf(base).view === null && specOf(base).context === false && specOf(base).findText === null, specOf(base));
   const map = srv.buildInspectCode({ node_ids: ["1:2"], view: "map", depth: 2 });
-  check("view: 'map' -> summarize(refs, { depth, view: 'map' })", specOf(map).view === "map" && specOf(map).depth === 2 && /if \(a\.view === 'map'\) so\.view = 'map';/.test(map) && /const so = \{ depth: /.test(map), map);
+  check("view: 'map' -> summarize(refs, { depth, view: 'map' })", specOf(map).view === "map" && specOf(map).depth === 2 && /if \(a\.view === 'map'\) so\.view = 'map';/.test(map) && /if \(a\.depth !== null\) so\.depth = a\.depth;/.test(map), map);
   check("view: 'outline' is the default (no view sent)", specOf(srv.buildInspectCode({ view: "outline" })).view === null);
   const ctx = srv.buildInspectCode({ node_ids: ["1:2", "3:4"], context: true });
-  check("context: true -> out.context[id] = bridge.context(id) for every ref", specOf(ctx).context === true && /out\.context\[id\] = bridge\.context\(id\)/.test(ctx) && /"ids":\["1:2","3:4"\]/.test(ctx), ctx);
+  check("context: true -> out.context[id] = bridge.context(id) as one-line strings, for every ref", specOf(ctx).context === true && /const c = bridge\.context\(id\);/.test(ctx) && /out\.context\[id\] = \{ node:/.test(ctx) && /"ids":\["1:2","3:4"\]/.test(ctx), ctx);
   const ft = srv.buildInspectCode({ node_ids: ["1:2"], find_text: "Купить", limit: 5, find_type: "text" });
   check("find_text -> bridge.find(query, { root, limit, text: true }) per root",
     specOf(ft).findText === "Купить" && specOf(ft).limit === 5 && specOf(ft).type === "TEXT" && /const query = a\.findText \|\| a\.find;/.test(ft) &&

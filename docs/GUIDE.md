@@ -16,6 +16,8 @@ Every tool call is a full model turn. A typical task needs 3–5 calls:
    - What the target lives in: `figma_inspect({ node_ids: [target], context: true })` → parent sections, breakpoint widths used in the file, component sets inside with **all** their variant options, and the file's `conventions`.
    - Which screen has a button/label: `figma_inspect({ find_text: "Отправить" })` → `#id "layer" «text» in <top frame>` per match.
    - Where a modal opens from: `figma_inspect({ node_ids: [...], props: ["reactions"] })`.
+   - What's wrong compared with a correct copy: `figma_inspect({ node_ids: [broken1, broken2, …], compare: correctId })` → per node only the differences (layout, alignment, sizing, per-side stroke, per-corner radius, effects, clip, font, variant; children matched by name; geometry and text content skipped).
+   - Without `depth` the outline goes as deep as fits the reply; `children:N` at the end of a line = more below.
    - A cut outline ends with `… pass offset=K` → call again with `offset: K`. Do not raise `max_output_bytes` — in clients that spill big outputs to a file it is capped at 3900 anyway.
 2. **Ask** the user if the placement or scope is still ambiguous — before exploring other sections.
 3. **Change everything in one `figma_execute_code` call**, with `capture_node_ids` on that same call. Macros instead of boilerplate:
@@ -24,12 +26,12 @@ Every tool call is a full model turn. A typical task needs 3–5 calls:
    - `bridge.setText(root, { "Layer name": "text" })` — loads every font the layer uses first.
    - `bridge.shift(ids, { dx, dy })`, `bridge.moveInto(ids, section, { layout: "row" | "column" | "none", gap })`, `bridge.fitSection(section, { padding })`.
    - A wrong property/layer/helper name throws with the list of valid ones; runtime errors report `at line N: <code>`.
-4. **Verify** with the returned image, `warnings` and `bridge.check(specs)` — not with another read.
+4. **Verify** with the returned image, `warnings`, `bridge.check(specs)` and `bridge.compare(ref, targets)` ("identical") inside the write call — not with another read.
 
 Record file conventions once, so the next session gets them from `context: true` instead of re-discovering them:
 `bridge.store.set("conventions", { breakpoints: [1366, 768, 360], workingSection: "Новое", gridGap: 100, groupGap: 400 })`.
 
-A result cut by the budget stays whole in `bridge.state.lastResult`: next call `return bridge.state.lastResult.slice(40, 80)` (or just the keys you need) instead of re-running the read.
+A result cut by the budget stays whole in `bridge.state.lastResult`, but page a cut outline with `offset` instead of slicing it turn by turn.
 
 ---
 

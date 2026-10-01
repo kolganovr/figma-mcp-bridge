@@ -16,3 +16,10 @@ graphify-out/
 mcp-publisher.exe
 mcp-publisher
 *.tgz
+
+# Antigravity writes tool schemas + instructions next to the server it runs
+figma/*.json
+figma/instructions.md
+
+# local dev notes for coding agents
+CLAUDE.md

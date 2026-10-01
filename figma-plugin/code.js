@@ -503,17 +503,80 @@ function readFont(n) {
   return f ? f.family + "/" + f.style + " " + size : "mixed " + size;
 }
 
-// One node as one line: TYPE "name" #id WxH @x,y [layout] fill:… r8 "text…"
+// The facts session 9672b93e had to fetch with ~20 extra props calls are put
+// on the outline line itself, each only when it is not the default.
+
+// AutoLayout alignment "a:start/center" (primary/counter); null for start/start.
+const ALIGN_WORDS = { MIN: "start", MAX: "end", CENTER: "center", SPACE_BETWEEN: "between", BASELINE: "baseline" };
+function readAlign(n) {
+  if (!("layoutMode" in n) || !n.layoutMode || n.layoutMode === "NONE") return null;
+  const p = n.primaryAxisAlignItems || "MIN", c = n.counterAxisAlignItems || "MIN";
+  const wrap = n.layoutWrap === "WRAP" ? " wrap" : "";
+  if (p === "MIN" && c === "MIN") return wrap ? wrap.trim() : null;
+  return "a:" + (ALIGN_WORDS[p] || String(p).toLowerCase()) + "/" + (ALIGN_WORDS[c] || String(c).toLowerCase()) + wrap;
+}
+
+// "/1" or per side "/0,1,1,1" (top,right,bottom,left) when the weight is mixed.
+function readStrokeWeight(n) {
+  if (typeof n.strokeWeight === "number") return "/" + readRound(n.strokeWeight);
+  if (n.strokeWeight === figma.mixed && typeof n.strokeTopWeight === "number") {
+    return "/" + [n.strokeTopWeight, n.strokeRightWeight, n.strokeBottomWeight, n.strokeLeftWeight].map(readRound).join(",");
+  }
+  return "";
+}
+
+// "r8", or per corner "r0,0,3,3" (top-left, top-right, bottom-right, bottom-left).
+function readRadius(n) {
+  if (typeof n.cornerRadius === "number") return n.cornerRadius ? "r" + readRound(n.cornerRadius) : null;
+  if (n.cornerRadius === figma.mixed && typeof n.topLeftRadius === "number") {
+    return "r" + [n.topLeftRadius, n.topRightRadius, n.bottomRightRadius, n.bottomLeftRadius].map(readRound).join(",");
+  }
+  return null;
+}
+
+// "shadow:0,4/20 #2A2E35@0.15" | "inner:…" | "blur:8" | "bgblur:8".
+function readEffects(n) {
+  if (!Array.isArray(n.effects)) return null;
+  const vis = n.effects.filter(e => e && e.visible !== false);
+  if (!vis.length) return null;
+  return vis.map(e => {
+    if (e.type === "DROP_SHADOW" || e.type === "INNER_SHADOW") {
+      const o = e.offset || { x: 0, y: 0 };
+      return (e.type === "DROP_SHADOW" ? "shadow:" : "inner:") + readRound(o.x) + "," + readRound(o.y) + "/" + readRound(e.radius) +
+        (e.spread ? "+" + readRound(e.spread) : "") + " " + readHex(e.color, e.color ? e.color.a : 1);
+    }
+    return (e.type === "BACKGROUND_BLUR" ? "bgblur:" : "blur:") + readRound(e.radius);
+  }).join(", ");
+}
+
+// Sizing of a child inside an AutoLayout parent that has no layout of its own
+// (TEXT, plain frames, instances): "fill/hug". Frames with layout carry it in [...].
+function readChildSizing(n) {
+  const p = n.parent;
+  if (!p || !("layoutMode" in p) || !p.layoutMode || p.layoutMode === "NONE") return null;
+  if ("layoutMode" in n && n.layoutMode && n.layoutMode !== "NONE") return null;
+  const s = [n.layoutSizingHorizontal, n.layoutSizingVertical].filter(Boolean).map(x => String(x).toLowerCase()).join("/");
+  return s || null;
+}
+
+// One node as one line: TYPE "name" #id WxH @x,y [layout a:align] size:fill/hug abs
+// fill:… stroke:…/w r8 shadow:… "text…"
 function describeNodeLine(n, textChars) {
   if (!n) return "MISSING";
   const parts = [n.type, JSON.stringify(n.name), "#" + n.id];
   if (typeof n.width === "number") parts.push(readRound(n.width) + "x" + readRound(n.height));
   if (typeof n.x === "number" && n.type !== "PAGE") parts.push("@" + readRound(n.x) + "," + readRound(n.y));
   const layout = readLayout(n);
-  if (layout) parts.push("[" + layout + "]");
+  if (layout) { const al = readAlign(n); parts.push("[" + layout + (al ? " " + al : "") + "]"); }
+  const sizing = readChildSizing(n);
+  if (sizing) parts.push("size:" + sizing);
+  if (n.layoutPositioning === "ABSOLUTE") parts.push("abs");
   if ("fills" in n) { const f = readPaints(n.fills); if (f) parts.push("fill:" + f); }
-  if ("strokes" in n) { const st = readPaints(n.strokes); if (st) parts.push("stroke:" + st + (typeof n.strokeWeight === "number" ? "/" + readRound(n.strokeWeight) : "")); }
-  if (typeof n.cornerRadius === "number" && n.cornerRadius) parts.push("r" + readRound(n.cornerRadius));
+  if ("strokes" in n) { const st = readPaints(n.strokes); if (st) parts.push("stroke:" + st + readStrokeWeight(n)); }
+  const radius = readRadius(n);
+  if (radius) parts.push(radius);
+  const fx = readEffects(n);
+  if (fx) parts.push(fx);
   if (typeof n.opacity === "number" && n.opacity < 1) parts.push("op" + readRound(n.opacity));
   if (n.visible === false) parts.push("hidden");
   if (n.type === "TEXT") {
@@ -522,11 +585,19 @@ function describeNodeLine(n, textChars) {
     parts.push(readFont(n));
     parts.push(JSON.stringify(chars.length > max ? chars.slice(0, max) + "…" : chars));
   }
-  if (n.type === "INSTANCE") {
-    try { if (n.mainComponent) parts.push("→" + JSON.stringify(n.mainComponent.name)); } catch (e) {}
-    if (n.variantProperties) parts.push(Object.keys(n.variantProperties).map(k => k + "=" + n.variantProperties[k]).join(","));
-  }
+  if (n.type === "INSTANCE") parts.push(readInstanceOf(n));
   return parts.join(" ");
+}
+
+// →"Set name" Status=Default,Size=M. A variant's own name is just its
+// "Status=Default, Size=M" list, so the set's name is shown instead of repeating it.
+function readInstanceOf(n) {
+  let main = null;
+  try { main = n.mainComponent; } catch (e) {}
+  const variant = n.variantProperties ? Object.keys(n.variantProperties).map(k => k + "=" + n.variantProperties[k]).join(",") : "";
+  let name = main ? main.name : "?";
+  if (main && variant && main.parent && main.parent.type === "COMPONENT_SET") name = main.parent.name;
+  return "→" + JSON.stringify(name) + (variant ? " " + variant : "");
 }
 
 // view:"map" — the cheapest useful line: TYPE "name" #id WxH @x,y children:N.
@@ -540,26 +611,68 @@ function describeMapLine(n) {
   return parts.join(" ");
 }
 
+// Bytes a string costs once JSON-encoded (UTF-8, quotes/backslashes/newlines
+// escaped) — the sandbox has no TextEncoder.
+function jsonByteCost(s) {
+  let b = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c === 34 || c === 92 || c === 10) b += 2;
+    else if (c < 0x80) b += 1;
+    else if (c < 0x800) b += 2;
+    else if (c >= 0xD800 && c <= 0xDBFF) { b += 4; i++; }
+    else b += 3;
+  }
+  return b;
+}
+
+const PRUNE_STOP = { stop: true };
+
 // Indented outline, one line per node. opts: depth (2), maxChildren (15), text (40),
-// view ("map" = geometry only, see describeMapLine).
+// view ("map" = geometry only, see describeMapLine), autoBytes (depth not given:
+// the deepest level, up to 6, whose outline fits in that many JSON bytes — one
+// read shows as much as the reply can carry instead of a depth-1 slice that
+// the model then deepens call by call). A node cut off by the depth ends with
+// "children:N" so the reader knows there is more.
 function summarizeNodes(refs, opts) {
   const o = opts || {};
   if (o.view === "table") return summarizeTables(refs);
-  const depth = Number.isFinite(o.depth) ? o.depth : 2;
   const maxChildren = Number.isFinite(o.maxChildren) ? o.maxChildren : 15;
-  const lines = [];
-  const walk = (n, level) => {
-    lines.push("  ".repeat(level) + (o.view === "map" ? describeMapLine(n) : describeNodeLine(n, o.text)));
-    if (!n || level >= depth || !("children" in n) || !n.children) return;
-    const kids = n.children;
-    kids.slice(0, maxChildren).forEach(k => walk(k, level + 1));
-    if (kids.length > maxChildren) lines.push("  ".repeat(level + 1) + "… +" + (kids.length - maxChildren) + " more children");
+  const list = Array.isArray(refs) ? refs : [refs];
+  const render = (depth, byteCap) => {
+    const lines = [];
+    let bytes = 0;
+    const push = (line) => {
+      lines.push(line);
+      bytes += jsonByteCost(line) + 2;
+      if (byteCap && bytes > byteCap) throw PRUNE_STOP;
+    };
+    const walk = (n, level) => {
+      let line = "  ".repeat(level) + (o.view === "map" ? describeMapLine(n) : describeNodeLine(n, o.text));
+      const kids = n && "children" in n && n.children ? n.children : null;
+      if (kids && kids.length && level >= depth && o.view !== "map") line += " children:" + kids.length;
+      push(line);
+      if (!kids || level >= depth) return;
+      kids.slice(0, maxChildren).forEach(k => walk(k, level + 1));
+      if (kids.length > maxChildren) push("  ".repeat(level + 1) + "… +" + (kids.length - maxChildren) + " more children");
+    };
+    list.forEach(ref => {
+      const n = readNode(ref);
+      if (n) walk(n, 0); else push("MISSING " + ref);
+    });
+    return lines.join("\n");
   };
-  (Array.isArray(refs) ? refs : [refs]).forEach(ref => {
-    const n = readNode(ref);
-    if (n) walk(n, 0); else lines.push("MISSING " + ref);
-  });
-  return lines.join("\n");
+  if (!Number.isFinite(o.depth) && Number.isFinite(o.autoBytes) && o.autoBytes > 0) {
+    let best = null;
+    for (let d = 1; d <= 6; d++) {
+      let text;
+      try { text = render(d, o.autoBytes); } catch (e) { if (e !== PRUNE_STOP) throw e; break; }
+      best = text;
+      if (text.indexOf(" children:") === -1) break; // nothing was cut by the depth
+    }
+    return best !== null ? best : render(1, 0);
+  }
+  return render(Number.isFinite(o.depth) ? o.depth : 2, 0);
 }
 
 // view:"table" — structural table detector (never trusts layer names).
@@ -846,6 +959,110 @@ function inspectNodes(refs, props) {
     out[id] = row;
   });
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// bridge.compare(ref, targets) — "make these like that one" in one read.
+// Session 9672b93e spent ~60 figma_inspect calls diffing a correct dropdown
+// against six broken copies prop by prop. This walks the reference and each
+// target in parallel (children matched by type+name, then by position) and
+// lists only what differs. Geometry (x/y/width/height) and text content are
+// not compared: breakpoints legitimately differ there.
+// ---------------------------------------------------------------------------
+function shapeOf(n) {
+  const s = { type: n.type };
+  const layout = readLayout(n);
+  if (layout) s.layout = layout;
+  const al = readAlign(n);
+  if (al) s.align = al;
+  const sizing = readChildSizing(n);
+  if (sizing) s.size = sizing;
+  if (n.layoutPositioning === "ABSOLUTE") s.abs = "yes";
+  if ("fills" in n) { const f = readPaints(n.fills); if (f) s.fill = f; }
+  if ("strokes" in n) { const st = readPaints(n.strokes); if (st) s.stroke = st + readStrokeWeight(n); }
+  const r = readRadius(n);
+  if (r) s.radius = r;
+  const fx = readEffects(n);
+  if (fx) s.effects = fx;
+  if (typeof n.opacity === "number" && n.opacity < 1) s.opacity = readRound(n.opacity);
+  if (n.visible === false) s.hidden = "yes";
+  if (n.clipsContent === true) s.clip = "yes";
+  if (n.type === "TEXT") s.font = readFont(n);
+  if (n.type === "INSTANCE") s.component = readInstanceOf(n).slice(1);
+  return s;
+}
+
+// Figma's default layer names ("Frame 2131329763") differ between copies by design.
+const AUTO_NAME_RE = /^(Frame|Group|Rectangle|Ellipse|Vector|Line|Polygon|Star|Text) \d+$/;
+
+function compareKids(n) {
+  return n && "children" in n && n.children ? n.children.slice() : [];
+}
+
+// Pairs ref children with target children: same type+name in order, then the
+// leftovers of the same type in order. -> { pairs: [[r, t]], missing: [r], extra: [t] }
+function matchChildren(refKids, tgtKids) {
+  const used = new Set();
+  const pairs = [];
+  const missing = [];
+  const key = c => c.type + "\u0000" + c.name;
+  refKids.forEach(r => {
+    const t = tgtKids.find(c => !used.has(c) && key(c) === key(r));
+    if (t) { used.add(t); pairs.push([r, t]); } else missing.push(r);
+  });
+  const stillMissing = [];
+  missing.forEach(r => {
+    const t = tgtKids.find(c => !used.has(c) && c.type === r.type);
+    if (t) { used.add(t); pairs.push([r, t]); } else stillMissing.push(r);
+  });
+  pairs.sort((a, b) => refKids.indexOf(a[0]) - refKids.indexOf(b[0]));
+  return { pairs, missing: stillMissing, extra: tgtKids.filter(c => !used.has(c)) };
+}
+
+// One block per target: a header line, then one line per node that differs:
+//   <path> #targetId: key target (ref value); …
+// "identical" when nothing differs. opts: depth (8), maxLines (200).
+function compareNodes(refRef, targets, opts) {
+  const o = opts || {};
+  const ref = readNode(refRef);
+  if (!ref) return "MISSING reference " + refRef;
+  const maxDepth = Number.isFinite(o.depth) ? o.depth : 8;
+  const maxLines = Number.isFinite(o.maxLines) ? o.maxLines : 200;
+  const blocks = [];
+  (Array.isArray(targets) ? targets : [targets]).forEach(tRef => {
+    const tgt = readNode(tRef);
+    if (!tgt) { blocks.push("MISSING " + tRef); return; }
+    const lines = [];
+    let diffs = 0;
+    const visit = (r, t, path, level) => {
+      if (lines.length >= maxLines) return;
+      const a = shapeOf(r), b = shapeOf(t);
+      const keys = Object.keys(a).concat(Object.keys(b).filter(k => !(k in a)));
+      const out = [];
+      if (level > 0 && r.name !== t.name && !(AUTO_NAME_RE.test(r.name) && AUTO_NAME_RE.test(t.name))) out.push("name " + JSON.stringify(t.name) + " (ref " + JSON.stringify(r.name) + ")");
+      keys.forEach(k => {
+        if (a[k] === b[k]) return;
+        out.push(k + " " + (b[k] === undefined ? "none" : b[k]) + " (ref " + (a[k] === undefined ? "none" : a[k]) + ")");
+      });
+      if (out.length) { diffs += out.length; lines.push("  " + (path || ".") + " #" + t.id + ": " + out.join("; ")); }
+      if (a.type !== b.type || level >= maxDepth) return;
+      const m = matchChildren(compareKids(r), compareKids(t));
+      const counts = {};
+      const label = c => {
+        const k = c.name;
+        counts[k] = (counts[k] || 0) + 1;
+        return (path ? path + "/" : "") + c.name + (counts[k] > 1 ? "[" + counts[k] + "]" : "");
+      };
+      m.pairs.forEach(([rc, tc]) => visit(rc, tc, label(rc), level + 1));
+      m.missing.forEach(rc => { diffs++; lines.push("  " + label(rc) + ": missing in target (ref #" + rc.id + " " + rc.type + ")"); });
+      m.extra.forEach(tc => { diffs++; lines.push("  " + (path ? path + "/" : "") + tc.name + " #" + tc.id + ": extra in target (" + tc.type + ")"); });
+    };
+    visit(ref, tgt, "", 0);
+    if (lines.length >= maxLines) lines.push("  … stopped at " + maxLines + " lines");
+    blocks.push("#" + tgt.id + " " + JSON.stringify(tgt.name) + " vs ref #" + ref.id + ": " + (diffs ? diffs + " diffs" : "identical"));
+    lines.forEach(l => blocks.push(l));
+  });
+  return blocks.join("\n");
 }
 
 // Runs fn with figma.skipInvisibleInstanceChildren = true and puts the previous
@@ -1444,6 +1661,7 @@ function createBridgeApi() {
   api.inspect = function (refs, props) { return inspectNodes(refs, props); };
   api.find = function (query, opts) { return findNodes(query, opts); };
   api.check = function (specs, opts) { return checkNodes(specs, opts); };
+  api.compare = function (ref, targets, opts) { return compareNodes(ref, targets, opts); };
   api.hex = function (color, opacity) { return readHex(color, opacity); };
   api.context = function (ref) {
     const n = readNode(ref);
@@ -1477,12 +1695,14 @@ function createBridgeApi() {
         "memory only — it is cleared when the plugin reloads.",
       cheapReads: {
         "bridge.summarize(idOrNode | ids, { depth: 2, maxChildren: 15, text: 40, view })":
-          "indented outline, one line per node: TYPE \"name\" #id WxH @x,y [V gap8 pad16 fill/hug] fill:#FFF r8 font \"text…\"; view:\"map\" = only TYPE \"name\" #id WxH @x,y children:N (cheapest page overview); view:\"table\" = per table: columns (header, width, sizing, cell contents) + row/cell ids",
+          "indented outline, one line per node: TYPE \"name\" #id WxH @x,y [V gap8 pad16 fill/hug a:start/center] size:fill/hug abs fill:#FFF stroke:#E8EAF0/0,1,1,1 r0,0,3,3 shadow:0,4/20 #000@0.1 font \"text…\" (non-defaults only; children:N = more below the depth); view:\"map\" = only TYPE \"name\" #id WxH @x,y children:N (cheapest page overview); view:\"table\" = per table: columns (header, width, sizing, cell contents) + row/cell ids",
         "bridge.context(idOrNode)":
           "{ node, ancestors, siblings: [{w,n}], pageWidths: top-6 frame widths (breakpoints), components: [{ set, used, props }] used inside the node, conventions } — read this before building next to existing design",
         "bridge.inspect(ids, [props])":
           "{ id: { prop: value } | \"MISSING\" }; props also accept fill, stroke, text, font, layout, padding, parent, children, main, variant, props, absolute, reactions (prototype links as short strings), connector ({ start, end } ids)",
         "bridge.find(query | RegExp, { root, type, limit: 20, text })": "[{ id, name, type }] by name under root (default: current page); text:true searches TEXT characters and returns [{ id, name, type, text, frame }]",
+        "bridge.compare(refId, targetIds, { depth: 8 })":
+          "text diff of each target against the reference, children matched by name: layout, align, sizing, fill, stroke (+per-side weights), radius, effects, clip, font, component/variant; geometry and text content are skipped. \"identical\" when done — use it to verify a \"make these like that one\" change",
         "bridge.check(specs, { tolerance: 0.5 })":
           "specs { id: { width: 320, fill: \"#FFFFFF\", text: /Submit/, layout: \"V gap8 pad16\" } } -> { pass, fail: [{ id, key, want, got }], missing }",
         "bridge.state.lastResult": "full value of the previous call's return, even when the server shrank what you saw"

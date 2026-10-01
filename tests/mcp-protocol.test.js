@@ -86,7 +86,7 @@ async function main() {
     const init = await server.call("initialize", { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "test", version: "0" } });
     check("initialize responds with serverInfo.name", init.result && init.result.serverInfo && init.result.serverInfo.name === "figma-mcp", init);
     check("initialize advertises tools capability", init.result && init.result.capabilities && "tools" in init.result.capabilities, init);
-    check("serverInfo.version is 4.2.2", init.result.serverInfo.version === "4.2.2", init.result.serverInfo);
+    check("serverInfo.version is 4.2.3", init.result.serverInfo.version === "4.2.3", init.result.serverInfo);
     check("initialize instructions mention figma_read_canvas", /figma_read_canvas/.test(init.result.instructions || ""), init.result && init.result.instructions);
 
     const list = await server.call("tools/list", {});
