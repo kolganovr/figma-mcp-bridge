@@ -259,8 +259,9 @@ Every default is overridable per call, and per install through env: `FIGMA_MCP_S
 
 ## What's new
 
-4.2.3: `figma_inspect` diffs nodes against a reference (`compare`), reads as deep as fits the reply, and
-puts stroke sides, corner radii, effects, alignment and sizing on the outline line. History: [CHANGELOG.md](CHANGELOG.md).
+4.2.4: `figma_inspect like: "<ref id>"` finds every copy of a reference (same component, name or
+children) on the given screens or its section and diffs each, grouped by diff set — "where are the broken
+ones and what is off" in one call. History: [CHANGELOG.md](CHANGELOG.md).
 
 ## Tool reference
 

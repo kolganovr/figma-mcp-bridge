@@ -999,6 +999,14 @@ function compareKids(n) {
   return n && "children" in n && n.children ? n.children.slice() : [];
 }
 
+// describeNodeLine with the id first and the name dropped (the path already
+// shows it): #12:3 TEXT 120x16 @0,0 size:fill/hug font "…" children:2
+function refLine(n) {
+  const line = describeNodeLine(n).replace(/^(\S+) "(?:[^"\\]|\\.)*" (#\S+)/, "$2 $1");
+  const kids = compareKids(n).length;
+  return kids ? line + " children:" + kids : line;
+}
+
 // Pairs ref children with target children: same type+name in order, then the
 // leftovers of the same type in order. -> { pairs: [[r, t]], missing: [r], extra: [t] }
 function matchChildren(refKids, tgtKids) {
@@ -1046,6 +1054,9 @@ function compareNodes(refRef, targets, opts) {
       });
       if (out.length) { diffs += out.length; lines.push("  " + (path || ".") + " #" + t.id + ": " + out.join("; ")); }
       if (a.type !== b.type || level >= maxDepth) return;
+      // Another variant brings its own insides: the variant line is the fix,
+      // its children would only add noise (session 87bd6b0a: 23 lines per copy).
+      if (a.type === "INSTANCE" && a.component !== b.component) return;
       const m = matchChildren(compareKids(r), compareKids(t));
       const counts = {};
       const label = c => {
@@ -1053,8 +1064,27 @@ function compareNodes(refRef, targets, opts) {
         counts[k] = (counts[k] || 0) + 1;
         return (path ? path + "/" : "") + c.name + (counts[k] > 1 ? "[" + counts[k] + "]" : "");
       };
+      // A target that wraps reference children in an extra frame (session
+      // 87bd6b0a: rows of TEXTs inside "Frame 2131329286") is one fix — unwrap —
+      // not a "missing" line per text plus an "extra" line per frame.
+      let missing = m.missing;
+      const wrapped = [];
+      m.extra.slice().forEach(tc => {
+        if (!missing.length || !compareKids(tc).length) return;
+        const w = matchChildren(missing, compareKids(tc));
+        if (!w.pairs.length) return;
+        wrapped.push([tc, w.pairs]);
+        missing = w.missing;
+        m.extra.splice(m.extra.indexOf(tc), 1);
+      });
       m.pairs.forEach(([rc, tc]) => visit(rc, tc, label(rc), level + 1));
-      m.missing.forEach(rc => { diffs++; lines.push("  " + label(rc) + ": missing in target (ref #" + rc.id + " " + rc.type + ")"); });
+      wrapped.forEach(([tc, pairs]) => {
+        diffs++;
+        lines.push("  " + (path ? path + "/" : "") + tc.name + " #" + tc.id + ": wrapper not in ref (" + tc.type + ") — ref holds " + pairs.map(p => JSON.stringify(p[0].name)).join(", ") + " directly");
+        pairs.forEach(([rc, wc]) => visit(rc, wc, label(rc), level + 1));
+      });
+      // The reference's own line, so the fix needs no extra read of it.
+      missing.forEach(rc => { diffs++; lines.push("  " + label(rc) + ": missing in target (ref " + refLine(rc) + ")"); });
       m.extra.forEach(tc => { diffs++; lines.push("  " + (path ? path + "/" : "") + tc.name + " #" + tc.id + ": extra in target (" + tc.type + ")"); });
     };
     visit(ref, tgt, "", 0);
@@ -1063,6 +1093,134 @@ function compareNodes(refRef, targets, opts) {
     lines.forEach(l => blocks.push(l));
   });
   return blocks.join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// bridge.like(refs, roots) — "where else is this thing, and how does each copy
+// differ". Session 87bd6b0a ("redo the dropdowns like these references") spent
+// ~34 figma_inspect calls only pairing references with their copies on three
+// breakpoints, and ~14 more on a nested instance's variant. This finds the
+// copies and compares them in one read.
+// Copy of an INSTANCE = an instance of the same component set (or component);
+// of anything else = same type and name, or — for auto names / renamed copies —
+// the same child names. roots: node ids (default: the reference's top section).
+// ---------------------------------------------------------------------------
+function componentRootOf(n) {
+  let main = null;
+  try { main = n.mainComponent; } catch (e) {}
+  if (!main) return null;
+  return main.parent && main.parent.type === "COMPONENT_SET" ? main.parent : main;
+}
+
+function childNameSet(n) {
+  const s = new Set();
+  const walk = (x, d) => compareKids(x).forEach(c => {
+    if (!AUTO_NAME_RE.test(c.name)) s.add(c.type + "\u0000" + c.name);
+    if (d < 2) walk(c, d + 1);
+  });
+  walk(n, 1);
+  return s;
+}
+
+function isInside(n, anc) {
+  for (let cur = n; cur; cur = cur.parent) if (cur === anc) return true;
+  return false;
+}
+
+function topSectionOf(n) {
+  let best = null;
+  for (let cur = n.parent; cur && cur.type !== "PAGE" && cur.type !== "DOCUMENT"; cur = cur.parent) {
+    if (cur.type === "SECTION") best = cur;
+  }
+  return best || figma.currentPage;
+}
+
+// The screen a node sits on: its outermost non-section ancestor right under a
+// SECTION or the page (breakpoint frames live in sections).
+function screenOf(n) {
+  for (let cur = n.parent; cur && cur.parent; cur = cur.parent) {
+    const up = cur.parent.type;
+    if (cur.type !== "SECTION" && (up === "SECTION" || up === "PAGE" || up === "DOCUMENT")) return cur;
+  }
+  return null;
+}
+
+function findCopies(ref, roots, limit) {
+  const seen = new Set();
+  const found = [];
+  const add = n => { if (!seen.has(n.id) && !isInside(n, ref) && !isInside(ref, n)) { seen.add(n.id); found.push(n); } };
+  const comp = ref.type === "INSTANCE" ? componentRootOf(ref) : null;
+  const named = !AUTO_NAME_RE.test(ref.name);
+  // Hidden layers inside instances are skipped while scanning only: compare
+  // below must still see them (a hidden inner "Dropdown" is a real difference).
+  withSkipInvisible(() => roots.forEach(root => {
+    if (comp) {
+      scanNodes(root, ["INSTANCE"], n => { const c = componentRootOf(n); return !!c && c.id === comp.id; }).forEach(add);
+    } else if (named) {
+      scanNodes(root, [ref.type], n => n.name === ref.name).forEach(add);
+    }
+  }));
+  if (!found.length && !comp) {
+    // Renamed or auto-named copies: same type, at least half the child names shared.
+    const want = childNameSet(ref);
+    if (want.size) {
+      withSkipInvisible(() => roots.forEach(root => scanNodes(root, [ref.type], n => {
+        if (!("children" in n) || !n.children.length) return false;
+        const got = childNameSet(n);
+        let common = 0;
+        want.forEach(k => { if (got.has(k)) common++; });
+        return common / Math.max(want.size, got.size) >= 0.5;
+      }).forEach(add)));
+    }
+  }
+  const copies = found.slice(0, limit);
+  copies.total = found.length;
+  return copies;
+}
+
+function likeNodes(refList, rootList, opts) {
+  const o = opts || {};
+  const limit = Number.isFinite(o.limit) ? o.limit : 30;
+  const refs = (Array.isArray(refList) ? refList : String(refList).split(",")).map(r => String(r).trim()).filter(Boolean);
+  const out = [];
+  refs.forEach(refId => {
+    const ref = readNode(refId);
+    if (!ref) { out.push("MISSING reference " + refId); return; }
+    const roots = (rootList && rootList.length ? rootList : [topSectionOf(ref)]).map(readNode).filter(Boolean);
+    const copies = findCopies(ref, roots, limit);
+    const comp = ref.type === "INSTANCE" ? componentRootOf(ref) : null;
+    // Screen names share a long prefix ("Сервисы / Распределение / … / 1366"):
+    // say it once in the header, keep only the rest per copy.
+    const screens = copies.map(screenOf);
+    const names = screens.filter(Boolean).map(x => x.name);
+    let prefix = names.length > 1 ? names.reduce((p, n) => { let k = 0; while (k < p.length && p[k] === n[k]) k++; return p.slice(0, k); }) : "";
+    prefix = prefix.slice(0, prefix.lastIndexOf(" / ") + 3);
+    const where = k => screens[k] ? " " + JSON.stringify(screens[k].name.slice(prefix.length)) : "";
+    out.push("like " + describeNodeLine(ref).replace(/ @\S+/, "") + ": " + copies.length + (copies.total > copies.length ? " of " + copies.total : "") + " cop" + (copies.length === 1 && !(copies.total > 1) ? "y" : "ies") +
+      " (" + (comp ? "instances of " + JSON.stringify(comp.name) : "same name/children") + ")" +
+      (prefix ? " on screens " + JSON.stringify(prefix + "…") : "") + " under " +
+      roots.map(r => JSON.stringify(r.name) + " #" + r.id).join(", "));
+    // One group per distinct diff set (ids aside): a fix that repeats on every
+    // breakpoint is printed once, with the copies it applies to.
+    const groups = [];
+    const byKey = {};
+    copies.forEach((c, k) => {
+      const lines = compareNodes(ref, [c], o).split("\n");
+      const same = /: identical$/.test(lines[0]);
+      const body = same ? [] : lines.slice(1);
+      const key = same ? "=" : body.map(l => l.replace(/ #[^\s:]+/g, "")).join("\n");
+      if (!byKey[key]) { byKey[key] = { same, head: lines[0].replace(/^.*: /, ""), body, ids: [] }; groups.push(byKey[key]); }
+      byKey[key].ids.push("#" + c.id + where(k));
+    });
+    groups.sort((a, b) => (a.same ? 1 : 0) - (b.same ? 1 : 0));
+    groups.forEach(g => {
+      const n = g.ids.length + " cop" + (g.ids.length === 1 ? "y" : "ies");
+      if (g.same) { out.push(n + " identical: " + g.ids.join(", ")); return; }
+      out.push(n + " — " + g.head + (g.ids.length > 1 ? " (ids below: " + g.ids[0].split(" ")[0] + ")" : "") + ": " + g.ids.join(", "));
+      g.body.forEach(l => out.push(l));
+    });
+  });
+  return out.join("\n");
 }
 
 // Runs fn with figma.skipInvisibleInstanceChildren = true and puts the previous
@@ -1662,6 +1820,7 @@ function createBridgeApi() {
   api.find = function (query, opts) { return findNodes(query, opts); };
   api.check = function (specs, opts) { return checkNodes(specs, opts); };
   api.compare = function (ref, targets, opts) { return compareNodes(ref, targets, opts); };
+  api.like = function (refs, roots, opts) { return likeNodes(refs, roots, opts); };
   api.hex = function (color, opacity) { return readHex(color, opacity); };
   api.context = function (ref) {
     const n = readNode(ref);
@@ -1703,6 +1862,8 @@ function createBridgeApi() {
         "bridge.find(query | RegExp, { root, type, limit: 20, text })": "[{ id, name, type }] by name under root (default: current page); text:true searches TEXT characters and returns [{ id, name, type, text, frame }]",
         "bridge.compare(refId, targetIds, { depth: 8 })":
           "text diff of each target against the reference, children matched by name: layout, align, sizing, fill, stroke (+per-side weights), radius, effects, clip, font, component/variant; geometry and text content are skipped. \"identical\" when done — use it to verify a \"make these like that one\" change",
+        "bridge.like(refIds, rootIds, { limit: 30 })":
+          "finds every copy of each reference under rootIds (default: the reference's top section) — instances of the same component set, or same type+name, or same child names — and compares each with it: per copy its frame and diffs, repeated diff sets collapsed, identical copies on one line",
         "bridge.check(specs, { tolerance: 0.5 })":
           "specs { id: { width: 320, fill: \"#FFFFFF\", text: /Submit/, layout: \"V gap8 pad16\" } } -> { pass, fail: [{ id, key, want, got }], missing }",
         "bridge.state.lastResult": "full value of the previous call's return, even when the server shrank what you saw"

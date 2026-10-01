@@ -16,6 +16,7 @@ Every tool call is a full model turn. A typical task needs 3–5 calls:
    - What the target lives in: `figma_inspect({ node_ids: [target], context: true })` → parent sections, breakpoint widths used in the file, component sets inside with **all** their variant options, and the file's `conventions`.
    - Which screen has a button/label: `figma_inspect({ find_text: "Отправить" })` → `#id "layer" «text» in <top frame>` per match.
    - Where a modal opens from: `figma_inspect({ node_ids: [...], props: ["reactions"] })`.
+   - Where the copies of a correct one are and what is off in each: `figma_inspect({ like: correctId, node_ids: [screens or section] })` — copies found by component / name / children, grouped by identical diff sets.
    - What's wrong compared with a correct copy: `figma_inspect({ node_ids: [broken1, broken2, …], compare: correctId })` → per node only the differences (layout, alignment, sizing, per-side stroke, per-corner radius, effects, clip, font, variant; children matched by name; geometry and text content skipped).
    - Without `depth` the outline goes as deep as fits the reply; `children:N` at the end of a line = more below.
    - A cut outline ends with `… pass offset=K` → call again with `offset: K`. Do not raise `max_output_bytes` — in clients that spill big outputs to a file it is capped at 3900 anyway.

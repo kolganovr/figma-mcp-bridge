@@ -138,7 +138,7 @@ const TIMEOUTS = {
   heavy: envNumber("FIGMA_MCP_TIMEOUT_HEAVY_MS", 120000),
   escalate: envNumber("FIGMA_MCP_ESCALATE_MS", 45000)
 };
-const SERVER_VERSION = "4.2.3";
+const SERVER_VERSION = "4.2.4";
 
 // ------------------------------------------------------------------
 // Token economy. In an agent loop the price of a tool call is not its own
@@ -1153,7 +1153,7 @@ const TOOLS = [
   },
   {
     name: "figma_inspect",
-    description: "READ the live Figma document in ONE call — the tool for any read (not figma_execute_code); pass every node id you need at once instead of one call per node. Default: a compact outline, one line per node (TYPE \"name\" #id WxH @x,y [V gap8 pad16 fill/hug a:start/center] size:fill/hug fill:#FFF stroke:#E8EAF0/0,1,1,1 r0,0,3,3 shadow:… font \"text…\"; non-defaults only), as deep as fits the reply unless `depth` is given; `children:N` marks a node with more below. `compare: \"<ref id>\"` lists, per node_id, every difference from that reference (layout, sizing, stroke, radius, effects, clip, font, variant; children matched by name) — one call for \"make these like that one\", and the check after the write. `props` returns exact values instead: { id: { prop: value } } (also fill, stroke, text, font, layout, padding, parent, children, main, variant, props, absolute, reactions, connector). `find` searches node names under node_ids (or the current page); `find_text` searches text content. `view: \"map\"` = canvas map (sections, breakpoints). `context: true` adds ancestor sections, breakpoints and component variants. `offset` skips the first N outline lines when a reply ends with `pass offset=K`. `check` returns only mismatches. Combine them freely. Changes nothing.",
+    description: "READ the live Figma document in ONE call — the tool for any read (not figma_execute_code); pass every node id you need at once instead of one call per node. Default: a compact outline, one line per node (TYPE \"name\" #id WxH @x,y [V gap8 pad16 fill/hug a:start/center] size:fill/hug fill:#FFF stroke:#E8EAF0/0,1,1,1 r0,0,3,3 shadow:… font \"text…\"; non-defaults only), as deep as fits the reply unless `depth` is given; `children:N` marks a node with more below. `like: \"<ref id>\"` (or several) FINDS every copy of the reference under node_ids (screens/sections; default: its section) — instances of the same component, or same name — and diffs each against it: the call for \"redo these like the reference\" when you don't know where the copies are. `compare: \"<ref id>\"` lists, per node_id, every difference from that reference (layout, sizing, stroke, radius, effects, clip, font, variant; children matched by name) — one call for \"make these like that one\", and the check after the write. `props` returns exact values instead: { id: { prop: value } } (also fill, stroke, text, font, layout, padding, parent, children, main, variant, props, absolute, reactions, connector). `find` searches node names under node_ids (or the current page); `find_text` searches text content. `view: \"map\"` = canvas map (sections, breakpoints). `context: true` adds ancestor sections, breakpoints and component variants. `offset` skips the first N outline lines when a reply ends with `pass offset=K`. `check` returns only mismatches. Combine them freely. Changes nothing.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1179,6 +1179,10 @@ const TOOLS = [
         context: {
           type: "boolean",
           description: "Also return, per node: ancestor sections, breakpoint siblings and component variants ({ id: context })."
+        },
+        like: {
+          type: "string",
+          description: "Reference node id (several: comma-separated): find its copies under node_ids (default: the reference's top section) and list, per copy, its frame and how it differs (missing children come with the reference's own line, so no extra read is needed). Copies that already match are listed as identical."
         },
         compare: {
           type: "string",
@@ -1775,11 +1779,11 @@ const SERVER_INSTRUCTIONS = [
   "Figma MCP Bridge: LIVE read/write of the file open in Figma Desktop (Antigravity Bridge plugin), plus optional read-only REST tools.",
   "",
   "TOKEN ECONOMY — every call re-reads the whole conversation, and what it returns stays there:",
-  "1. READ with figma_inspect: every id in ONE call; find / props / context; compare:'<ref id>' = diff vs reference; view:'map' (canvas), view:'table'; figma_read_canvas = page tree. No read scripts in figma_execute_code: each costs a turn; its reply names the inspect call (use_instead).",
+  "1. READ with figma_inspect: every id in ONE call; find / props / context; like:'<ref id>' = find its copies + diff each; compare:'<ref id>' = diff given ids; view:'map'/'table'; figma_read_canvas = page tree. No read scripts in figma_execute_code (use_instead).",
   "2. WRITE the whole change in ONE figma_execute_code call (all breakpoints; verify inside: bridge.check / compare). Return only ids/flags.",
-  "3. Replies over max_output_bytes (3500 UTF-8 bytes, max 3900) are shrunk: page with offset=K, don't slice bridge.state.lastResult turn by turn.",
-  "4. A screenshot is ~1k tokens and stays in context: trust `warnings` and bridge.check; capture once per stage.",
-  "5. Past 45s a call returns { status: \"running\", job_id }: call figma_job_status once — it blocks until done. PLUGIN_BUSY: wait for the named job, never retry blindly. `stalled`: ask the user.",
+  "3. Replies over max_output_bytes (3500 B, max 3900) are shrunk: page with offset=K, don't slice bridge.state.lastResult.",
+  "4. A screenshot ≈1k tokens, a turn re-sends the whole chat: to orient, one screenshot of all ids beats a series of reads; to verify, trust `warnings` / bridge.check.",
+  "5. Past 45s a call returns { status: \"running\", job_id }: call figma_job_status once — it blocks until done. PLUGIN_BUSY: wait for that job, never retry blindly. `stalled`: ask the user.",
   "",
   "Execution model: each call is a FRESH async function body (top-level await/return work, import/export don't, declarations don't survive). Never eval. Persist code with bridge.define(name, src ending in module.exports = {...}) + bridge.require(name); data with bridge.store.set/get (in the file) or bridge.state (until reload). `return bridge.info()` lists all helpers; macros: bridge.replaceWithInstance/setProps/setText/shift/moveInto/fitSection/context.",
   "",
@@ -2320,7 +2324,7 @@ function applyLineOffset(result, offset) {
   const off = Math.floor(Number(offset));
   if (!result || typeof result !== "object" || !Number.isFinite(off) || off <= 0) return result;
   const out = { ...result };
-  for (const key of ["outline", "found", "compare"]) {
+  for (const key of ["outline", "found", "compare", "like"]) {
     if (typeof out[key] !== "string" || out[key].indexOf("\n") === -1) continue;
     out[key] = `… lines 0–${off - 1} skipped\n` + out[key].split("\n").slice(off).join("\n");
   }
@@ -2392,6 +2396,7 @@ function buildInspectCode(args = {}) {
     limit: Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 30,
     check: args.check && typeof args.check === "object" ? args.check : null,
     compare: typeof args.compare === "string" && args.compare ? args.compare.replace(/-/g, ":") : null,
+    like: normalizeNodeIds(args.like) ? normalizeNodeIds(args.like).split(",") : null,
     // No depth: the plugin picks the deepest outline that fits the reply.
     autoBytes: Math.max(600, outputBudgetInfo(args).bytes - 500)
   };
@@ -2415,7 +2420,8 @@ function buildInspectCode(args = {}) {
     "  if (!targets.length) out.found = 'no matches';",
     "  if (more.length) out.found_more = more;",
     "}",
-    "const wantsRead = a.props || query || a.ids.length || a.view || a.context || !a.check;",
+    "if (a.like) out.like = bridge.like(a.like, a.ids);",
+    "const wantsRead = !a.like && (a.props || query || a.ids.length || a.view || a.context || !a.check);",
     "if (a.compare && targets.length) out.compare = bridge.compare(a.compare, targets);",
     "if (wantsRead && (targets.length || !query)) {",
     "  const refs = targets.length ? targets : [figma.currentPage];",

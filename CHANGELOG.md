@@ -1,5 +1,26 @@
 # Changelog
 
+## 4.2.4 — find the copies of a reference, not just diff given ones
+
+Measured on Antigravity session `87bd6b0a` (Gemini Flash, 4.2.3, one task: redo the dropdowns of one
+scenario after two reference links): 90 MCP calls, 67 `figma_inspect`. About 34 of them only paired
+references with their copies on 1366/768/360 (the target was a whole screen, the menu copy had another
+name), ~14 more read a nested instance's variant, and a series of `props` read the reference values
+`compare` reported only as "missing in target". `compare` was used once before the write.
+
+- **`figma_inspect like: "<ref id>"`** (and `bridge.like(refs, roots)`): finds every copy of the
+  reference under `node_ids` (default: its top section) — instances of the same component set, or the
+  same type+name, or (renamed copies) the same child names — and diffs each. Copies with the same diff
+  set form one group (the diff printed once, the ids listed), the shared screen-name prefix is said
+  once, matching copies end on one line. One call answers "where are the broken ones and what is off".
+- **`compare` gives the reference's own line for a missing child** (`missing in target (ref #id TEXT
+  …size:fill/hug font …)`), so the write needs no extra read of the reference.
+- **An extra wrapper is one line** (`wrapper not in ref (FRAME) — ref holds "Title" directly`), and the
+  wrapped children are still compared, instead of a `missing` per child plus an `extra` per frame.
+- **Another variant is one line**: `compare` no longer walks into an instance whose component/variant
+  differs (its children follow the variant; a section-wide `like` went from 23 lines per copy to 1).
+- Server instructions: a screenshot to orient beats a series of reads (a turn re-sends the whole chat).
+
 ## 4.2.3 — read a section in one call, diff against a reference
 
 Measured on Antigravity session `9672b93e` (Gemini Flash, 4.2.2, one task: fix six dropdowns after a

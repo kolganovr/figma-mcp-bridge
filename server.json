@@ -6,12 +6,12 @@
     "url": "https://github.com/kolganovr/figma-mcp-bridge",
     "source": "github"
   },
-  "version": "4.2.3",
+  "version": "4.2.4",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@kolganovr/figma-mcp-bridge",
-      "version": "4.2.3",
+      "version": "4.2.4",
       "transport": {
         "type": "stdio"
       }

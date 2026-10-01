@@ -434,8 +434,57 @@ let inspectDone = Promise.resolve();
   dd.appendChild(makeNode("ELLIPSE", "Dot"));
   ddBad.appendChild(makeNode("VECTOR", "Icon"));
   const diff2 = api.compare(dd.id, [ddBad.id]);
-  check("compare: missing and extra children", /Dot: missing in target \(ref #\S+ ELLIPSE\)/.test(diff2) && /Icon #\S+: extra in target \(VECTOR\)/.test(diff2), diff2);
+  check("compare: missing and extra children", /Dot: missing in target \(ref #\S+ ELLIPSE 100x100/.test(diff2) && /Icon #\S+: extra in target \(VECTOR\)/.test(diff2), diff2);
   check("compare: a node against itself is identical", /: identical$/.test(api.compare(dd.id, dd.id)), api.compare(dd.id, dd.id));
+
+  // 4.2.4: session 87bd6b0a — rows whose texts sit in an extra auto-named frame.
+  const row = (wrap) => {
+    const r = makeNode("FRAME", "row", { layoutMode: "HORIZONTAL", itemSpacing: 4, paddingTop: 0, paddingRight: 0, paddingBottom: 0, paddingLeft: 28 });
+    const holder = wrap ? makeNode("FRAME", "Frame 2131329286") : r;
+    holder.appendChild(makeNode("TEXT", wrap ? "Other title" : "Title", { characters: "T", fontName: { family: "Inter", style: "Regular" }, fontSize: 14, layoutSizingHorizontal: "FILL", layoutSizingVertical: "HUG" }));
+    if (wrap) r.appendChild(holder);
+    return r;
+  };
+  const rowRef = row(false), rowBad = row(true);
+  figma.currentPage.appendChild(rowRef); figma.currentPage.appendChild(rowBad);
+  const wdiff = api.compare(rowRef.id, rowBad.id);
+  check("compare: an extra wrapper is one line, its children still compared", /Frame 2131329286 #\S+: wrapper not in ref \(FRAME\) — ref holds "Title" directly/.test(wdiff) && !/missing in target|extra in target/.test(wdiff) && /name "Other title" \(ref "Title"\)/.test(wdiff), wdiff);
+
+  // bridge.like: find the copies of a reference and diff each, in one read.
+  const selSet = makeNode("COMPONENT_SET", "Select outline");
+  const selOpen = makeNode("COMPONENT", "Status=Dropdown"), selClosed = makeNode("COMPONENT", "Status=Default");
+  selSet.appendChild(selOpen); selSet.appendChild(selClosed);
+  const sel = (open) => makeNode("INSTANCE", "Select outline", { mainComponent: open ? selOpen : selClosed, variantProperties: { Status: open ? "Dropdown" : "Default" } });
+  const sec = makeNode("SECTION", "Scenario");
+  const screen = (name, open) => {
+    const s = makeNode("FRAME", name);
+    const filt = makeNode("FRAME", "Filters", { layoutMode: "VERTICAL", itemSpacing: 16, paddingTop: 20, paddingRight: 20, paddingBottom: 20, paddingLeft: 20 });
+    filt.appendChild(sel(open));
+    s.appendChild(filt);
+    sec.appendChild(s);
+    return s;
+  };
+  const refScreen = screen("Ref / 1366", true), bad1 = screen("Target / 1366", false), bad2 = screen("Target / 768", false), good = screen("Target / 360", true);
+  figma.currentPage.appendChild(sec);
+  const refSel = refScreen.children[0].children[0];
+  const lk = api.like(refSel.id);
+  check("like: instance copies found by component set under the reference's section", /^like INSTANCE "Select outline" .*: 3 copies \(instances of "Select outline"\) on screens .* under "Scenario"/.test(lk), lk);
+  const sid = sc => sc.children[0].children[0].id;
+  check("like: screen-name prefix said once", /on screens "Target \/ …"/.test(lk), lk);
+  check("like: copies with the same diffs form one group, the diff printed once",
+    lk.indexOf("\n2 copies — 1 diffs (ids below: #" + sid(bad1) + "): #" + sid(bad1) + " \"1366\", #" + sid(bad2) + " \"768\"\n  . #" + sid(bad1) + ": component \"Select outline\" Status=Default (ref \"Select outline\" Status=Dropdown)") !== -1 &&
+    lk.split("component ").length === 2, lk);
+  check("like: matching copies last, on one line", lk.endsWith("\n1 copy identical: #" + sid(good) + " \"360\""), lk);
+  const lkCut = api.like(refSel.id, null, { limit: 1 });
+  check("like: a limit says how many copies exist", /: 1 of 3 copies /.test(lkCut), lkCut);
+  const vOpen = sel(true), vClosed = sel(false);
+  vOpen.appendChild(makeNode("FRAME", "Menu", { layoutMode: "VERTICAL" }));
+  vClosed.appendChild(makeNode("TEXT", "Placeholder", { characters: "x", fontName: { family: "Inter", style: "Regular" }, fontSize: 14 }));
+  figma.currentPage.appendChild(vOpen); figma.currentPage.appendChild(vClosed);
+  const vdiff = api.compare(vOpen.id, vClosed.id);
+  check("compare: another variant is one line, its insides not walked", /1 diffs$/m.test(vdiff.split("\n")[0]) && /component "Select outline" Status=Default/.test(vdiff) && !/Menu|Placeholder/.test(vdiff), vdiff);
+  const lkScoped = api.like([refScreen.children[0].id], [bad2.id]);
+  check("like: frames matched by name, search limited to the given roots", /: 1 copy \(same name\/children\) under "Target \/ 768"/.test(lkScoped) && /component "Select outline" Status=Default/.test(lkScoped), lkScoped);
 
   // figma_inspect is server-generated code over these same helpers: run what
   // the server would send, against the real runtime.
