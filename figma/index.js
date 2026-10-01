@@ -138,7 +138,7 @@ const TIMEOUTS = {
   heavy: envNumber("FIGMA_MCP_TIMEOUT_HEAVY_MS", 120000),
   escalate: envNumber("FIGMA_MCP_ESCALATE_MS", 45000)
 };
-const SERVER_VERSION = "4.2.1";
+const SERVER_VERSION = "4.2.2";
 
 // ------------------------------------------------------------------
 // Token economy. In an agent loop the price of a tool call is not its own
@@ -1102,7 +1102,7 @@ const TOOLS = [
     // server's instructions to the model (Antigravity sessions made 0 bridge.*
     // calls in ~220 figma_execute_code runs), while tool descriptions always
     // reach it. The long-form contract stays in instructions + bridge.info().
-    description: "Run JavaScript in the open Figma document (Figma Desktop + 'Antigravity Bridge' plugin) to create, edit, move, style or delete nodes. Every call is a full model turn, so do a whole stage per call — read, change and verify together — and put capture_node_ids on that same call instead of a separate figma_screenshot. Reads only: use figma_inspect. Globals: `figma`, `await ensureFont(family, style)`, `getFreePosition(w, h)`, `bridge`: bridge.check({ '1:2': { width: 320, fill: '#FFFFFF' } }) -> pass/fail list; bridge.define(name, src) + bridge.require(name) keep helpers between calls (each call is a fresh function body — never eval); `return bridge.info()` lists the rest. Macros: bridge.replaceWithInstance(target, comp, {props, text}), bridge.setProps(inst, {Status: 'Dropdown'}), bridge.setText(root, {layer: '…'}), bridge.shift(ids, {dx, dy}), bridge.moveInto(ids, section, {layout, gap}), bridge.fitSection(s), bridge.context(id). Return only the ids/flags you need: responses over max_output_bytes (3500) are shrunk, the full value stays in bridge.state.lastResult.",
+    description: "WRITE tool: run JavaScript in the open Figma document (Figma Desktop + 'Antigravity Bridge' plugin) to create, edit, move, style or delete nodes. To READ (explore a section, list children, find layers, check texts / fonts / variants / table columns) call figma_inspect instead: every id in one call, one line per node, view:\"table\" for tables; a read script here costs a model turn per question and its reply names the figma_inspect call to use (use_instead). Every call is a full model turn, so make the whole change in ONE call — all screens / breakpoints, verified in the same code with bridge.check — and put capture_node_ids on that same call instead of a separate figma_screenshot. Globals: `figma`, `await ensureFont(family, style)`, `getFreePosition(w, h)`, `bridge`: bridge.check({ '1:2': { width: 320, fill: '#FFFFFF' } }) -> pass/fail list; bridge.define(name, src) + bridge.require(name) keep helpers between calls (each call is a fresh function body — never eval); `return bridge.info()` lists the rest. Macros: bridge.replaceWithInstance(target, comp, {props, text}), bridge.setProps(inst, {Status: 'Dropdown'}), bridge.setText(root, {layer: '…'}), bridge.shift(ids, {dx, dy}), bridge.moveInto(ids, section, {layout, gap}), bridge.fitSection(s), bridge.context(id). Return only the ids/flags you need: responses over max_output_bytes (3500) are shrunk, the full value stays in bridge.state.lastResult.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1153,7 +1153,7 @@ const TOOLS = [
   },
   {
     name: "figma_inspect",
-    description: "READ the live Figma document in ONE call — pass every node id you need at once instead of one call per node. Default: a compact outline, one line per node (TYPE \"name\" #id WxH @x,y [V gap8 pad16] fill:#FFF r8 font \"text…\"), `depth` levels down. `props` returns exact values instead: { id: { prop: value } } (also fill, stroke, text, font, layout, padding, parent, children, main, variant, props, absolute, reactions, connector). `find` searches node names under node_ids (or the current page); `find_text` searches text content. `view: \"map\"` = canvas map (sections, breakpoints). `context: true` adds ancestor sections, breakpoints and component variants. `offset` skips the first N outline lines when a reply ends with `pass offset=K`. `check` returns only mismatches. Combine them freely. Changes nothing.",
+    description: "READ the live Figma document in ONE call — the tool for any read (not figma_execute_code); pass every node id you need at once instead of one call per node. Default: a compact outline, one line per node (TYPE \"name\" #id WxH @x,y [V gap8 pad16] fill:#FFF r8 font \"text…\"), `depth` levels down. `props` returns exact values instead: { id: { prop: value } } (also fill, stroke, text, font, layout, padding, parent, children, main, variant, props, absolute, reactions, connector). `find` searches node names under node_ids (or the current page); `find_text` searches text content. `view: \"map\"` = canvas map (sections, breakpoints). `context: true` adds ancestor sections, breakpoints and component variants. `offset` skips the first N outline lines when a reply ends with `pass offset=K`. `check` returns only mismatches. Combine them freely. Changes nothing.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1173,8 +1173,8 @@ const TOOLS = [
         },
         view: {
           type: "string",
-          enum: ["outline", "map"],
-          description: "\"outline\" (default) = one line per node; \"map\" = canvas map: sections, frames, breakpoints and component sets in a few lines."
+          enum: ["outline", "map", "table"],
+          description: "\"outline\" (default) = one line per node; \"map\" = canvas map: sections, frames, breakpoints and component sets in a few lines; \"table\" = per table (found by structure) the columns: header, width, sizing, cell contents, plus row and cell ids."
         },
         context: {
           type: "boolean",
@@ -1771,10 +1771,10 @@ const SERVER_INSTRUCTIONS = [
   "Figma MCP Bridge: LIVE read/write of the file open in Figma Desktop (Antigravity Bridge plugin), plus optional read-only REST tools.",
   "",
   "TOKEN ECONOMY — every call re-reads the whole conversation, and what it returns stays there:",
-  "1. Do a whole stage in ONE figma_execute_code call (read, change, verify), not a call per step. Return only the ids/flags/numbers you need.",
-  "2. Read cheaply: figma_read_canvas, or inside code bridge.summarize(id,{depth}), bridge.inspect(ids,[props]), bridge.find(query,{root,type}), bridge.check(specs) for pass/fail; figma_inspect pages with `offset`, `view:'map'` = canvas map.",
-  "3. Responses over max_output_bytes (3500 UTF-8 bytes, max 3900) are shrunk; the full value stays in bridge.state.lastResult.",
-  "4. A screenshot is ~1k tokens (scale 1, max_px 1024) and never leaves context: trust write-call `warnings` and bridge.check, capture once per finished stage via capture_node_ids.",
+  "1. READ with figma_inspect: every id in ONE call, one line per node; find / props / context; view:'map' (canvas), view:'table' (table columns); figma_read_canvas = page tree. No read scripts in figma_execute_code: each costs a turn; its reply names the inspect call (use_instead).",
+  "2. WRITE the whole change in ONE figma_execute_code call (all breakpoints; verify inside with bridge.check). Return only ids/flags.",
+  "3. Replies over max_output_bytes (3500 UTF-8 bytes, max 3900) are shrunk: page with offset=K, don't slice bridge.state.lastResult turn by turn.",
+  "4. A screenshot is ~1k tokens and stays in context: trust `warnings` and bridge.check; capture once per stage (capture_node_ids).",
   "5. Past 45s a call returns { status: \"running\", job_id }: call figma_job_status once — it blocks until done. PLUGIN_BUSY: wait for the named job, never retry blindly. `stalled`: ask the user.",
   "",
   "Execution model: each call is a FRESH async function body (top-level await/return work, import/export don't, declarations don't survive). Never eval. Persist code with bridge.define(name, src ending in module.exports = {...}) + bridge.require(name); data with bridge.store.set/get (in the file) or bridge.state (until reload). `return bridge.info()` lists all helpers; macros: bridge.replaceWithInstance/setProps/setText/shift/moveInto/fitSection/context.",
@@ -1863,7 +1863,11 @@ class MultiLine {
   toJSON() { return this.fitted; }
 }
 
-function pruneValue(value, lvl, depth, slots) {
+// `budget` (optional { left }) aborts the walk with PRUNE_OVER once more values
+// were emitted than the byte budget could ever hold (each costs >= 1 byte).
+const PRUNE_OVER = { over: true };
+function pruneValue(value, lvl, depth, slots, budget) {
+  if (budget && --budget.left < 0) throw PRUNE_OVER;
   if (typeof value === "string") {
     if (slots && value.indexOf("\n") !== -1) return new MultiLine(value);
     return value.length > lvl.str ? value.slice(0, lvl.str) + `…(+${value.length - lvl.str} chars)` : value;
@@ -1873,7 +1877,7 @@ function pruneValue(value, lvl, depth, slots) {
     if (depth >= lvl.depth) return `[array of ${value.length}]`;
     const out = [];
     value.slice(0, lvl.arr).forEach((v, i) => {
-      const r = pruneValue(v, lvl, depth + 1, slots);
+      const r = pruneValue(v, lvl, depth + 1, slots, budget);
       out.push(r);
       if (r instanceof MultiLine) { r.set = (t) => { out[i] = t; }; slots.push(r); }
     });
@@ -1884,7 +1888,7 @@ function pruneValue(value, lvl, depth, slots) {
   if (depth >= lvl.depth) return `{object with ${keys.length} keys}`;
   const out = {};
   for (const k of keys.slice(0, lvl.keys)) {
-    const r = pruneValue(value[k], lvl, depth + 1, slots);
+    const r = pruneValue(value[k], lvl, depth + 1, slots, budget);
     out[k] = r;
     if (r instanceof MultiLine) { r.set = (t) => { out[k] = t; }; slots.push(r); }
   }
@@ -2003,6 +2007,31 @@ function cutToBytes(text, maxBytes) {
   return s.slice(0, lo);
 }
 
+// The pruning (depth × array length × string length) whose JSON is the
+// largest that still fits; ties go to the deeper one. -> { value, bytes } | null
+const GRID_DEPTHS = [8, 7, 6, 5, 4, 3, 2];
+const GRID_ARRS = [50, 30, 20, 15, 10, 7, 5, 3, 2];
+const GRID_STRS = [400, 200, 120, 80, 60];
+function bestStructuralFit(value, maxBytes) {
+  let best = null;
+  for (const depth of GRID_DEPTHS) {
+    for (const arr of GRID_ARRS) {
+      for (const str of GRID_STRS) {
+        let pruned;
+        try {
+          pruned = pruneValue(value, { depth, arr, str, keys: Math.max(10, arr + 10) }, 0, null, { left: maxBytes });
+        } catch (e) {
+          if (e === PRUNE_OVER) continue;
+          throw e;
+        }
+        const bytes = byteLength(toJson(pruned));
+        if (bytes <= maxBytes && (!best || bytes > best.bytes)) best = { value: pruned, bytes };
+      }
+    }
+  }
+  return best;
+}
+
 // -> { value, truncated: null | { from, to } } in UTF-8 bytes; maxBytes <= 0 disables.
 function shrinkToBudget(value, maxBytes) {
   let full;
@@ -2017,6 +2046,17 @@ function shrinkToBudget(value, maxBytes) {
     }
     const cut = cutToBytes(value, Math.max(0, maxBytes - 24));
     return { value: cut + `…(+${value.length - cut.length} chars)`, truncated: { from: fullBytes, to: maxBytes } };
+  }
+  // Plain data (no multi-line text): the fixed levels cut depth, arrays and
+  // strings together, so one step too far collapses everything — session
+  // e6524905 saw 4444→651 and 5840→998 bytes under a 3500 budget, then 15
+  // calls slicing lastResult. Search the grid for the fit that keeps the most.
+  const probe = [];
+  let probed = true;
+  try { pruneValue(value, SHRINK_LEVELS[0], 0, probe, { left: 200000 }); } catch (e) { if (e !== PRUNE_OVER) throw e; probed = false; }
+  if (probed && probe.length === 0) {
+    const best = bestStructuralFit(value, maxBytes);
+    if (best) return { value: best.value, truncated: { from: fullBytes, to: best.bytes } };
   }
   let fallback = null;
   for (const lvl of SHRINK_LEVELS) {
@@ -2096,7 +2136,13 @@ function budgetOptions(args) {
 
 // Tells the model the cheapest next step. Raising max_output_bytes is only
 // offered where it cannot push the reply past a client's spill limit.
-function truncationNote(truncated, stashed) {
+function truncationNote(truncated, stashed, readNudged) {
+  // A cut hand-written read: slicing lastResult would cost a turn per slice
+  // (15 such calls in session e6524905) — point at the paged outline instead.
+  if (readNudged) {
+    return `result shrunk ${truncated.from}→${truncated.to} bytes (cuts marked with …). ` +
+      "Don't slice bridge.state.lastResult turn by turn: the use_instead call reads these nodes in one call and pages with offset.";
+  }
   return `result shrunk ${truncated.from}→${truncated.to} bytes (cuts marked with …). ` +
     (stashed
       ? "Full value is in bridge.state.lastResult — next call return just the part you need, e.g. " +
@@ -2189,14 +2235,18 @@ function buildStructuredResult(response, extra, options = {}) {
   if (options.capNote) rest.note = options.capNote;
   if (extra) Object.assign(rest, extra);
 
+  // `lead` fields (the read nudge) go BEFORE result: the first thing the model
+  // reads, not one more key after a long payload.
+  const lead = options.lead || null;
   const stashed = !!(response && response.resultStashed);
-  const noteBytes = byteLength(toJson(truncationNote({ from: 9999999, to: 9999999 }, stashed))) + 16;
+  const readNote = !!(lead && lead.use_instead);
+  const noteBytes = byteLength(toJson(truncationNote({ from: 9999999, to: 9999999 }, stashed, readNote))) + 16;
   const shrunk = shrinkToBudget(
     response && response.result !== undefined ? response.result : null,
-    resultBudget(budget, rest, noteBytes)
+    resultBudget(budget, lead ? Object.assign({}, lead, rest) : rest, noteBytes)
   );
-  const envelope = { ok: true, result: shrunk.value };
-  if (shrunk.truncated) envelope.truncated = truncationNote(shrunk.truncated, stashed);
+  const envelope = Object.assign({ ok: true }, lead || {}, { result: shrunk.value });
+  if (shrunk.truncated) envelope.truncated = truncationNote(shrunk.truncated, stashed, readNote);
   return toJson(Object.assign(envelope, rest));
 }
 
@@ -2330,7 +2380,7 @@ function buildInspectCode(args = {}) {
     ids: ids ? ids.split(",") : [],
     depth: Number.isFinite(depth) ? Math.max(0, Math.min(6, Math.floor(depth))) : null,
     props: Array.isArray(args.props) && args.props.length ? args.props.map(String) : null,
-    view: args.view === "map" ? "map" : null,
+    view: args.view === "map" || args.view === "table" ? args.view : null,
     context: args.context === true,
     find: typeof args.find === "string" && args.find ? args.find : null,
     findText: typeof args.find_text === "string" && args.find_text ? args.find_text : null,
@@ -2366,6 +2416,7 @@ function buildInspectCode(args = {}) {
     "  else {",
     "    const so = { depth: a.depth !== null ? a.depth : (query ? 0 : 1) };",
     "    if (a.view === 'map') so.view = 'map';",
+    "    if (a.view === 'table') so.view = 'table';",
     "    out[query ? 'found' : 'outline'] = bridge.summarize(refs, so);",
     "  }",
     "  if (a.context) {",
@@ -2380,24 +2431,174 @@ function buildInspectCode(args = {}) {
 
 const SLOW_CALL_HINT = "Slow call: if it searched the whole page (findAll / find without root), scope it to a section next time.";
 
-// Clients like Antigravity never show the model the server instructions, but
-// the model always reads a tool response. So the first time a script looks
-// like a hand-written READ (a tree walk, no canvas writes) the reply carries a
-// one-line pointer to the tools that do it in one call. Once per server
-// process (one per client session), so it costs ~400 bytes once.
-const TREE_WALK_RE = /\.(findAll|findAllWithCriteria|findOne|findChildren)\s*\(|\.children\s*\.\s*(map|forEach|filter)\s*\(|function\s+walk\b|const\s+walk\s*=/;
-const CANVAS_WRITE_RE = /figma\s*\.\s*create|\.(remove|appendChild|insertChild|resize|resizeWithoutConstraints|setProperties|swapComponent|createInstance|clone|setPluginData|setSharedPluginData)\s*\(|bridge\s*\.\s*(replaceWithInstance|setProps|setText|shift|moveInto|fitSection|componentize|setPosition)\s*\(|\.(x|y|characters|fills|strokes|visible|opacity|name|layoutMode|itemSpacing|layoutSizingHorizontal|layoutSizingVertical)\s*=(?!=)/;
-const READ_TIP =
-  "Tip (shown once): this looks like a hand-written read. figma_inspect does it in one call — view:\"map\" (canvas map), " +
-  "context:true (parent sections, breakpoints, component variants), find / find_text, props (incl. reactions), offset to page. " +
-  "For edits: bridge.replaceWithInstance / setProps / setText / shift / moveInto / fitSection.";
-const TIPS_SHOWN = new Set();
+// ------------------------------------------------------------------
+// Read nudge. Antigravity/Gemini Flash never sees server instructions and
+// rarely opens figma_inspect's schema, but it always reads a tool response.
+// 4.2.1 showed a generic one-time tip; in session e6524905 the model got it on
+// the very first read, ignored it, and wrote ~69 more read scripts (+15 calls
+// slicing bridge.state.lastResult, because the truncation note told it to).
+// What a model does act on is a concrete next call. So every hand-written read
+// of figma_execute_code gets, as the FIRST field of the reply, the
+// figma_inspect call that reads the same nodes — ids, find query and props
+// lifted from the script itself — plus a running count of wasted turns.
+// ------------------------------------------------------------------
+const TREE_WALK_RE = /\.(findAll|findAllWithCriteria|findOne|findChildren)\s*\(|\.children\b|function\s+walk\b|const\s+walk\s*=/;
+const NODE_READ_RE = /getNodeById(Async)?\s*\(|currentPage\b|\.(findAll|findAllWithCriteria|findOne|findChildren)\s*\(|\.children\b|\.parent\b/;
+const STASH_RE = /bridge\s*\.\s*state\s*\.\s*lastResult/;
+// Reads through the bridge's own helpers are already cheap — not nagged.
+const CHEAP_READ_RE = /bridge\s*\.\s*(summarize|inspect|find|check|context)\s*\(/;
+const WRITE_PROPS = [
+  "x", "y", "characters", "fills", "strokes", "strokeWeight", "strokeAlign", "visible", "opacity", "name",
+  "layoutMode", "layoutWrap", "itemSpacing", "counterAxisSpacing", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft",
+  "horizontalPadding", "verticalPadding", "layoutSizingHorizontal", "layoutSizingVertical", "layoutGrow", "layoutAlign",
+  "layoutPositioning", "primaryAxisAlignItems", "counterAxisAlignItems", "primaryAxisSizingMode", "counterAxisSizingMode",
+  "cornerRadius", "topLeftRadius", "topRightRadius", "bottomLeftRadius", "bottomRightRadius", "fontName", "fontSize",
+  "lineHeight", "letterSpacing", "textAutoResize", "textAlignHorizontal", "textAlignVertical", "textCase", "textDecoration",
+  "constraints", "rotation", "effects", "clipsContent", "locked", "selection", "mainComponent", "reactions", "itemReverseZIndex",
+  "minWidth", "maxWidth", "minHeight", "maxHeight", "fillStyleId", "strokeStyleId", "textStyleId", "effectStyleId", "isMask",
+  "blendMode", "currentPage", "expanded", "description", "relativeTransform"
+];
+const CANVAS_WRITE_RE = new RegExp(
+  "figma\\s*\\.\\s*(create|group|ungroup|flatten|union|subtract|intersect|exclude|combineAsVariants|setCurrentPageAsync)|" +
+  "\\.(remove|appendChild|insertChild|resize|resizeWithoutConstraints|rescale|swapComponent|createInstance|clone|detachInstance|" +
+  "resetOverrides|insertCharacters|deleteCharacters|scrollAndZoomIntoView)\\s*\\(|\\.set[A-Z]\\w*\\s*\\(|" +
+  "bridge\\s*\\.\\s*(replaceWithInstance|setProps|setText|shift|moveInto|fitSection|componentize|setPosition|define|snapshot|checkpoint)\\s*\\(|" +
+  "\\.(" + WRITE_PROPS.join("|") + ")\\s*(=(?!=)|\\+=|-=)"
+);
+const CAPS_NOTE = 'figma_inspect also does: find / find_text (search names / text under node_ids), props:[...] (exact values: ' +
+  '"font", "text", "layout", "padding", "props" = componentProperties, "variant", "main", "reactions", or any raw property), ' +
+  'context:true (parent sections, breakpoints, component variants), view:"map" (canvas map), view:"table" (per table: headers, widths, ' +
+  'cell contents and variant counts per column, row/cell ids), check (pass/fail).';
+// Script property -> figma_inspect props name. Geometry, names, types, text,
+// fonts, layout, fills and instance variants are already on every outline
+// line, so only these make a props read worth suggesting.
+const PROP_HINTS = [
+  [/\bcomponentProperties\b/, "props"], [/\bvariantProperties\b/, "variant"], [/\bmainComponent\b/, "main"],
+  [/\b(fontName|fontSize|getStyledTextSegments|getRange\w+)\b/, "font"], [/\bcharacters\b/, "text"],
+  [/\b(layoutMode|itemSpacing|primaryAxis\w*|counterAxis\w*)\b/, "layout"], [/\bpadding(Top|Right|Bottom|Left)\b/, "padding"],
+  [/\breactions\b/, "reactions"], [/\babsolute(BoundingBox|Transform|RenderBounds)\b/, "absolute"],
+  [/\blayoutSizingHorizontal\b/, "layoutSizingHorizontal"], [/\blayoutSizingVertical\b/, "layoutSizingVertical"],
+  [/\blayoutGrow\b/, "layoutGrow"], [/\blayoutAlign\b/, "layoutAlign"], [/\bconstraints\b/, "constraints"],
+  [/\bfills\b/, "fill"], [/\bstrokes\b/, "stroke"], [/\bcornerRadius\b/, "cornerRadius"], [/\bvisible\b/, "visible"]
+];
+const TABLE_HINT_RE = /\b(table|tables|row|rows|header|headers|cell|cells|column|columns)\b|таблиц|строк|заголов|ячейк|колонк|столб/i;
+const OUTLINE_COVERS =["font", "text", "layout", "fill", "stroke", "cornerRadius", "visible", "variant", "main"];
+const WHAT_YOU_GET = {
+  outline: 'one line per node: TYPE "name" #id WxH @x,y [layout] fill font "text" →component variant',
+  table: "per table: header, each column's title, width, sizing, cell texts and component variant counts, row/cell ids",
+  map: "canvas map: sections, frames, breakpoints",
+  props: "{ id: { prop: value } } for each node"
+};
+const READ_STATE = { streak: 0, total: 0, lastIds: [], lastArgs: null, capsShown: false };
 
-function readScriptTip(code) {
-  if (TIPS_SHOWN.has("read") || typeof code !== "string") return null;
-  if (!TREE_WALK_RE.test(code) || CANVAS_WRITE_RE.test(code)) return null;
-  TIPS_SHOWN.add("read");
-  return READ_TIP;
+// -> "write" | "read" | "stash" | "cheap" | null
+function classifyScript(code, response) {
+  if (typeof code !== "string") return null;
+  if (response && ((Array.isArray(response.created) && response.created.length) ||
+                   (Array.isArray(response.modified) && response.modified.length))) return "write";
+  if (CANVAS_WRITE_RE.test(code)) return "write";
+  const touchesNodes = NODE_READ_RE.test(code);
+  // lastResult is plain data: `.children` on it is not a node read.
+  if (STASH_RE.test(code) && !/getNodeById(Async)?\s*\(|currentPage\b/.test(code)) return "stash";
+  if (CHEAP_READ_RE.test(code) && !TREE_WALK_RE.test(code)) return "cheap";
+  return touchesNodes ? "read" : null;
+}
+
+// figma_inspect arguments that read what the script read.
+function suggestInspect(code, fallbackIds) {
+  const ids = [];
+  const idRe = /["'`](I?\d+[:-]\d+(?:;\d+[:-]\d+)*)["'`]/g;
+  let m;
+  while ((m = idRe.exec(code)) && ids.length < 8) {
+    const id = m[1].indexOf(";") === -1 ? m[1].replace("-", ":") : m[1];
+    if (ids.indexOf(id) === -1) ids.push(id);
+  }
+  const args = {};
+  if (ids.length) args.node_ids = ids;
+  else if (fallbackIds && fallbackIds.length) args.node_ids = fallbackIds.slice(0, 8);
+
+  const nameRes = [
+    /\.name\s*===?\s*["'`]([^"'`\n]{2,60})["'`]/,
+    /["'`]([^"'`\n]{2,60})["'`]\s*===?\s*[\w$.]*\.name\b/,
+    /\.name\s*(?:\.\s*toLowerCase\s*\(\s*\))?\s*\.\s*(?:includes|startsWith|endsWith|indexOf)\s*\(\s*["'`]([^"'`\n]{2,60})["'`]/
+  ];
+  let nameAt = -1;
+  for (const re of nameRes) {
+    const hit = re.exec(code);
+    if (hit) { args.find = hit[1]; nameAt = hit.index; break; }
+  }
+  // The type filter only counts when it sits in the SAME predicate as the
+  // name (`n => n.name === 'checkbox' && n.type === 'INSTANCE'`); a TEXT test
+  // elsewhere in the script would make find return nothing.
+  if (args.find) {
+    const near = code.slice(Math.max(0, nameAt - 60), nameAt + 90).split(/=>|;|\n/).filter(s => s.indexOf(args.find) !== -1).join(" ");
+    const typeHit = /\.type\s*===?\s*["'`]([A-Z_]+)["'`]|["'`]([A-Z_]+)["'`]\s*===?\s*[\w$.]*\.type\b/.exec(near);
+    if (typeHit) args.find_type = typeHit[1] || typeHit[2];
+  }
+
+  // Only props an outline line does NOT carry earn a props read: every line
+  // already has geometry, layout, fill, stroke, radius, font, text, visibility
+  // and an instance's component + variant.
+  const props = [];
+  for (const [re, prop] of PROP_HINTS) {
+    if (re.test(code) && OUTLINE_COVERS.indexOf(prop) === -1 && props.indexOf(prop) === -1) props.push(prop);
+  }
+  // props are read off the listed / found nodes themselves, so they fit a
+  // script that read them there — not one that walked further down.
+  const walks = (code.match(/\.(findAll|findAllWithCriteria|findOne|findChildren)\s*\(|\.children\b/g) || []).length;
+  if (props.length && (args.find ? walks <= 1 : walks === 0)) {
+    args.props = props.slice(0, 6);
+    return args;
+  }
+  if (!args.node_ids) return args.find ? args : { view: "map" };
+  // A walk into rows / headers / cells: view:"table" gives headers, widths and
+  // per-column contents (variant counts) for every listed screen at once —
+  // in session e6524905 that was ~45 read scripts.
+  if (walks && TABLE_HINT_RE.test(code)) return { node_ids: args.node_ids, view: "table" };
+  let depth = walks >= 4 ? 3 : walks >= 2 ? 2 : 1;
+  if (/\.(findAll|findAllWithCriteria|findOne)\s*\(/.test(code) && !args.find) depth = 3;
+  if (args.find) depth = Math.max(1, Math.min(depth, 2));
+  if (args.node_ids.length > 2) depth = Math.min(depth, 2);
+  if (props.length === 0 && walks === 0 && !args.find) {
+    // A flat read of the ids' own facts (font, text, layout...): their lines.
+    args.depth = 0;
+    return args;
+  }
+  args.depth = depth;
+  return args;
+}
+
+// The `use_instead` field for a hand-written read, or null.
+function readNudge(code, response) {
+  const kind = classifyScript(code, response);
+  if (kind !== "read" && kind !== "stash") {
+    if (kind === "write") READ_STATE.streak = 0;
+    return null;
+  }
+  READ_STATE.streak += 1;
+  READ_STATE.total += 1;
+  // Slicing lastResult re-reads what the previous walk returned: suggest the
+  // call that replaces THAT walk.
+  const args = kind === "stash" && READ_STATE.lastArgs
+    ? READ_STATE.lastArgs
+    : suggestInspect(code, READ_STATE.lastIds);
+  if (kind === "read" && args.node_ids) { READ_STATE.lastIds = args.node_ids; READ_STATE.lastArgs = args; }
+  const call = "figma_inspect " + JSON.stringify(args);
+  const n = READ_STATE.streak;
+  let text = kind === "stash"
+    ? `${call} — slicing bridge.state.lastResult costs a model turn per slice; this returns the tree as an outline, paged with offset=K.`
+    : `${call} — reads the same nodes in ONE call (${WHAT_YOU_GET[args.view || (args.props ? "props" : "outline")]}), every id at once; a long reply pages with offset=K.`;
+  text += ` Hand-written read #${n} in a row: each is a full model turn that re-sends the whole conversation.`;
+  if (n >= 3) text += " Next: one figma_inspect for everything still unknown, then ONE figma_execute_code that makes the whole change and returns only ids/flags.";
+  if (!READ_STATE.capsShown) {
+    READ_STATE.capsShown = true;
+    text += " " + CAPS_NOTE;
+  }
+  return text;
+}
+
+function resetReadStreak() {
+  READ_STATE.streak = 0;
 }
 
 async function handleCallTool(name, args = {}) {
@@ -2438,11 +2639,15 @@ async function handleCallTool(name, args = {}) {
           };
         }
 
-        const tip = response && response.success !== false ? readScriptTip(args.code) : null;
-        return renderPluginResponse(response, tip ? { tip } : null, budgetOptions(args));
+        const nudge = response && response.success !== false ? readNudge(args.code, response) : null;
+        return renderPluginResponse(response, null, {
+          ...budgetOptions(args),
+          lead: nudge ? { use_instead: nudge } : null
+        });
       }
 
       case "figma_inspect": {
+        resetReadStreak();
         const response = await sendCommandToPlugin({
           code: buildInspectCode(args),
           description: "Inspect",
@@ -3173,6 +3378,6 @@ if (require.main === module) {
   module.exports = {
     TOOLS, SERVER_INSTRUCTIONS, ECONOMY, TIMEOUTS,
     shrinkToBudget, pngSize, collectImages, buildStructuredResult, captureOptions, getActiveTools,
-    buildInspectCode, applyTokenBudget, byteLength, outputBudgetInfo, truncationNote, readScriptTip, TIPS_SHOWN, MCP_CLIENT, activeOutputCeiling, applyLineOffset, checkAgentSyntax, buildErrorEnvelope
+    buildInspectCode, applyTokenBudget, byteLength, outputBudgetInfo, truncationNote, readNudge, classifyScript, suggestInspect, READ_STATE, resetReadStreak, MCP_CLIENT, activeOutputCeiling, applyLineOffset, checkAgentSyntax, buildErrorEnvelope
   };
 }

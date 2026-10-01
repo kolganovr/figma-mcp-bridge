@@ -257,6 +257,32 @@ Every default is overridable per call, and per install through env: `FIGMA_MCP_S
 
 ---
 
+## What's new in 4.2.2
+
+Theme: reads go through `figma_inspect`, not hand-written scripts. Measured on Antigravity session
+`e6524905` (Gemini Flash, 3 tasks on 4.2.1): 76 MCP calls, ~69 of them read-only `figma_execute_code`
+scripts plus 15 calls slicing `bridge.state.lastResult`; `figma_inspect` was never called.
+
+- **`use_instead` — a ready read call in every hand-written read.** A `figma_execute_code` script
+  that only reads (no canvas writes, nothing created or modified) gets, as the FIRST field of the
+  reply, the `figma_inspect` call that reads the same nodes — node ids, the `find` query, `find_type`
+  and `props` lifted from the script, `view: "table"` for walks into rows / headers / cells — plus a
+  count of read turns spent in a row. Slicing `bridge.state.lastResult` gets the call that replaces the
+  walk it came from. The 4.2.1 one-time generic tip is gone: replayed on that session, the new
+  classifier flags all 63 reads and none of the 3 writes.
+- **`figma_inspect view: "table"`.** Tables are found by structure (rows in one column with the same
+  cell count), never by layer names: per table the header, every column's title, width, sizing and
+  contents (text samples, component + variant counts such as `checkbox State=Default×6 State=Disabled×2`),
+  and the ids of the first row and its cells. Several `node_ids` = several screens compared in one call.
+- **Tool texts say it first.** `figma_execute_code` is described as the WRITE tool and routes reads to
+  `figma_inspect`; the server instructions' rule 1 is now "READ with figma_inspect", rule 2 "WRITE the
+  whole change in ONE figma_execute_code call" (they used to say read, change and verify in one script).
+- **Shrinking keeps the most that fits.** Plain data is pruned on a grid (depth × array length ×
+  string length) and the largest result under the budget wins, instead of fixed levels that dropped a
+  4444-byte reply to 651 bytes. A cut hand-written read points at `use_instead`, not at slicing.
+- **Reads leave no checkpoints.** A call that journaled nothing no longer gets a `checkpoint_id`, so
+  60 reads can't push real writes out of the 50-slot ring or become `figma_rollback("last")`.
+
 ## What's new in 4.2.1
 
 Theme: fewer model turns per task. Server side:

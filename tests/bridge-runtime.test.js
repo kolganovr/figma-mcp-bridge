@@ -287,6 +287,17 @@ console.log("\n== checkpoint journal: creation tracking via createTrackingFigma(
   const lastRollback = bridge.rollback("last");
   check("rollback('last') resolves the most recently committed, not-yet-rolled-back checkpoint",
     lastRollback.checkpoint_id === cp2.id, lastRollback);
+
+  const cpWrite = bridge.checkpoint("write before reads");
+  trackingFigma.createFrame();
+  cpWrite.commit();
+  const before = bridge.checkpoints().length;
+  let readResult = null;
+  for (let i = 0; i < 60; i++) readResult = bridge.checkpoint("read " + i).commit(); // 60 reads > the 50-slot ring
+  check("a read (nothing journaled) gets no checkpoint id and leaves the ring untouched",
+    readResult.checkpoint_id === null && bridge.checkpoints().length === before, { readResult, before, after: bridge.checkpoints().length });
+  check("...so rollback('last') after many reads still undoes the write",
+    bridge.rollback("last").checkpoint_id === cpWrite.id);
 }
 
 console.log("\n== checkpoint journal: clone()/createInstance() tracking (Undo Last AI Action bug) ==");
@@ -445,6 +456,115 @@ console.log("\n== summarize view:map ==");
   check("map: frame line is exactly TYPE name id WxH @x,y children:N", lines[1] === '  FRAME "Hero" #' + fr.id + " 1440x800 @0,0 children:1", lines[1]);
   check("map: leaf has no children marker and no fill/font/text", lines[2] === '    TEXT "Title" #' + t.id + " 200x20 @5,6", lines[2]);
   check("map: full view still available", /fill:#FF0000 r8/.test(api.summarize(fr.id, { depth: 0 })));
+}
+
+console.log("\n== summarize view:table: screen chrome is not a table ==");
+{
+  const api = createBridgeApi();
+  const page = newPage("Chrome page");
+  const screen = makeNode("FRAME", "Screen", { x: 0, y: 0, width: 1366 }); page.appendChild(screen);
+  // header and sidebar share a child count but not a column (x / width differ)
+  const header = makeNode("FRAME", "Header", { x: 0, y: 0, width: 1366 }); screen.appendChild(header);
+  const sidebar = makeNode("FRAME", "Sidebar", { x: 0, y: 80, width: 240 }); screen.appendChild(sidebar);
+  for (let i = 0; i < 3; i++) { header.appendChild(makeNode("FRAME", "h" + i)); sidebar.appendChild(makeNode("FRAME", "s" + i)); }
+  const content = makeNode("FRAME", "Content", { x: 240, y: 80, width: 1126 }); screen.appendChild(content);
+  for (let r = 0; r < 4; r++) {
+    const row = makeNode("FRAME", "Frame 2131329" + r, { x: 0, y: 40 * r, width: 1000 });
+    for (let c = 0; c < 3; c++) { const cell = makeNode("FRAME", "c"); cell.appendChild(makeNode("TEXT", "t", { characters: "v" + r + c })); row.appendChild(cell); }
+    content.appendChild(row);
+  }
+  const out = api.summarize(screen.id, { view: "table" });
+  check("chrome: header + sidebar (same child count, different x/width) are skipped, the real table is found",
+    out.split("\n")[0] === 'TABLE #' + content.id + ' "Content" rows:4 cols:3 rowW:1000', out);
+}
+
+console.log("\n== summarize view:table ==");
+{
+  const api = createBridgeApi();
+  const page = newPage("Table page");
+  const H = { layoutMode: "HORIZONTAL", itemSpacing: 0, paddingTop: 0, paddingRight: 0, paddingBottom: 0, paddingLeft: 0 };
+  const widths = [558, 95, 158, 77, 158, 124];
+  const titles = ["Сотрудник", "Аренда", "Последнее редактирование", "ДМС", "Статус", "Комментарий\nк записи которая очень длинная"];
+  const checkbox = { name: "checkbox" };
+  const textCell = (s) => { const c = makeNode("FRAME", "ячейки таблицы"); c.appendChild(makeNode("TEXT", "t", { characters: s })); return c; };
+  const checkCell = (state) => makeNode("INSTANCE", "checkbox", { mainComponent: checkbox, variantProperties: { State: state } });
+  const screen = makeNode("FRAME", "Screen 1366"); page.appendChild(screen);
+  const table = makeNode("FRAME", "table"); screen.appendChild(table);
+  const filters = makeNode("INSTANCE", "Фильтры десктоп"); table.appendChild(filters);
+  for (let i = 0; i < 3; i++) filters.appendChild(makeNode("FRAME", "f" + i));
+  const hwrap = makeNode("FRAME", "Заголовки таблицы"); table.appendChild(hwrap);
+  const hrow = makeNode("FRAME", "Заголовки", Object.assign({ width: 1170 }, H)); hwrap.appendChild(hrow);
+  widths.forEach((w, i) => {
+    const bg = makeNode("FRAME", "фон", { width: w, layoutSizingHorizontal: i === 0 ? "FILL" : "FIXED" });
+    bg.appendChild(makeNode("TEXT", "label", { characters: titles[i] }));
+    hrow.appendChild(bg);
+  });
+  const rows = [];
+  for (let r = 0; r < 8; r++) {
+    const row = makeNode("FRAME", "Строки таблицы/Строки таблицы/off", Object.assign({ width: 1170 }, H));
+    row.appendChild(textCell(r % 3 === 0 ? "Фамилия Имя Отчество" : "Иванов Иван " + r));
+    row.appendChild(checkCell(r < 6 ? "Default" : "Disabled"));
+    row.appendChild(textCell("01.01.2026"));
+    row.appendChild(checkCell("Default"));
+    row.appendChild(textCell("Работает"));
+    row.appendChild(makeNode("FRAME", "ячейки таблицы")); // empty cell
+    table.appendChild(row); rows.push(row);
+  }
+  const out = api.summarize(screen.id, { view: "table" });
+  const lines = out.split("\n");
+  check("table: one block, TABLE line has id, name, rows, cols, rowW, layout without sizing",
+    lines[0] === 'TABLE #' + table.id + ' "table" rows:8 cols:6 rowW:1170 [H gap0 pad0]', lines[0]);
+  check("table: header found one level deeper than rows (skipping the 1-child wrapper)", lines[1] === '  header #' + hrow.id + ' "Заголовки"', lines[1]);
+  check("table: column 1 has title, width, sizing and text distribution", lines[2] === '  1 "Сотрудник" w558 fill → text «Фамилия Имя Отчество» «Иванов Иван 1» …', lines[2]);
+  check("table: column 2 = checkbox variant distribution", lines[3] === '  2 "Аренда" w95 fixed → checkbox State=Default×6 State=Disabled×2', lines[3]);
+  check("table: header text with newline is flattened and clipped to 30", /^  6 "Комментарий к записи которая о…" w124 fixed → /.test(lines[7]), lines[7]);
+  check("table: empty cells are counted", /empty×8$/.test(lines[7]), lines[7]);
+  check("table: row0 line gives first row id and all cell ids", lines[8] === "  row0 #" + rows[0].id + " cells: " + rows[0].children.map(c => "#" + c.id).join(" "), lines[8]);
+  check("table: nothing but one block (non-table INSTANCE ignored)", lines.length === 9, lines.length);
+
+  // second table: layer names are meaningless, header is a direct sibling, hidden rows are ignored
+  const screen2 = makeNode("FRAME", "Screen 768"); page.appendChild(screen2);
+  const t2 = makeNode("FRAME", "Frame 2131329412"); screen2.appendChild(t2);
+  const h2 = makeNode("FRAME", "Frame 2131329395", Object.assign({ width: 700 }, H)); t2.appendChild(h2);
+  ["Имя", "Роль", "Дата"].forEach(s => { const c = makeNode("FRAME", "Frame 1", { width: 100 }); c.appendChild(makeNode("TEXT", "x", { characters: s })); h2.appendChild(c); });
+  for (let r = 0; r < 3; r++) {
+    const row = makeNode("FRAME", "Frame 2131329398", Object.assign({ width: 700 }, H));
+    row.appendChild(textCell("a" + r)); row.appendChild(checkCell("Default")); row.appendChild(textCell("b"));
+    t2.appendChild(row);
+  }
+  const hidden = makeNode("FRAME", "Frame 9", { visible: false });
+  for (let i = 0; i < 3; i++) hidden.appendChild(makeNode("FRAME", "c"));
+  t2.appendChild(hidden);
+  const out2 = api.summarize(screen2.id, { view: "table" }).split("\n");
+  check("table #2: found by structure alone (names are Frame NNN)", out2[0] === 'TABLE #' + t2.id + ' "Frame 2131329412" rows:3 cols:3 rowW:700 [H gap0 pad0]', out2[0]);
+  check("table #2: header + columns", out2[1].indexOf("header #" + h2.id) === 2 && out2[2] === '  1 "Имя" w100 → text «a0» «a1» …' && out2[3] === '  2 "Роль" w100 → checkbox State=Default×3', out2);
+
+  // no table, several ids at once -> one block per node
+  const plain = makeNode("FRAME", "Plain 360"); page.appendChild(plain);
+  plain.appendChild(makeNode("TEXT", "only", { characters: "x" }));
+  const multi = api.summarize([screen.id, plain.id, screen2.id], { view: "table" }).split("\n");
+  check("table: no table -> '#id name: no table found'", multi.indexOf('#' + plain.id + ' "Plain 360": no table found') === 9, multi);
+  check("table: several node_ids -> blocks in order", multi[0].indexOf("TABLE #" + table.id) === 0 && multi.some(l => l.indexOf("TABLE #" + t2.id) === 0), multi);
+  check("table: missing id reported", api.summarize(["nope:1"], { view: "table" }) === "MISSING nope:1");
+
+  // two tables inside one frame -> both
+  const both = makeNode("FRAME", "Two tables"); page.appendChild(both);
+  for (let t = 0; t < 2; t++) {
+    const box = makeNode("FRAME", "box" + t); both.appendChild(box);
+    for (let r = 0; r < 2; r++) { const row = makeNode("FRAME", "row"); box.appendChild(row); row.appendChild(textCell("a")); row.appendChild(textCell("b")); }
+  }
+  const twoOut = api.summarize(both.id, { view: "table" });
+  check("table: several tables in one frame all reported", (twoOut.match(/^TABLE #/gm) || []).length === 2 && /header none/.test(twoOut), twoOut);
+  check("table: leaves figma.skipInvisibleInstanceChildren as it was", figma.skipInvisibleInstanceChildren === false);
+
+  const { buildInspectCode } = require(path.join(ROOT, "figma", "index.js"));
+  const code = buildInspectCode({ node_ids: [screen.id, screen2.id], view: "table" });
+  check("buildInspectCode: view 'table' reaches summarize", /"view":"table"/.test(code) && /so\.view = 'table'/.test(code) && /bridge\.summarize\(refs, so\)/.test(code), code);
+  check("buildInspectCode: unknown view stays null", /"view":null/.test(buildInspectCode({ view: "grid" })));
+  inspectDone = inspectDone.then(async () => {
+    const res = await new AsyncFunction("figma", "bridge", code)(figma, api);
+    check("figma_inspect: view table -> outline holds the table text", typeof res.outline === "string" && res.outline.indexOf("TABLE #" + table.id) === 0 && /TABLE #/.test(res.outline.split("\n").slice(9).join("\n")), res);
+  });
 }
 
 console.log("\n== find: text search ==");

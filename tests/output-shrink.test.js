@@ -110,15 +110,87 @@ console.log("\n== paging with offset ==");
     sl[0] === "… lines 0–29 skipped" && /\(80 total\)/.test(last) && first === 30 + (sl.length - 2) && new RegExp(`Node ${first - 1}"`).test(sl[sl.length - 2]), { first, last, n: sl.length });
 }
 
-console.log("\n== one-time read tip ==");
+console.log("\n== grid shrink keeps the most that fits ==");
 {
-  srv.TIPS_SHOWN.clear();
-  check("a write script gets no tip", srv.readScriptTip("const f = figma.createFrame(); f.children.forEach(c => c.remove());") === null);
-  check("a script without a tree walk gets no tip", srv.readScriptTip("return figma.getNodeById('1:2').width;") === null);
-  const t = srv.readScriptTip("const out = []; for (const s of figma.currentPage.findAll(n => n.type === 'SECTION')) out.push(s.name); return out;");
-  check("a hand-written read walk gets the tip, naming the inspect modes", typeof t === "string" && /view:"map"/.test(t) && /context:true/.test(t) && /find_text/.test(t), t);
-  check("...only once per server process", srv.readScriptTip("return figma.currentPage.findAll(() => true).length;") === null);
-  srv.TIPS_SHOWN.clear();
+  // Shape of session e6524905 step #107: 6 keys x 6 objects x 7 keys, 4444 bytes -> was cut to 651.
+  const cells = (p) => Array.from({ length: 6 }, (_, i) => ({ name: "ячейки таблицы", w: 100 + i, text: "Фамилия Имя " + p + i, grow: 0, sizing: "FIXED", cb: null, idx: i }));
+  const v = { b1366_headers: cells("h"), b1366_cells: cells("c"), b768_headers: cells("h"), b768_cells: cells("c"), b360_headers: cells("h"), b360_cells: cells("c") };
+  const full = Buffer.byteLength(JSON.stringify(v));
+  const r = srv.shrinkToBudget(v, 3000);
+  check("grid: uses most of the budget (was ~15% with fixed levels)", r.truncated.to <= 3000 && r.truncated.to >= 2000, { full, to: r.truncated.to });
+  check("grid: objects keep their fields instead of '{object with N keys}'", typeof r.value.b1366_headers[0] === "object" && r.value.b1366_headers[0].text === "Фамилия Имя h0", r.value.b1366_headers[0]);
+  const small = srv.shrinkToBudget(v, 100000);
+  check("grid: a value that fits is untouched", small.truncated === null && small.value === v);
+}
+
+console.log("\n== read nudge (use_instead) ==");
+{
+  // Scripts shaped like the ones Antigravity wrote in session e6524905.
+  const READ_SECTIONS = `const ref = await figma.getNodeByIdAsync("157:140133");
+const target = await figma.getNodeByIdAsync("161:24484");
+function inspectSection(s) { return { id: s.id, children: (s.children || []).map(c => ({ id: c.id, x: Math.round(c.x),
+  sub: c.children ? c.children.map(sc => ({ id: sc.id, w: Math.round(sc.width) })) : [] })) }; }
+return { ref: inspectSection(ref), target: inspectSection(target) };`;
+  const READ_TABLE = `const b = await figma.getNodeByIdAsync("194:85088");
+const headers = b.findOne(n => n.name === 'Заголовки');
+return headers.children.map(c => ({ name: c.name, w: c.width, text: (c.findOne(t => t.type === 'TEXT') || {}).characters }));`;
+  const READ_FONT = `const n = await figma.getNodeByIdAsync("194:84942"); return { fontName: n.fontName, size: n.fontSize };`;
+  const READ_CB = `const n = await figma.getNodeByIdAsync("194:85120"); const cb = n.findAll(x => x.name === 'checkbox' && x.type === 'INSTANCE');
+return cb.map(c => c.componentProperties);`;
+  const STASH = "return bridge.state.lastResult.targetItems.slice(10);";
+  const WRITE_MOVE = `const s = await figma.getNodeByIdAsync("161:24484"); for (const c of s.children) { c.x += 100; } return s.children.length;`;
+  const WRITE_SECTION = "const s1 = figma.createSection(); s1.name = 'test'; s1.remove(); return true;";
+  const WRITE_SETPROPS = `const n = await figma.getNodeByIdAsync("1:2"); n.findAll(x => x.name === 'checkbox').forEach(c => c.setProperties({ State: 'Disabled' }));`;
+  const CHEAP = `return bridge.summarize("1:2", { depth: 2 });`;
+
+  const kinds = [READ_SECTIONS, READ_TABLE, READ_FONT, READ_CB, STASH, WRITE_MOVE, WRITE_SECTION, WRITE_SETPROPS, CHEAP].map(c => srv.classifyScript(c));
+  check("classify: reads, stash slicing, writes (+=, create, setProperties), bridge helper reads",
+    JSON.stringify(kinds) === JSON.stringify(["read", "read", "read", "read", "stash", "write", "write", "write", "cheap"]), kinds);
+  check("classify: a script that created/modified nodes is a write whatever its text",
+    srv.classifyScript(READ_FONT, { created: ["9:9"] }) === "write" && srv.classifyScript(READ_FONT, { modified: ["9:9"] }) === "write");
+  check("classify: comparisons are not assignments", srv.classifyScript(`const n = figma.getNodeById("1:2"); return n.name === 'a' && n.x == 3 && n.y >= 0;`) === "read");
+
+  const s1 = srv.suggestInspect(READ_SECTIONS);
+  check("suggest: section walk -> both ids, outline depth from the nesting", JSON.stringify(s1) === JSON.stringify({ node_ids: ["157:140133", "161:24484"], depth: 2 }), s1);
+  const s2 = srv.suggestInspect(READ_TABLE);
+  check("suggest: a walk into table headers/rows -> view:table for the screen",
+    JSON.stringify(s2) === JSON.stringify({ node_ids: ["194:85088"], view: "table" }), s2);
+  const s2b = srv.suggestInspect(`const n = await figma.getNodeByIdAsync("5:5"); const f = n.findOne(x => x.name === 'Футер'); return f.children.map(c => c.name);`);
+  check("suggest: findOne of a non-table layer -> find + depth", JSON.stringify(s2b) === JSON.stringify({ node_ids: ["5:5"], find: "Футер", depth: 2 }), s2b);
+  const s3 = srv.suggestInspect(READ_FONT);
+  check("suggest: font read on an id -> its own outline line (font is on it), not props", JSON.stringify(s3) === JSON.stringify({ node_ids: ["194:84942"], depth: 0 }), s3);
+  const s3b = srv.suggestInspect(`const n = await figma.getNodeByIdAsync("1:2"); return [n.layoutGrow, n.constraints];`);
+  check("suggest: props the outline lacks on an id -> props", JSON.stringify(s3b) === JSON.stringify({ node_ids: ["1:2"], props: ["layoutGrow", "constraints"] }), s3b);
+  const s4 = srv.suggestInspect(READ_CB);
+  check("suggest: find + type + componentProperties -> find, find_type, props:[props]",
+    JSON.stringify(s4) === JSON.stringify({ node_ids: ["194:85120"], find: "checkbox", find_type: "INSTANCE", props: ["props"] }), s4);
+  check("suggest: URL-style ids are normalised, instance ids kept",
+    JSON.stringify(srv.suggestInspect(`figma.getNodeById("161-24484"); figma.getNodeById("I194:85094;160:147835").children`).node_ids) === JSON.stringify(["161:24484", "I194:85094;160:147835"]));
+  check("suggest: no ids -> canvas map", JSON.stringify(srv.suggestInspect("return figma.currentPage.children.map(c => c.name);")) === JSON.stringify({ view: "map" }));
+
+  srv.READ_STATE.streak = 0; srv.READ_STATE.total = 0; srv.READ_STATE.lastIds = []; srv.READ_STATE.lastArgs = null; srv.READ_STATE.capsShown = false;
+  const n1 = srv.readNudge(READ_SECTIONS, {});
+  check("nudge #1: a ready call with the script's ids, the count, and (once) the other modes",
+    n1.startsWith('figma_inspect {"node_ids":["157:140133","161:24484"],"depth":2}') && /read #1 in a row/.test(n1) && /find_text/.test(n1), n1);
+  const n2 = srv.readNudge(STASH, {});
+  check("nudge on lastResult slicing reuses the last read's ids, says why, no repeated mode list",
+    n2.startsWith('figma_inspect {"node_ids":["157:140133","161:24484"],"depth":2}') && /slicing bridge\.state\.lastResult/.test(n2) && /#2 in a row/.test(n2) && !/find_text/.test(n2), n2);
+  const n3 = srv.readNudge(READ_FONT, {});
+  check("nudge #3 adds the plan: one inspect, then ONE write call", /#3 in a row/.test(n3) && /ONE figma_execute_code/.test(n3), n3);
+  check("nudge stays small (< 600 bytes after the first)", Buffer.byteLength(n3) < 600, Buffer.byteLength(n3));
+  check("writes and cheap reads get no nudge; a write resets the streak",
+    srv.readNudge(CHEAP, {}) === null && srv.readNudge(WRITE_MOVE, {}) === null && srv.READ_STATE.streak === 0);
+  srv.readNudge(READ_FONT, {}); srv.resetReadStreak();
+  check("figma_inspect resets the streak", srv.READ_STATE.streak === 0 && srv.READ_STATE.total === 4);
+
+  const env = JSON.parse(srv.buildStructuredResult(
+    { result: { rows: Array.from({ length: 150 }, (_, i) => ({ id: "1:" + i, name: "Row " + i, w: 100 + i })) }, resultStashed: true, checkpointId: null },
+    null, { maxOutputBytes: 3500, lead: { use_instead: n3 } }));
+  check("envelope: use_instead comes right after ok, before result", Object.keys(env).slice(0, 3).join() === "ok,use_instead,result", Object.keys(env));
+  check("envelope: a cut read points at the use_instead call, not at slicing lastResult",
+    /use_instead call/.test(env.truncated) && !/slice\(40, 80\)/.test(env.truncated), env.truncated);
+  check("envelope with nudge still fits the byte budget", Buffer.byteLength(JSON.stringify(env)) <= 3500, Buffer.byteLength(JSON.stringify(env)));
+  srv.READ_STATE.streak = 0; srv.READ_STATE.total = 0; srv.READ_STATE.lastIds = []; srv.READ_STATE.lastArgs = null; srv.READ_STATE.capsShown = false;
 }
 
 console.log("\n== ceiling ==");

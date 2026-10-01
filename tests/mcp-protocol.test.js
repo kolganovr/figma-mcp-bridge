@@ -86,7 +86,7 @@ async function main() {
     const init = await server.call("initialize", { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "test", version: "0" } });
     check("initialize responds with serverInfo.name", init.result && init.result.serverInfo && init.result.serverInfo.name === "figma-mcp", init);
     check("initialize advertises tools capability", init.result && init.result.capabilities && "tools" in init.result.capabilities, init);
-    check("serverInfo.version is 4.2.1", init.result.serverInfo.version === "4.2.1", init.result.serverInfo);
+    check("serverInfo.version is 4.2.2", init.result.serverInfo.version === "4.2.2", init.result.serverInfo);
     check("initialize instructions mention figma_read_canvas", /figma_read_canvas/.test(init.result.instructions || ""), init.result && init.result.instructions);
 
     const list = await server.call("tools/list", {});
@@ -97,8 +97,8 @@ async function main() {
     check("no duplicate tool names", new Set(names).size === names.length, names);
     const byName = Object.fromEntries(list.result.tools.map(t => [t.name, t]));
     const inspectProps = (byName.figma_inspect && byName.figma_inspect.inputSchema.properties) || {};
-    check("figma_inspect declares view (outline|map), context, find_text and offset",
-      inspectProps.view && inspectProps.view.enum.join() === "outline,map" && inspectProps.context.type === "boolean" &&
+    check("figma_inspect declares view (outline|map|table), context, find_text and offset",
+      inspectProps.view && inspectProps.view.enum.join() === "outline,map,table" && inspectProps.context.type === "boolean" &&
       inspectProps.find_text.type === "string" && inspectProps.offset.type === "number", Object.keys(inspectProps));
     check("figma_inspect props description mentions reactions and connector", /reactions/.test(inspectProps.props.description) && /connector/.test(inspectProps.props.description));
     check("figma_execute_code description lists the bridge macros",
