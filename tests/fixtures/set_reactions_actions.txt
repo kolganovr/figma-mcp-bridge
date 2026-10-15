@@ -1,0 +1,43 @@
+in set_reactions: Property "reactions" failed validation: Expected [0].actions[0] to be one of the following, but none matched:
+  Multiple issues at [0].actions[0]:
+    Invalid literal value, expected "CONDITIONAL" at [0].actions[0].type
+    Required value missing at [0].actions[0].conditionalBlocks
+    Unrecognized key(s) in object: 'destinationId', 'navigation', 'transition', 'overlayPositionType' at [0].actions[0]
+  Expected [0].actions[0] to be one of the following, but none matched:
+    Multiple issues at [0].actions[0]:
+      Invalid enum value. Expected 'BACK' | 'CLOSE', received 'NODE' at [0].actions[0].type
+      Unrecognized key(s) in object: 'destinationId', 'navigation', 'transition', 'overlayPositionType' at [0].actions[0]
+    Multiple issues at [0].actions[0]:
+      Invalid literal value, expected "URL" at [0].actions[0].type
+      Required value missing at [0].actions[0].url
+      Unrecognized key(s) in object: 'destinationId', 'navigation', 'transition', 'overlayPositionType' at [0].actions[0]
+    Multiple issues at [0].actions[0]:
+      Invalid literal value, expected "UPDATE_MEDIA_RUNTIME" at [0].actions[0].type
+      Required value missing at [0].actions[0].mediaAction
+      Unrecognized key(s) in object: 'navigation', 'transition', 'overlayPositionType' at [0].actions[0]
+    Multiple issues at [0].actions[0]:
+      Invalid literal value, expected "UPDATE_MEDIA_RUNTIME" at [0].actions[0].type
+      Required value missing at [0].actions[0].mediaAction
+      Required value missing at [0].actions[0].amountToSkip
+      Unrecognized key(s) in object: 'navigation', 'transition', 'overlayPositionType' at [0].actions[0]
+    Multiple issues at [0].actions[0]:
+      Invalid literal value, expected "UPDATE_MEDIA_RUNTIME" at [0].actions[0].type
+      Required value missing at [0].actions[0].mediaAction
+      Required value missing at [0].actions[0].newTimestamp
+      Unrecognized key(s) in object: 'navigation', 'transition', 'overlayPositionType' at [0].actions[0]
+    Multiple issues at [0].actions[0]:
+      Expected [0].actions[0].transition to be one of the following, but none matched:
+        … +6 deeper
+      Unrecognized key(s) in object: 'overlayPositionType' at [0].actions[0]
+    Multiple issues at [0].actions[0]:
+      Invalid literal value, expected "SET_VARIABLE" at [0].actions[0].type
+      Expected [0].actions[0].variableId to be one of the following, but none matched:
+        … +1 deeper
+      Unrecognized key(s) in object: 'destinationId', 'navigation', 'transition', 'overlayPositionType' at [0].actions[0]
+    Multiple issues at [0].actions[0]:
+      Invalid literal value, expected "SET_VARIABLE_MODE" at [0].actions[0].type
+      Expected [0].actions[0].variableCollectionId to be one of the following, but none matched:
+        … +1 deeper
+      Expected [0].actions[0].variableModeId to be one of the following, but none matched:
+        … +1 deeper
+      Unrecognized key(s) in object: 'destinationId', 'navigation', 'transition', 'overlayPositionType' at [0].actions[0]

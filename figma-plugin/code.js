@@ -244,6 +244,12 @@ function snapshotNodeProps(node) {
     if ("opacity" in node) snap.opacity = node.opacity;
     if ("visible" in node) snap.visible = node.visible;
     if ("cornerRadius" in node && node.cornerRadius !== figma.mixed) snap.cornerRadius = node.cornerRadius;
+    if (Array.isArray(node.reactions)) snap.reactions = JSON.parse(JSON.stringify(node.reactions));
+    if ("overlayPositionType" in node) {
+      snap.overlayPositionType = node.overlayPositionType;
+      snap.overlayBackground = JSON.parse(JSON.stringify(node.overlayBackground || { type: "NONE" }));
+      snap.overlayBackgroundInteraction = node.overlayBackgroundInteraction;
+    }
   } catch (e) {
     // A property that refuses to read (mixed values, locked nodes) just means
     // less gets restored for that node — never fails the checkpoint itself.
@@ -276,6 +282,12 @@ function restoreNodeProps(node, snap) {
     if ("opacity" in snap) node.opacity = snap.opacity;
     if ("visible" in snap) node.visible = snap.visible;
     if ("cornerRadius" in snap) node.cornerRadius = snap.cornerRadius;
+    if ("reactions" in snap) node.reactions = snap.reactions;
+    if ("overlayPositionType" in snap) {
+      node.overlayPositionType = snap.overlayPositionType;
+      node.overlayBackground = snap.overlayBackground;
+      node.overlayBackgroundInteraction = snap.overlayBackgroundInteraction;
+    }
   } catch (e) {
     // Best-effort restore — a single unrestorable property must not abort the rest of the rollback.
   }
@@ -611,6 +623,108 @@ function describeMapLine(n) {
   return parts.join(" ");
 }
 
+// view:"flow" — prototype links under the given nodes, grouped by screen:
+// source, trigger, action, target, transition; then the overlay settings of
+// every overlay target (they live on the target FRAME, not on the action).
+// Scans only inside the given nodes, with a node and time cap, so it cannot
+// freeze the plugin the way a page-wide findAll over `reactions` did.
+const FLOW_MAX_NODES = 30000;
+const FLOW_MAX_MS = 6000;
+
+function flowTriggerText(t) {
+  if (!t) return "?";
+  let s = t.type || "?";
+  if (typeof t.timeout === "number") s += " " + readRound(t.timeout) + "s";
+  else if (typeof t.delay === "number" && t.delay) s += " delay " + readRound(t.delay) + "s";
+  if (Array.isArray(t.keyCodes) && t.keyCodes.length) s += " key " + t.keyCodes.join("+");
+  return s;
+}
+
+function flowTransitionText(tr) {
+  if (!tr) return "";
+  let s = tr.type || "?";
+  if (tr.direction) s += " " + tr.direction;
+  if (typeof tr.duration === "number") s += " " + readRound(tr.duration) + "s";
+  if (tr.easing && tr.easing.type) s += " " + tr.easing.type;
+  return s;
+}
+
+function flowActionText(a, overlays) {
+  if (!a) return "?";
+  if (a.type === "NODE") {
+    const nav = a.navigation || "NAVIGATE";
+    let dest = null;
+    try { dest = a.destinationId ? figma.getNodeById(a.destinationId) : null; } catch (e) {}
+    let s = nav + " " + (a.destinationId ? "#" + a.destinationId + (dest ? " " + JSON.stringify(dest.name) : " MISSING") : "(no target)");
+    const tr = flowTransitionText(a.transition);
+    s += tr ? " [" + tr + "]" : " [instant]";
+    if (nav === "OVERLAY" && dest) overlays[dest.id] = dest;
+    return s;
+  }
+  if (a.type === "URL") return "URL " + a.url;
+  if (a.type === "SET_VARIABLE") return "SET_VARIABLE " + (a.variableId || "?") + (a.variableValue ? " = " + JSON.stringify(a.variableValue.value) : "");
+  if (a.type === "CONDITIONAL") return "CONDITIONAL (" + (a.conditionalBlocks ? a.conditionalBlocks.length : 0) + " blocks)";
+  return a.type || "?";
+}
+
+function flowOverlayText(d) {
+  const bg = d.overlayBackground;
+  let bgText = "none";
+  if (bg && bg.type === "SOLID_COLOR") bgText = readHex(bg.color, typeof bg.color.a === "number" ? bg.color.a : 1);
+  else if (bg && bg.type) bgText = bg.type;
+  return "OVERLAY " + JSON.stringify(d.name) + " #" + d.id + ": position " + (d.overlayPositionType || "n/a") +
+    ", dim " + bgText + ", click outside " + (d.overlayBackgroundInteraction === "CLOSE_ON_CLICK_OUTSIDE" ? "closes" : "does nothing");
+}
+
+function flowScreenOf(n) {
+  let cur = n;
+  while (cur.parent && cur.parent.type !== "PAGE" && cur.parent.type !== "SECTION" && cur.parent.type !== "DOCUMENT") cur = cur.parent;
+  return cur;
+}
+
+function summarizeFlow(refs) {
+  const list = Array.isArray(refs) ? refs : [refs];
+  const started = Date.now();
+  const screens = {};
+  const order = [];
+  const overlays = {};
+  let scanned = 0, links = 0, sources = 0, partial = false;
+  const visit = (n) => {
+    scanned++;
+    if (Array.isArray(n.reactions) && n.reactions.length) {
+      const parts = [];
+      n.reactions.forEach(r => {
+        if (!r) return;
+        const actions = Array.isArray(r.actions) && r.actions.length ? r.actions : (r.action ? [r.action] : [null]);
+        actions.forEach(a => { parts.push(flowTriggerText(r.trigger) + " → " + (a ? flowActionText(a, overlays) : "(no action)")); links++; });
+      });
+      if (parts.length) {
+        sources++;
+        const top = flowScreenOf(n);
+        if (!screens[top.id]) { screens[top.id] = { head: "SCREEN " + JSON.stringify(top.name) + " #" + top.id, lines: [] }; order.push(top.id); }
+        parts.forEach(p => screens[top.id].lines.push("  " + (n === top ? "(screen)" : n.type + " " + JSON.stringify(n.name) + " #" + n.id) + " " + p));
+      }
+    }
+  };
+  list.forEach(ref => {
+    const root = readNode(ref);
+    if (!root) return;
+    const stack = [root];
+    while (stack.length) {
+      if (scanned >= FLOW_MAX_NODES || Date.now() - started > FLOW_MAX_MS) { partial = true; break; }
+      const n = stack.pop();
+      visit(n);
+      if ("children" in n && n.children) for (let i = n.children.length - 1; i >= 0; i--) stack.push(n.children[i]);
+    }
+  });
+  const lines = ["FLOW: " + links + " link" + (links === 1 ? "" : "s") + " from " + sources + " node" + (sources === 1 ? "" : "s") + " in " + order.length + " screen" + (order.length === 1 ? "" : "s") + " (scanned " + scanned + " nodes" + (partial ? ", STOPPED at the scan cap: pass a smaller section" : "") + ")"];
+  order.forEach(id => { lines.push(screens[id].head); screens[id].lines.forEach(l => lines.push(l)); });
+  const ov = Object.keys(overlays);
+  if (ov.length) { lines.push("OVERLAY SETTINGS (frame properties of the overlay target, not part of the action)"); ov.forEach(id => lines.push("  " + flowOverlayText(overlays[id]))); }
+  if (!links) lines.push("no prototype links under the given nodes");
+  return lines.join("\n");
+}
+
 // Bytes a string costs once JSON-encoded (UTF-8, quotes/backslashes/newlines
 // escaped) — the sandbox has no TextEncoder.
 function jsonByteCost(s) {
@@ -637,6 +751,7 @@ const PRUNE_STOP = { stop: true };
 function summarizeNodes(refs, opts) {
   const o = opts || {};
   if (o.view === "table") return summarizeTables(refs);
+  if (o.view === "flow") return summarizeFlow(refs);
   const maxChildren = Number.isFinite(o.maxChildren) ? o.maxChildren : 15;
   const list = Array.isArray(refs) ? refs : [refs];
   const render = (depth, byteCap) => {
@@ -1814,6 +1929,115 @@ function createBridgeApi() {
     return box;
   };
 
+  // --- prototype reactions -------------------------------------------------
+  // Figma's reactions validator answers a wrong shape with a union error of
+  // several KB. These build the one valid shape. Overlay look (position, dim,
+  // click outside) is set on the overlay FRAME, never on the action.
+  const REACTION_DIRECTIONAL = ["MOVE_IN", "MOVE_OUT", "PUSH", "SLIDE_IN", "SLIDE_OUT"];
+  const REACTION_SIMPLE = ["DISSOLVE", "SMART_ANIMATE", "SCROLL_ANIMATE"];
+  const REACTION_NAV = ["NAVIGATE", "SWAP", "OVERLAY", "SCROLL_TO", "CHANGE_TO"];
+  const OVERLAY_POSITIONS = ["CENTER", "TOP_LEFT", "TOP_CENTER", "TOP_RIGHT", "BOTTOM_LEFT", "BOTTOM_CENTER", "BOTTOM_RIGHT", "MANUAL"];
+
+  // null | "DISSOLVE" | "MOVE_IN/BOTTOM" | "PUSH/LEFT/0.4" | { type, direction, duration, easing } -> Transition | null
+  function reactionTransition(t, who) {
+    if (t === undefined || t === null || t === false || t === "INSTANT") return null;
+    let o = t;
+    if (typeof t === "string") {
+      const parts = t.split("/");
+      o = { type: parts[0].toUpperCase() };
+      if (parts[1]) { if (isNaN(Number(parts[1]))) o.direction = parts[1].toUpperCase(); else o.duration = Number(parts[1]); }
+      if (parts[2]) o.duration = Number(parts[2]);
+    }
+    const type = String(o.type || "").toUpperCase();
+    const easing = o.easing ? (typeof o.easing === "string" ? { type: o.easing } : o.easing) : { type: "EASE_OUT" };
+    const duration = Number.isFinite(o.duration) ? o.duration : 0.3;
+    if (REACTION_DIRECTIONAL.indexOf(type) !== -1) {
+      if (["LEFT", "RIGHT", "TOP", "BOTTOM"].indexOf(o.direction) === -1) {
+        throw new Error("bridge." + who + ": transition " + type + " needs direction LEFT | RIGHT | TOP | BOTTOM, e.g. \"" + type + "/BOTTOM\"");
+      }
+      return { type: type, direction: o.direction, matchLayers: o.matchLayers === true, easing: easing, duration: duration };
+    }
+    if (REACTION_SIMPLE.indexOf(type) !== -1) return { type: type, easing: easing, duration: duration };
+    throw new Error("bridge." + who + ": transition type \"" + o.type + "\" is not one of " + REACTION_DIRECTIONAL.concat(REACTION_SIMPLE).join(", ") + " (null = instant)");
+  }
+
+  function reactionTrigger(t, o, who) {
+    const spec = typeof t === "string" ? { type: t } : (t || {});
+    const type = String(spec.type || "ON_CLICK").toUpperCase();
+    if (type === "AFTER_TIMEOUT") return { type: type, timeout: Number.isFinite(spec.timeout) ? spec.timeout : (Number.isFinite(o.timeout) ? o.timeout : 0.8) };
+    if (["MOUSE_ENTER", "MOUSE_LEAVE", "MOUSE_UP", "MOUSE_DOWN"].indexOf(type) !== -1) return { type: type, delay: Number.isFinite(spec.delay) ? spec.delay : (Number.isFinite(o.delay) ? o.delay : 0) };
+    if (type === "ON_KEY_DOWN") return { type: type, device: spec.device || "KEYBOARD", keyCodes: spec.keyCodes || o.keys || [] };
+    if (["ON_CLICK", "ON_HOVER", "ON_PRESS", "ON_DRAG"].indexOf(type) === -1) {
+      throw new Error("bridge." + who + ": trigger \"" + type + "\" is not one of ON_CLICK, ON_HOVER, ON_PRESS, ON_DRAG, AFTER_TIMEOUT, MOUSE_ENTER, MOUSE_LEAVE, MOUSE_UP, MOUSE_DOWN, ON_KEY_DOWN");
+    }
+    return { type: type };
+  }
+
+  // opts: trigger ("ON_CLICK"), to (id | node), nav ("NAVIGATE" | "SWAP" | "OVERLAY" | "SCROLL_TO" | "CHANGE_TO"),
+  // transition, action ("BACK" | "CLOSE" | { type: "URL", url }), replace ("trigger" | "all" | "none").
+  api.setReaction = async function (node, opts) {
+    const o = opts || {};
+    const n = macroNodes(node, "setReaction")[0];
+    if (!Array.isArray(n.reactions)) throw new Error("bridge.setReaction: " + n.type + " \"" + n.name + "\" cannot have prototype reactions");
+    const trigger = reactionTrigger(o.trigger, o, "setReaction");
+    let action;
+    if (o.action) {
+      if (o.action === "BACK" || o.action === "CLOSE") action = { type: o.action };
+      else if (o.action && o.action.type === "URL") action = { type: "URL", url: o.action.url, openInNewTab: o.action.openInNewTab !== false };
+      else if (o.action && typeof o.action === "object") action = o.action;
+      else throw new Error("bridge.setReaction: action must be \"BACK\", \"CLOSE\" or { type: \"URL\", url }; for a screen / overlay target use to + nav");
+    } else {
+      if (!o.to) throw new Error("bridge.setReaction: give `to` (target frame id or node) with nav, or `action`: \"BACK\" | \"CLOSE\"");
+      const dest = macroNodes(o.to, "setReaction")[0];
+      const nav = String(o.nav || "NAVIGATE").toUpperCase();
+      if (REACTION_NAV.indexOf(nav) === -1) throw new Error("bridge.setReaction: nav \"" + o.nav + "\" is not one of " + REACTION_NAV.join(", "));
+      action = { type: "NODE", destinationId: dest.id, navigation: nav, transition: reactionTransition(o.transition, "setReaction"), resetVideoPosition: false };
+    }
+    const keep = o.replace === "all" ? [] : (o.replace === "none" ? n.reactions.slice() : n.reactions.filter(r => !(r && r.trigger && r.trigger.type === trigger.type)));
+    trackModification(n);
+    const next = keep.concat([{ trigger: trigger, actions: [action] }]);
+    if (typeof n.setReactionsAsync === "function") await n.setReactionsAsync(next); else n.reactions = next;
+    return "#" + n.id + " " + trigger.type + " → " + (action.type === "NODE" ? action.navigation + " #" + action.destinationId : action.type);
+  };
+
+  // Overlay = a reaction on `node` plus the overlay look on the overlay FRAME.
+  // opts: trigger, position (OVERLAY_POSITIONS, default CENTER), dim (true | alpha 0..1 | "#000000@0.4" | false),
+  // closeOnOutside (true), transition (default: slides in from the nearest edge, DISSOLVE for CENTER).
+  api.openOverlay = async function (node, overlay, opts) {
+    const o = opts || {};
+    const target = macroNodes(overlay, "openOverlay")[0];
+    if (!("overlayPositionType" in target)) {
+      throw new Error("bridge.openOverlay: " + target.type + " \"" + target.name + "\" cannot be an overlay: use a top-level FRAME");
+    }
+    const position = String(o.position || "CENTER").toUpperCase();
+    if (OVERLAY_POSITIONS.indexOf(position) === -1) throw new Error("bridge.openOverlay: position must be one of " + OVERLAY_POSITIONS.join(", "));
+    let bg = { type: "NONE" };
+    if (o.dim !== undefined && o.dim !== false && o.dim !== null) {
+      let color = { r: 0, g: 0, b: 0, a: 0.4 };
+      if (typeof o.dim === "number") color.a = o.dim;
+      else if (typeof o.dim === "string") {
+        const m = /^#?([0-9a-f]{6})(?:@([\d.]+))?$/i.exec(o.dim.trim());
+        if (!m) throw new Error("bridge.openOverlay: dim must be true, an alpha 0..1, or \"#000000@0.4\"");
+        color = { r: parseInt(m[1].slice(0, 2), 16) / 255, g: parseInt(m[1].slice(2, 4), 16) / 255, b: parseInt(m[1].slice(4, 6), 16) / 255, a: m[2] ? Number(m[2]) : 1 };
+      }
+      bg = { type: "SOLID_COLOR", color: color };
+    }
+    let transition = o.transition;
+    if (transition === undefined) transition = position.indexOf("BOTTOM") === 0 ? "MOVE_IN/BOTTOM" : position.indexOf("TOP") === 0 ? "MOVE_IN/TOP" : "DISSOLVE";
+    trackModification(target);
+    target.overlayPositionType = position;
+    target.overlayBackground = bg;
+    target.overlayBackgroundInteraction = o.closeOnOutside === false ? "NONE" : "CLOSE_ON_CLICK_OUTSIDE";
+    const res = await api.setReaction(node, { trigger: o.trigger, to: target, nav: "OVERLAY", transition: transition, replace: o.replace });
+    return res + " (" + position + ", dim " + (bg.type === "NONE" ? "none" : readHex(bg.color, bg.color.a)) + ")";
+  };
+
+  // CLOSE action on `node` (a close button / scrim inside an overlay).
+  api.closeOverlay = async function (node, opts) {
+    const o = opts || {};
+    return api.setReaction(node, { trigger: o.trigger, action: "CLOSE", replace: o.replace });
+  };
+
   // --- cheap reads: facts as short text / flat maps instead of raw dumps ----
   api.summarize = function (refs, opts) { return summarizeNodes(refs, opts); };
   api.inspect = function (refs, props) { return inspectNodes(refs, props); };
@@ -1854,7 +2078,7 @@ function createBridgeApi() {
         "memory only — it is cleared when the plugin reloads.",
       cheapReads: {
         "bridge.summarize(idOrNode | ids, { depth: 2, maxChildren: 15, text: 40, view })":
-          "indented outline, one line per node: TYPE \"name\" #id WxH @x,y [V gap8 pad16 fill/hug a:start/center] size:fill/hug abs fill:#FFF stroke:#E8EAF0/0,1,1,1 r0,0,3,3 shadow:0,4/20 #000@0.1 font \"text…\" (non-defaults only; children:N = more below the depth); view:\"map\" = only TYPE \"name\" #id WxH @x,y children:N (cheapest page overview); view:\"table\" = per table: columns (header, width, sizing, cell contents) + row/cell ids",
+          "indented outline, one line per node: TYPE \"name\" #id WxH @x,y [V gap8 pad16 fill/hug a:start/center] size:fill/hug abs fill:#FFF stroke:#E8EAF0/0,1,1,1 r0,0,3,3 shadow:0,4/20 #000@0.1 font \"text…\" (non-defaults only; children:N = more below the depth); view:\"map\" = only TYPE \"name\" #id WxH @x,y children:N (cheapest page overview); view:\"table\" = per table: columns (header, width, sizing, cell contents) + row/cell ids; view:\"flow\" = prototype links under the ids: screen, source, trigger, action, target, transition + the overlay settings of overlay targets",
         "bridge.context(idOrNode)":
           "{ node, ancestors, siblings: [{w,n}], pageWidths: top-6 frame widths (breakpoints), components: [{ set, used, props }] used inside the node, conventions } — read this before building next to existing design",
         "bridge.inspect(ids, [props])":
@@ -1875,7 +2099,19 @@ function createBridgeApi() {
         "bridge.shift(nodesOrIds, { dx: 0, dy: 0 })": "moves nodes by an offset; returns the count",
         "bridge.moveInto(nodesOrIds, container, { layout: \"none\" | \"row\" | \"column\", gap: 100, padding: 0 })": "reparents nodes; none keeps their canvas position, row/column lays them out; returns ids",
         "bridge.fitSection(section, { padding: 100 })": "resizes a SECTION/FRAME to its children's bbox + padding, children keep their canvas position; returns the section",
+        "await bridge.setReaction(node, { trigger: 'ON_CLICK', to: frameId, nav: 'NAVIGATE', transition: 'MOVE_IN/LEFT' })": "adds one prototype link (replaces a reaction with the same trigger; replace: 'all' | 'none'); action: 'BACK' | 'CLOSE' | { type: 'URL', url } instead of to/nav; transition null = instant, 'DISSOLVE', 'SMART_ANIMATE', 'PUSH/LEFT/0.4' or { type, direction, duration, easing }; returns a summary line",
+        "await bridge.openOverlay(node, overlayFrame, { position: 'BOTTOM_CENTER', dim: 0.4, closeOnOutside: true })": "link that opens overlayFrame over the screen AND sets the overlay look on that frame (position, dim, click outside); transition defaults to sliding in from the edge",
+        "await bridge.closeOverlay(node)": "CLOSE action on a node inside an overlay",
+        "bridge.componentize(node)": "figma.createComponentFromNode that keeps AutoLayout sizing and resize behaviour; use it instead of createComponentFromNode",
         "note": "existing nodes these change are snapshotted into the open checkpoint; an unknown bridge.<name> throws with the list of real helpers"
+      },
+      reactions: {
+        read: "figma_inspect { node_ids: [section or screens], view: 'flow' } = every prototype link (source, trigger, action, target, transition) + overlay settings, one call. Never findAll over the page for reactions.",
+        write: "bridge.setReaction / openOverlay / closeOverlay build the valid shape. Raw form: node.reactions = [{ trigger, actions: [action] }] (setReactionsAsync in dynamic-page files); the key is `actions` (array), legacy `action` is read-only.",
+        trigger: "{ type: 'ON_CLICK' | 'ON_HOVER' | 'ON_PRESS' | 'ON_DRAG' } | { type: 'AFTER_TIMEOUT', timeout: seconds } | { type: 'MOUSE_ENTER' | 'MOUSE_LEAVE' | 'MOUSE_UP' | 'MOUSE_DOWN', delay } | { type: 'ON_KEY_DOWN', device, keyCodes }",
+        action: "{ type: 'NODE', destinationId, navigation: 'NAVIGATE' | 'SWAP' | 'OVERLAY' | 'SCROLL_TO' | 'CHANGE_TO', transition: Transition | null, resetVideoPosition: false } | { type: 'BACK' } | { type: 'CLOSE' } | { type: 'URL', url, openInNewTab } | { type: 'SET_VARIABLE', variableId, variableValue } | { type: 'SET_VARIABLE_MODE', ... } | { type: 'CONDITIONAL', conditionalBlocks }. NODE needs `transition` present (null = instant) and no other keys.",
+        transition: "{ type: 'DISSOLVE' | 'SMART_ANIMATE' | 'SCROLL_ANIMATE', easing: { type: 'EASE_OUT' }, duration: 0.3 } | { type: 'MOVE_IN' | 'MOVE_OUT' | 'PUSH' | 'SLIDE_IN' | 'SLIDE_OUT', direction: 'LEFT' | 'RIGHT' | 'TOP' | 'BOTTOM', matchLayers: false, easing, duration } (duration in seconds)",
+        overlayLook: "overlayPositionType ('CENTER' | 'TOP_LEFT' | 'TOP_CENTER' | 'TOP_RIGHT' | 'BOTTOM_LEFT' | 'BOTTOM_CENTER' | 'BOTTOM_RIGHT' | 'MANUAL'), overlayBackground ({ type: 'NONE' } | { type: 'SOLID_COLOR', color: { r, g, b, a } }), overlayBackgroundInteraction ('NONE' | 'CLOSE_ON_CLICK_OUTSIDE') are properties of the overlay FRAME (the navigation target), NOT keys of the action: putting them in the action fails with 'Unrecognized key(s)'."
       },
       injected: ["figma", "ensureFont", "bridge", "getFreePosition", "notify", "log", "progress"],
       modules: api.list(),

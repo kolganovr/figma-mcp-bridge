@@ -1,5 +1,32 @@
 # Changelog
 
+## 4.2.5 -- read guard, prototype reactions, safe componentize
+
+Measured on two Antigravity prototype sessions of a second user (Gemini Flash, plugin 4.2.2, intranet file
+with thousands of nodes): 60-64% of input tokens went into hand-written read scripts in execute_code
+(ignoring the use_instead nudge up to 54 times in a row); page-wide scans froze the plugin for 2-12 minutes;
+prototype reactions and overlays caused repeated union validation errors.
+
+- **Read guard (server-side, works with older plugins):** the first hand-written read in `figma_execute_code`
+  runs with `use_instead`; the 2nd read in a row is NOT run, returning the result of the equivalent
+  `figma_inspect` call (a `redirected` note leads the reply); the 3rd and later are refused (`code: "READ_REFUSED"`).
+  A `figma_inspect` call or any write resets the streak. Comment `/* run-anyway */` lifts the guard.
+- **Page-wide scans blocked:** read scripts calling `figma.currentPage.findAll`, `figma.root.findAll`, or a
+  whole-page reaction walk are refused up front (`PAGE_SCAN_BLOCKED`) with a scoped `figma_inspect` call;
+  write scripts with such scans run but receive a `lint` field. After a job reports `stalled`, the reply
+  sets `stop: true`, and repeated `figma_job_status` checks return immediately.
+- **Prototype reactions (`figma_inspect view: "flow"`):** inspects source nodes, triggers, actions, targets,
+  transitions, and overlay frame settings scoped to `node_ids` with node and time caps. New macros:
+  `bridge.setReaction(node, {trigger,to,nav,transition,action,replace})`,
+  `bridge.openOverlay(node, overlayFrame, {position,dim,closeOnOutside,transition})`, and
+  `bridge.closeOverlay(node)`. Reaction and overlay changes are snapshotted for `figma_rollback`.
+  `bridge.info().reactions` provides a schema cheat sheet. Union validation errors on `set_reactions`
+  (3-6 KB) are compressed to the closest branch (~300-550 B).
+- **Safe componentize rewrite:** raw `figma.createComponentFromNode(` in scripts is rewritten by the server
+  to `bridge.componentize(` to avoid forcing AutoLayout frames to FIXED, reporting a `lint` notice.
+- **Tool description and instructions:** `figma_execute_code` description notes `bridge.componentize`,
+  reaction macros, and forbids page-wide `findAll`. Server instructions fit within 1993 chars (under 2000 limit).
+
 ## 4.2.4 — find the copies of a reference, not just diff given ones
 
 Measured on Antigravity session `87bd6b0a` (Gemini Flash, 4.2.3, one task: redo the dropdowns of one

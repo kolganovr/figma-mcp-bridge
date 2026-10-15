@@ -1149,6 +1149,84 @@ console.log("\n== screenshots: common-ancestor area rule ==");
   inspectDone = inspectDone.then(() => done);
 }
 
+console.log("\n== prototype reactions: view:flow + setReaction / openOverlay / closeOverlay (4.2.5) ==");
+inspectDone = inspectDone.then(async () => {
+  const api = createBridgeApi();
+  const sec = makeNode("SECTION", "Prototype");
+  const overlayProps = { overlayPositionType: "CENTER", overlayBackground: { type: "NONE" }, overlayBackgroundInteraction: "NONE" };
+  const home = makeNode("FRAME", "Home", Object.assign({ reactions: [] }, overlayProps));
+  const sheet = makeNode("FRAME", "Sheet", Object.assign({ reactions: [] }, overlayProps));
+  const detail = makeNode("FRAME", "Detail", Object.assign({ reactions: [] }, overlayProps));
+  const btn = makeNode("INSTANCE", "Open sheet", { reactions: [] });
+  const back = makeNode("INSTANCE", "Back", { reactions: [] });
+  const close = makeNode("RECTANGLE", "Scrim close", { reactions: [] });
+  home.appendChild(btn); detail.appendChild(back); sheet.appendChild(close);
+  [home, sheet, detail].forEach(f => sec.appendChild(f));
+  figma.currentPage.appendChild(sec);
+  const calls = [];
+  btn.setReactionsAsync = async function (list) { calls.push(list); this.reactions = list; };
+
+  const r1 = await api.openOverlay(btn.id, sheet.id, { position: "BOTTOM_CENTER", dim: 0.4 });
+  check("openOverlay: reaction is the valid shape (actions[], NODE, OVERLAY, transition present, no overlay keys)",
+    calls.length === 1 && btn.reactions.length === 1 && btn.reactions[0].actions.length === 1 &&
+    btn.reactions[0].actions[0].type === "NODE" && btn.reactions[0].actions[0].navigation === "OVERLAY" &&
+    btn.reactions[0].actions[0].destinationId === sheet.id && btn.reactions[0].actions[0].transition.type === "MOVE_IN" &&
+    btn.reactions[0].actions[0].transition.direction === "BOTTOM" &&
+    !("overlayPositionType" in btn.reactions[0].actions[0]) && !("overlayBackground" in btn.reactions[0].actions[0]), btn.reactions);
+  check("openOverlay: overlay look is set on the overlay FRAME",
+    sheet.overlayPositionType === "BOTTOM_CENTER" && sheet.overlayBackground.type === "SOLID_COLOR" && sheet.overlayBackground.color.a === 0.4 &&
+    sheet.overlayBackgroundInteraction === "CLOSE_ON_CLICK_OUTSIDE", sheet);
+  check("openOverlay: returns a one-line summary", typeof r1 === "string" && /^#\S+ ON_CLICK → OVERLAY #\S+ \(BOTTOM_CENTER, dim #000000@0.4\)$/.test(r1), r1);
+
+  await api.setReaction(back.id, { to: home.id, nav: "NAVIGATE", transition: "PUSH/RIGHT/0.4" });
+  const bt = back.reactions[0].actions[0].transition;
+  check("setReaction: 'PUSH/RIGHT/0.4' -> directional transition with duration", bt.type === "PUSH" && bt.direction === "RIGHT" && bt.duration === 0.4 && bt.matchLayers === false, bt);
+  check("setReaction: no transition -> null (instant), key still present", (await (async () => { await api.setReaction(back.id, { trigger: "ON_HOVER", to: detail.id }); return back.reactions[1].actions[0]; })()).transition === null && "transition" in back.reactions[1].actions[0]);
+  await api.setReaction(back.id, { to: detail.id, nav: "SWAP" });
+  check("setReaction: same trigger replaces, other triggers stay", back.reactions.length === 2 && back.reactions.find(r => r.trigger.type === "ON_CLICK").actions[0].navigation === "SWAP", back.reactions);
+  await api.closeOverlay(close.id);
+  check("closeOverlay: CLOSE action", close.reactions[0].actions[0].type === "CLOSE" && close.reactions[0].trigger.type === "ON_CLICK", close.reactions);
+
+  let err = "";
+  try { await api.setReaction(back.id, { to: home.id, transition: "MOVE_IN" }); } catch (e) { err = e.message; }
+  check("setReaction: a directional transition without direction says what to write", /MOVE_IN needs direction .*"MOVE_IN\/BOTTOM"/.test(err), err);
+  err = "";
+  try { await api.openOverlay(btn.id, sec.id, {}); } catch (e) { err = e.message; }
+  check("openOverlay: a non-frame target is refused plainly", /cannot be an overlay/.test(err), err);
+  err = "";
+  try { await api.setReaction(back.id, { trigger: "ON_TAP", to: home.id }); } catch (e) { err = e.message; }
+  check("setReaction: unknown trigger lists the real ones", /ON_CLICK, ON_HOVER/.test(err), err);
+
+  const flow = api.summarize([sec.id], { view: "flow" });
+  const fl = flow.split("\n");
+  check("flow: header counts links, nodes, screens", /^FLOW: 4 links from 3 nodes in 3 screens \(scanned \d+ nodes\)$/.test(fl[0]) , fl[0]);
+  check("flow: grouped by screen, source line has trigger → navigation #target \"name\" [transition]",
+    fl.includes('SCREEN "Home" #' + home.id) && fl.some(l => l === '  INSTANCE "Open sheet" #' + btn.id + " ON_CLICK → OVERLAY #" + sheet.id + ' "Sheet" [MOVE_IN BOTTOM 0.3s EASE_OUT]'), flow);
+  check("flow: instant link and CLOSE are shown", fl.some(l => / ON_HOVER → NAVIGATE #\S+ "Detail" \[instant\]$/.test(l)) && fl.some(l => / ON_CLICK → CLOSE$/.test(l)), flow);
+  check("flow: overlay settings listed once, marked as frame properties",
+    fl.some(l => /^OVERLAY SETTINGS \(frame properties/.test(l)) && fl.filter(l => /OVERLAY "Sheet"/.test(l)).length === 1 &&
+    fl.some(l => /position BOTTOM_CENTER, dim #000000@0.4, click outside closes/.test(l)), flow);
+  const none = api.summarize([makeNode("FRAME", "Empty", { reactions: [] }).id], { view: "flow" });
+  check("flow: a screen without links reports none", /FLOW: 0 links/.test(none) && /no prototype links/.test(none), none);
+  check("flow: missing ids do not throw", /FLOW: 0 links/.test(api.summarize(["nope:1"], { view: "flow" })));
+
+  // checkpoint rollback restores reactions and overlay look
+  const cp = api.checkpoint("reactions");
+  await api.openOverlay(btn.id, detail.id, { position: "TOP_CENTER", dim: false, transition: null });
+  cp.commit();
+  check("checkpoint: the change landed", btn.reactions[0].actions[0].destinationId === detail.id && detail.overlayPositionType === "TOP_CENTER");
+  api.rollback("last");
+  check("rollback restores reactions and overlay properties",
+    btn.reactions[0] && btn.reactions[0].actions[0].destinationId === sheet.id && detail.overlayPositionType === "CENTER" && detail.overlayBackgroundInteraction === "NONE", [btn.reactions, detail.overlayPositionType]);
+
+  const info = api.info();
+  check("info: reactions cheat sheet says overlay look belongs to the frame, not the action",
+    info.reactions && /overlayPositionType/.test(info.reactions.overlayLook) && /NOT keys of the action/.test(info.reactions.overlayLook) && /view: 'flow'/.test(info.reactions.read) && /actions/.test(info.reactions.write));
+  check("info: macros list setReaction / openOverlay / closeOverlay / componentize",
+    Object.keys(info.macros).some(k => /bridge\.setReaction/.test(k)) && Object.keys(info.macros).some(k => /bridge\.openOverlay/.test(k)) &&
+    Object.keys(info.macros).some(k => /bridge\.closeOverlay/.test(k)) && Object.keys(info.macros).some(k => /bridge\.componentize/.test(k)));
+});
+
 inspectDone.then(() => {
   console.log(failures === 0 ? "\nALL PASS" : "\n" + failures + " FAILURES");
   process.exit(failures ? 1 : 0);

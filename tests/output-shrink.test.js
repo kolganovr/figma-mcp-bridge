@@ -266,7 +266,7 @@ console.log("\n== figma_inspect generated code ==");
     /if \(a\.findText\) opts\.text = true;/.test(ft) && /if \(root\) opts\.root = root;/.test(ft) && /bridge\.find\(query, opts\)/.test(ft), ft);
   const fnd = srv.buildInspectCode({ find: "Button" });
   check("find (names) is unchanged: no text flag in the spec, results under `found`",
-    specOf(fnd).find === "Button" && specOf(fnd).findText === null && /out\[query \? 'found' : 'outline'\]/.test(fnd));
+    specOf(fnd).find === "Button" && specOf(fnd).findText === null && /out\[query \? 'found' : a\.view === 'flow' \? 'flow' : 'outline'\]/.test(fnd));
   const pr = srv.buildInspectCode({ node_ids: ["1:2"], props: ["reactions", "connector"] });
   check("props: reactions / connector go to bridge.inspect", specOf(pr).props.join() === "reactions,connector" && /bridge\.inspect\(refs, a\.props\)/.test(pr));
   check("all generated variants are valid JS function bodies", [base, map, ctx, ft, fnd, pr, srv.buildInspectCode({ check: { "1:2": { width: 1 } } })].every(c => {
@@ -283,5 +283,87 @@ console.log("\n== defaults and metadata ==");
     srv.SERVER_INSTRUCTIONS.length <= 2000 && /replaceWithInstance/.test(srv.SERVER_INSTRUCTIONS), srv.SERVER_INSTRUCTIONS.length);
 }
 
-console.log(failures === 0 ? "\nALL PASS" : "\n" + failures + " FAILURES");
-process.exit(failures ? 1 : 0);
+console.log("\n== 4.2.5: read guard, page scans, componentize, validation errors, stalled jobs ==");
+{
+  const fs = require("fs");
+  const reset = () => { srv.READ_STATE.streak = 0; srv.READ_STATE.redirects = 0; srv.READ_STATE.total = 0; srv.READ_STATE.lastIds = []; srv.READ_STATE.lastArgs = null; srv.READ_STATE.capsShown = false; };
+  const READ_A = `const n = await figma.getNodeById("194:84942"); return { fontName: n.fontName, size: n.fontSize };`;
+  const READ_B = `const n = await figma.getNodeById("194:85120"); return n.children.map(c => c.name);`;
+  const WRITE = `const n = await figma.getNodeById("1:2"); n.x += 10; return true;`;
+
+  reset();
+  check("guard: first read runs (nudge only)", srv.readGuard(READ_A) === null);
+  srv.readNudge(READ_A, {});
+  const g2 = srv.readGuard(READ_B);
+  check("guard: 2nd read in a row is redirected to figma_inspect", g2 && g2.type === "redirect" && /^figma_inspect \{/.test(g2.call) && /194:85120/.test(g2.call), g2);
+  const g3 = srv.readGuard(READ_B);
+  check("guard: 3rd read in a row is refused without a result", g3 && g3.type === "refuse", g3);
+  const refusal = srv.guardRefusal(g3);
+  const rb = JSON.parse(refusal.content[0].text);
+  check("refusal: isError, READ_REFUSED, names the call and the run-anyway escape, no result",
+    refusal.isError === true && rb.code === "READ_REFUSED" && /figma_inspect/.test(rb.use_instead) && /run-anyway/.test(rb.error) && !("result" in rb), rb);
+  check("guard: /* run-anyway */ lifts it", srv.readGuard(READ_B + " /* run-anyway */") === null);
+  check("guard: writes and cheap reads are never held", srv.readGuard(WRITE) === null && srv.readGuard(`return bridge.summarize("1:2", { depth: 2 });`) === null);
+  srv.resetReadStreak();
+  check("guard: figma_inspect / write resets the chain", srv.READ_STATE.streak === 0 && srv.READ_STATE.redirects === 0 && srv.readGuard(READ_A) === null);
+
+  reset();
+  check("pageWideScan: figma.currentPage.findAll", srv.pageWideScan(`return figma.currentPage.findAll(n => n.reactions.length).length;`) === "findAll");
+  check("pageWideScan: figma.root.findOne and aliased page", srv.pageWideScan(`figma.root.findOne(n => n.name === 'x')`) === "findAll" && srv.pageWideScan(`const page = figma.currentPage; return page.findAll(n => true);`) === "findAll");
+  check("pageWideScan: a section's findAll is fine", srv.pageWideScan(`const s = await figma.getNodeByIdAsync("1:2"); return s.findAll(n => n.type === 'TEXT');`) === null);
+  check("pageWideScan: walk of the page over reactions", srv.pageWideScan(`function walk(n){ if (n.reactions.length) out.push(n.id); (n.children||[]).forEach(walk); } walk(figma.currentPage);`) === "reactions");
+  check("pageWideScan: selection alias is not the page", srv.pageWideScan(`const sel = figma.currentPage.selection; return sel.length;`) === null);
+
+  const heavy = srv.readGuard(`return figma.currentPage.findAll(n => n.name === 'Sheet').map(n => n.id);`);
+  check("guard: a page-wide READ is refused before it runs, with the scoped call", heavy && heavy.type === "heavy" && /figma_inspect/.test(heavy.call) && /Sheet/.test(heavy.call), heavy);
+  const hb = JSON.parse(srv.guardRefusal(heavy).content[0].text);
+  check("heavy refusal: PAGE_SCAN_BLOCKED and explains section scoping", hb.code === "PAGE_SCAN_BLOCKED" && /section/.test(hb.error), hb);
+  const heavyR = srv.readGuard(`const out=[]; function walk(n){ if (n.reactions && n.reactions.length) out.push(n.id); for (const c of n.children||[]) walk(c); } walk(figma.currentPage); return out;`);
+  check("guard: reactions walk -> view:flow or map suggestion", heavyR && heavyR.type === "heavy" && /view/.test(heavyR.call), heavyR);
+  check("guard: a page-wide WRITE is not held", srv.readGuard(`figma.currentPage.findAll(n => n.name === 'x').forEach(n => n.remove());`) === null);
+  reset();
+
+  const rw = srv.rewriteComponentize(`const c = figma.createComponentFromNode(frame); const d = figma.createComponentFromNode (other);`);
+  check("componentize: rewritten to bridge.componentize, lint says how many",
+    rw.code === `const c = bridge.componentize(frame); const d = bridge.componentize(other);` && /2×/.test(rw.lint) && /bridge\.componentize/.test(rw.lint), rw);
+  check("componentize: untouched code gives no lint", srv.rewriteComponentize("return 1;").lint === null && srv.rewriteComponentize("return bridge.componentize(n);").code === "return bridge.componentize(n);");
+
+  const fxAction = fs.readFileSync(path.join(__dirname, "fixtures", "set_reactions_action.txt"), "utf8");
+  const fxActions = fs.readFileSync(path.join(__dirname, "fixtures", "set_reactions_actions.txt"), "utf8");
+  const c1 = srv.compressValidationError(fxAction);
+  check("validation: legacy `action` union (2.8 KB) -> the matching branch, under 500 bytes", c1.length < 500 && /transition: Required value missing/.test(c1) && /8 other variants skipped/.test(c1) && /at line 17/.test(c1), c1);
+  check("validation: the missing `transition` gets the fix named", /needs the key `transition` \(null = instant\)/.test(c1), c1);
+  const c2 = srv.compressValidationError(fxActions);
+  check("validation: `actions` union with an overlay key -> closest branch + overlay hint, under 700 bytes",
+    c2.length < 700 && /Unrecognized key\(s\)/.test(c2) && /FRAME properties of the overlay target/.test(c2) && /bridge\.info\(\)\.reactions/.test(c2), c2);
+  const c3 = srv.compressValidationError(`in set_reactions: Property "reactions" failed validation: Unrecognized key(s) in object: 'overlayBackground' at [1].actions[0]`);
+  check("validation: a short overlay-key error gets the hint appended", /^in set_reactions/.test(c3) && /FRAME properties/.test(c3), c3);
+  check("validation: other messages pass through", srv.compressValidationError("boom") === "boom" && srv.compressValidationError(null) === null);
+  const env = JSON.parse(srv.buildStructuredResult({ result: { success: false, error: fxAction } }, null, { maxOutputBytes: 3500 }));
+  check("validation: an error a script caught and returned is compressed inside result", env.result.error.length < 500 && !env.truncated, env);
+  const err = srv.buildErrorEnvelope(new Error(fxAction));
+  check("validation: thrown errors are compressed too", err.error.length < 700 && /8 other variants skipped/.test(err.error), err.error.length);
+
+  const flowCode = srv.buildInspectCode({ node_ids: ["1:2"], view: "flow" });
+  check("inspect: view flow -> so.view = 'flow', result under `flow`, no ids falls back to the selection (never the page)",
+    /"view":"flow"/.test(flowCode) && /if \(a\.view === 'flow'\) so\.view = 'flow';/.test(flowCode) && /figma\.currentPage\.selection/.test(flowCode) && /out\.flow = 'pass node_ids/.test(flowCode), flowCode);
+  check("inspect: flow result pages with offset", /^… lines 0–1 skipped\n/.test(srv.applyLineOffset({ flow: "a\nb\nc" }, 2).flow));
+  check("write detection: reaction macros are writes", ["setReaction", "openOverlay", "closeOverlay"].every(m => srv.classifyScript(`await bridge.${m}("1:2", {});`) === "write"));
+  const exDesc = srv.TOOLS.find(t => t.name === "figma_execute_code").description;
+  check("execute_code description names componentize, the reaction macros, flow and the findAll rule",
+    /bridge\.componentize/.test(exDesc) && /setReaction/.test(exDesc) && /openOverlay/.test(exDesc) && /flow/.test(exDesc) && /findAll the whole page/.test(exDesc));
+  check("figma_inspect schema offers view flow", srv.TOOLS.find(t => t.name === "figma_inspect").inputSchema.properties.view.enum.includes("flow"));
+
+  // stalled job: STOP once, then answer at once
+  srv.jobs.set("job_stalled", { id: "job_stalled", status: "running", progress: [], createdAt: Date.now() - 400000, updatedAt: Date.now() - 400000 });
+  (async () => {
+    const a = await srv.readJobSnapshot("job_stalled", 50);
+    const t0 = Date.now();
+    const b = await srv.readJobSnapshot("job_stalled", 5000);
+    check("stalled: first report says STOP (stop:true, stalled:true)", a.stalled === true && a.stop === true && /^STOP/.test(a.hint), a);
+    check("stalled: a repeated poll returns at once and says already reported", Date.now() - t0 < 1000 && b.stalled === true && /Already reported/.test(b.hint), [Date.now() - t0, b]);
+    srv.jobs.delete("job_stalled");
+    console.log(failures === 0 ? "\nALL PASS" : "\n" + failures + " FAILURES");
+    process.exit(failures ? 1 : 0);
+  })();
+}

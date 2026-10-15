@@ -1,0 +1,44 @@
+in set_reactions: Property "reactions" failed validation: Expected [0].action to be one of the following, but none matched:
+  Multiple issues at [0].action:
+    Invalid literal value, expected "CONDITIONAL" at [0].action.type
+    Required value missing at [0].action.conditionalBlocks
+    Unrecognized key(s) in object: 'destinationId', 'navigation' at [0].action
+  Expected [0].action to be one of the following, but none matched:
+    Multiple issues at [0].action:
+      Invalid enum value. Expected 'BACK' | 'CLOSE', received 'NODE' at [0].action.type
+      Unrecognized key(s) in object: 'destinationId', 'navigation' at [0].action
+    Multiple issues at [0].action:
+      Invalid literal value, expected "URL" at [0].action.type
+      Required value missing at [0].action.url
+      Unrecognized key(s) in object: 'destinationId', 'navigation' at [0].action
+    Multiple issues at [0].action:
+      Invalid literal value, expected "UPDATE_MEDIA_RUNTIME" at [0].action.type
+      Required value missing at [0].action.mediaAction
+      Unrecognized key(s) in object: 'navigation' at [0].action
+    Multiple issues at [0].action:
+      Invalid literal value, expected "UPDATE_MEDIA_RUNTIME" at [0].action.type
+      Required value missing at [0].action.mediaAction
+      Required value missing at [0].action.amountToSkip
+      Unrecognized key(s) in object: 'navigation' at [0].action
+    Multiple issues at [0].action:
+      Invalid literal value, expected "UPDATE_MEDIA_RUNTIME" at [0].action.type
+      Required value missing at [0].action.mediaAction
+      Required value missing at [0].action.newTimestamp
+      Unrecognized key(s) in object: 'navigation' at [0].action
+    Expected [0].action.transition to be one of the following, but none matched:
+      Expected [0].action.transition to be one of the following, but none matched:
+        Required value missing at [0].action.transition
+      Required value missing at [0].action.transition
+    Multiple issues at [0].action:
+      Invalid literal value, expected "SET_VARIABLE" at [0].action.type
+      Expected [0].action.variableId to be one of the following, but none matched:
+        Required value missing at [0].action.variableId
+      Unrecognized key(s) in object: 'destinationId', 'navigation' at [0].action
+    Multiple issues at [0].action:
+      Invalid literal value, expected "SET_VARIABLE_MODE" at [0].action.type
+      Expected [0].action.variableCollectionId to be one of the following, but none matched:
+        Required value missing at [0].action.variableCollectionId
+      Expected [0].action.variableModeId to be one of the following, but none matched:
+        Required value missing at [0].action.variableModeId
+      Unrecognized key(s) in object: 'destinationId', 'navigation' at [0].action
+  at line 17: destinationId: f.id,

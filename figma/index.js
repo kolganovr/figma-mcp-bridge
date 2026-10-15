@@ -138,7 +138,7 @@ const TIMEOUTS = {
   heavy: envNumber("FIGMA_MCP_TIMEOUT_HEAVY_MS", 120000),
   escalate: envNumber("FIGMA_MCP_ESCALATE_MS", 45000)
 };
-const SERVER_VERSION = "4.2.4";
+const SERVER_VERSION = "4.2.5";
 
 // ------------------------------------------------------------------
 // Token economy. In an agent loop the price of a tool call is not its own
@@ -1026,7 +1026,11 @@ async function proxyToMaster(pathname, { method = "GET", body, timeoutMs = 45000
 // forgotten so the ledger does not keep screenshots alive.
 async function readJobSnapshot(id, waitMs) {
   const waitStart = Date.now();
-  await waitForJob(id, Math.min(Math.max(0, waitMs || 0), ECONOMY.jobWaitMaxMs));
+  // A job already reported as stalled is not waited on again: the model polled
+  // 4-5 more times after "ask the user" (pack 15.10), a blocking wait each time.
+  const earlier = jobs.get(id);
+  const repeat = !!(earlier && earlier.status === "running" && earlier.stalledReports > 0);
+  await waitForJob(id, repeat ? 0 : Math.min(Math.max(0, waitMs || 0), ECONOMY.jobWaitMaxMs));
   const job = jobs.get(id);
   if (!job) {
     return {
@@ -1044,8 +1048,12 @@ async function readJobSnapshot(id, waitMs) {
     };
     if (job.progress.length) snap.progress = job.progress.slice(-3);
     if (quietMs > ECONOMY.stalledAfterMs) {
+      job.stalledReports = (job.stalledReports || 0) + 1;
       snap.stalled = true;
-      snap.hint = `No result or progress for ${Math.round(quietMs / 1000)}s. The Figma plugin is probably frozen on a heavy operation — ask the user to check Figma (or reload the plugin) instead of polling again.`;
+      snap.stop = true;
+      snap.hint = job.stalledReports === 1
+        ? `STOP. No result or progress for ${Math.round(quietMs / 1000)}s: the Figma plugin is frozen on a heavy operation (usually a page-wide scan). Do not call figma_job_status again and do not rerun the script. Reply to the user now: ask them to look at Figma (close or reload the plugin, Ctrl+Alt+P) and tell you when it is back; then continue with a smaller, section-scoped step.`
+        : "Already reported as stalled. Do not poll again: write your reply to the user (check Figma, reload the plugin) and wait for their answer.";
     }
     return snap;
   }
@@ -1102,7 +1110,7 @@ const TOOLS = [
     // server's instructions to the model (Antigravity sessions made 0 bridge.*
     // calls in ~220 figma_execute_code runs), while tool descriptions always
     // reach it. The long-form contract stays in instructions + bridge.info().
-    description: "WRITE tool: run JavaScript in the open Figma document (Figma Desktop + 'Antigravity Bridge' plugin) to create, edit, move, style or delete nodes. To READ (explore a section, list children, find layers, check texts / fonts / variants / table columns) call figma_inspect instead: every id in one call, one line per node, view:\"table\" for tables; a read script here costs a model turn per question and its reply names the figma_inspect call to use (use_instead). Every call is a full model turn, so make the whole change in ONE call — all screens / breakpoints, verified in the same code with bridge.check — and put capture_node_ids on that same call instead of a separate figma_screenshot. Globals: `figma`, `await ensureFont(family, style)`, `getFreePosition(w, h)`, `bridge`: bridge.check({ '1:2': { width: 320, fill: '#FFFFFF' } }) -> pass/fail list; bridge.define(name, src) + bridge.require(name) keep helpers between calls (each call is a fresh function body — never eval); `return bridge.info()` lists the rest. Macros: bridge.replaceWithInstance(target, comp, {props, text}), bridge.setProps(inst, {Status: 'Dropdown'}), bridge.setText(root, {layer: '…'}), bridge.shift(ids, {dx, dy}), bridge.moveInto(ids, section, {layout, gap}), bridge.fitSection(s), bridge.context(id). Return only the ids/flags you need: responses over max_output_bytes (3500) are shrunk, the full value stays in bridge.state.lastResult.",
+    description: "WRITE tool: run JavaScript in the open Figma document (Figma Desktop + 'Antigravity Bridge' plugin) to create, edit, move, style or delete nodes. To READ (explore a section, list children, find layers, check texts / fonts / variants / table columns) call figma_inspect instead: every id in one call, one line per node, view:\"table\" for tables; a read script here costs a model turn per question and its reply names the figma_inspect call to use (use_instead). Every call is a full model turn, so make the whole change in ONE call — all screens / breakpoints, verified in the same code with bridge.check — and put capture_node_ids on that same call instead of a separate figma_screenshot. Globals: `figma`, `await ensureFont(family, style)`, `getFreePosition(w, h)`, `bridge`: bridge.check({ '1:2': { width: 320, fill: '#FFFFFF' } }) -> pass/fail list; bridge.define(name, src) + bridge.require(name) keep helpers between calls (each call is a fresh function body — never eval); `return bridge.info()` lists the rest. Macros: bridge.replaceWithInstance(target, comp, {props, text}), bridge.setProps(inst, {Status: 'Dropdown'}), bridge.setText(root, {layer: '…'}), bridge.shift(ids, {dx, dy}), bridge.moveInto(ids, section, {layout, gap}), bridge.fitSection(s), bridge.context(id), bridge.componentize(node) (never raw createComponentFromNode), bridge.setReaction / openOverlay / closeOverlay (prototype links; `return bridge.info().reactions` has the schema; read links with figma_inspect view:\"flow\"). Never findAll the whole page — scope to a section. Return only the ids/flags you need: responses over max_output_bytes (3500) are shrunk, the full value stays in bridge.state.lastResult.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1153,7 +1161,7 @@ const TOOLS = [
   },
   {
     name: "figma_inspect",
-    description: "READ the live Figma document in ONE call — the tool for any read (not figma_execute_code); pass every node id you need at once instead of one call per node. Default: a compact outline, one line per node (TYPE \"name\" #id WxH @x,y [V gap8 pad16 fill/hug a:start/center] size:fill/hug fill:#FFF stroke:#E8EAF0/0,1,1,1 r0,0,3,3 shadow:… font \"text…\"; non-defaults only), as deep as fits the reply unless `depth` is given; `children:N` marks a node with more below. `like: \"<ref id>\"` (or several) FINDS every copy of the reference under node_ids (screens/sections; default: its section) — instances of the same component, or same name — and diffs each against it: the call for \"redo these like the reference\" when you don't know where the copies are. `compare: \"<ref id>\"` lists, per node_id, every difference from that reference (layout, sizing, stroke, radius, effects, clip, font, variant; children matched by name) — one call for \"make these like that one\", and the check after the write. `props` returns exact values instead: { id: { prop: value } } (also fill, stroke, text, font, layout, padding, parent, children, main, variant, props, absolute, reactions, connector). `find` searches node names under node_ids (or the current page); `find_text` searches text content. `view: \"map\"` = canvas map (sections, breakpoints). `context: true` adds ancestor sections, breakpoints and component variants. `offset` skips the first N outline lines when a reply ends with `pass offset=K`. `check` returns only mismatches. Combine them freely. Changes nothing.",
+    description: "READ the live Figma document in ONE call — the tool for any read (not figma_execute_code); pass every node id you need at once instead of one call per node. Default: a compact outline, one line per node (TYPE \"name\" #id WxH @x,y [V gap8 pad16 fill/hug a:start/center] size:fill/hug fill:#FFF stroke:#E8EAF0/0,1,1,1 r0,0,3,3 shadow:… font \"text…\"; non-defaults only), as deep as fits the reply unless `depth` is given; `children:N` marks a node with more below. `like: \"<ref id>\"` (or several) FINDS every copy of the reference under node_ids (screens/sections; default: its section) — instances of the same component, or same name — and diffs each against it: the call for \"redo these like the reference\" when you don't know where the copies are. `compare: \"<ref id>\"` lists, per node_id, every difference from that reference (layout, sizing, stroke, radius, effects, clip, font, variant; children matched by name) — one call for \"make these like that one\", and the check after the write. `props` returns exact values instead: { id: { prop: value } } (also fill, stroke, text, font, layout, padding, parent, children, main, variant, props, absolute, reactions, connector). `find` searches node names under node_ids (or the current page); `find_text` searches text content. `view: \"map\"` = canvas map (sections, breakpoints). `view: \"flow\"` = the prototype links under node_ids (a section or screens): per screen, source, trigger, action, target, transition, plus the overlay settings of overlay targets — never scan the page for `reactions`. `context: true` adds ancestor sections, breakpoints and component variants. `offset` skips the first N outline lines when a reply ends with `pass offset=K`. `check` returns only mismatches. Combine them freely. Changes nothing.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1173,8 +1181,8 @@ const TOOLS = [
         },
         view: {
           type: "string",
-          enum: ["outline", "map", "table"],
-          description: "\"outline\" (default) = one line per node; \"map\" = canvas map: sections, frames, breakpoints and component sets in a few lines; \"table\" = per table (found by structure) the columns: header, width, sizing, cell contents, plus row and cell ids."
+          enum: ["outline", "map", "table", "flow"],
+          description: "\"outline\" (default) = one line per node; \"map\" = canvas map: sections, frames, breakpoints and component sets in a few lines; \"table\" = per table (found by structure) the columns: header, width, sizing, cell contents, plus row and cell ids; \"flow\" = prototype links (screen, source, trigger, action, target, transition, overlay settings) under node_ids."
         },
         context: {
           type: "boolean",
@@ -1539,7 +1547,7 @@ const TOOLS = [
   },
   {
     name: "figma_job_status",
-    description: "Wait for a figma_execute_code call that came back as { status: 'running', job_id } (it ran past 45s, or was called with async: true). BLOCKS until the job finishes or wait_ms passes, then returns the same result/screenshot the synchronous call would have — so call it once, not in a polling loop. `stalled: true` means the plugin looks frozen: ask the user instead of waiting again. A finished job is forgotten after being read once.",
+    description: "Wait for a figma_execute_code call that came back as { status: 'running', job_id } (it ran past 45s, or was called with async: true). BLOCKS until the job finishes or wait_ms passes, then returns the same result/screenshot the synchronous call would have — so call it once, not in a polling loop. `stalled: true` means the plugin looks frozen: STOP, ask the user to check Figma; a second figma_job_status for that job returns at once with the same advice. A finished job is forgotten after being read once.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1776,20 +1784,20 @@ function getActiveTools() {
 // token-economy rules first, the execution model next, reference last. The
 // long-form guide lives in docs/GUIDE.md and bridge.info().
 const SERVER_INSTRUCTIONS = [
-  "Figma MCP Bridge: LIVE read/write of the file open in Figma Desktop (Antigravity Bridge plugin), plus optional read-only REST tools.",
+  "Figma MCP Bridge: LIVE read/write of the open Figma Desktop file (Antigravity Bridge plugin); REST tools optional.",
   "",
   "TOKEN ECONOMY — every call re-reads the whole conversation, and what it returns stays there:",
-  "1. READ with figma_inspect: every id in ONE call; find / props / context; like:'<ref id>' = find its copies + diff each; compare:'<ref id>' = diff given ids; view:'map'/'table'; figma_read_canvas = page tree. No read scripts in figma_execute_code (use_instead).",
+  "1. READ with figma_inspect: every id in ONE call; find / props / context; like:'<ref id>' = find its copies + diff each; compare:'<ref id>' = diff given ids; view:'map'/'table'/'flow' (prototype links); figma_read_canvas = page tree. No read scripts in figma_execute_code (use_instead).",
   "2. WRITE the whole change in ONE figma_execute_code call (all breakpoints; verify inside: bridge.check / compare). Return only ids/flags.",
   "3. Replies over max_output_bytes (3500 B, max 3900) are shrunk: page with offset=K, don't slice bridge.state.lastResult.",
-  "4. A screenshot ≈1k tokens, a turn re-sends the whole chat: to orient, one screenshot of all ids beats a series of reads; to verify, trust `warnings` / bridge.check.",
-  "5. Past 45s a call returns { status: \"running\", job_id }: call figma_job_status once — it blocks until done. PLUGIN_BUSY: wait for that job, never retry blindly. `stalled`: ask the user.",
+  "4. A screenshot ≈1k tokens, a turn re-sends the whole chat: to orient, one shot of all ids beats a series of reads; to verify, trust `warnings` / bridge.check.",
+  "5. Past 45s a call returns { status: \"running\", job_id }: call figma_job_status once, it blocks until done. PLUGIN_BUSY: wait for that job, never retry blindly. `stalled`: stop, ask the user.",
   "",
-  "Execution model: each call is a FRESH async function body (top-level await/return work, import/export don't, declarations don't survive). Never eval. Persist code with bridge.define(name, src ending in module.exports = {...}) + bridge.require(name); data with bridge.store.set/get (in the file) or bridge.state (until reload). `return bridge.info()` lists all helpers; macros: bridge.replaceWithInstance/setProps/setText/shift/moveInto/fitSection/context.",
+  "Execution model: each call is a FRESH async function body (top-level await/return work, import/export don't, declarations don't survive). Never eval. Persist code with bridge.define(name, src ending in module.exports = {...}) + bridge.require(name); data with bridge.store.set/get (in the file) or bridge.state. `return bridge.info()` lists all helpers; macros: bridge.replaceWithInstance/setProps/setText/shift/moveInto/fitSection/context/setReaction/openOverlay.",
   "",
   "Figma limits: no x/y inside an INSTANCE (use AutoLayout; bridge.setPosition explains), bridge.componentize(node) instead of createComponentFromNode, await ensureFont(family, style) before text edits, colors are 0..1 floats.",
   "",
-  "Write calls return checkpoint_id (figma_rollback undoes creations and snapshotted edits, not deletions), created/modified ids and lint warnings. Several files open: figma_list_targets, then target: \"<fileName>\"."
+  "Write calls return checkpoint_id (figma_rollback undoes creations and snapshotted edits, not deletions), ids and lint warnings. Several files open: figma_list_targets, then target: \"<fileName>\"."
 ].join("\n");
 
 const SERVER_ERROR_HINTS = [
@@ -2149,7 +2157,7 @@ function truncationNote(truncated, stashed, readNudged) {
   // (15 such calls in session e6524905) — point at the paged outline instead.
   if (readNudged) {
     return `result shrunk ${truncated.from}→${truncated.to} bytes (cuts marked with …). ` +
-      "Don't slice bridge.state.lastResult turn by turn: the use_instead call reads these nodes in one call and pages with offset.";
+      "Don't slice bridge.state.lastResult turn by turn: the use_instead call reads these nodes in one call and pages with offset (figma_inspect offset=K).";
   }
   return `result shrunk ${truncated.from}→${truncated.to} bytes (cuts marked with …). ` +
     (stashed
@@ -2247,10 +2255,10 @@ function buildStructuredResult(response, extra, options = {}) {
   // reads, not one more key after a long payload.
   const lead = options.lead || null;
   const stashed = !!(response && response.resultStashed);
-  const readNote = !!(lead && lead.use_instead);
+  const readNote = !!(lead && (lead.use_instead || lead.redirected));
   const noteBytes = byteLength(toJson(truncationNote({ from: 9999999, to: 9999999 }, stashed, readNote))) + 16;
   const shrunk = shrinkToBudget(
-    response && response.result !== undefined ? response.result : null,
+    response && response.result !== undefined ? compressValidationDeep(response.result) : null,
     resultBudget(budget, lead ? Object.assign({}, lead, rest) : rest, noteBytes)
   );
   const envelope = Object.assign({ ok: true }, lead || {}, { result: shrunk.value });
@@ -2279,11 +2287,107 @@ function captureOptions(args, defaultScale = ECONOMY.scale) {
   };
 }
 
+// ------------------------------------------------------------------
+// Figma's reactions validator answers a wrong action with a union error of
+// 3-6 KB: one block per action type, most of them irrelevant. In the Ula pack
+// ~14 of them were read in full and followed by 12 web searches. Keep the
+// branch whose `type` matched (else the one with the fewest issues) and
+// say what is wrong with it.
+// ------------------------------------------------------------------
+const UNION_HEAD_RE = /^Expected (.+?) to be one of the following, but none matched:$/;
+const OVERLAY_KEY_RE = /'overlay(?:PositionType|Background|BackgroundInteraction)'/;
+
+function parseIndented(lines) {
+  const root = { text: "", indent: -1, kids: [] };
+  const stack = [root];
+  lines.forEach(line => {
+    if (!line.trim()) return;
+    const indent = line.length - line.replace(/^ +/, "").length;
+    const node = { text: line.trim(), indent, kids: [] };
+    while (stack.length > 1 && stack[stack.length - 1].indent >= indent) stack.pop();
+    stack[stack.length - 1].kids.push(node);
+    stack.push(node);
+  });
+  return root;
+}
+
+function leafTexts(node, out) {
+  if (!node.kids.length) { if (!/^… \+\d+ deeper/.test(node.text)) out.push(node.text); return out; }
+  node.kids.forEach(k => leafTexts(k, out));
+  return out;
+}
+
+function branchIssues(branch) {
+  const issues = [];
+  const items = /^Multiple issues at /.test(branch.text) ? branch.kids : [branch];
+  items.forEach(it => {
+    if (UNION_HEAD_RE.test(it.text)) {
+      const path = UNION_HEAD_RE.exec(it.text)[1];
+      const leaves = Array.from(new Set(leafTexts(it, []).map(t => t.replace(/ at \S+$/, ""))));
+      issues.push(leaves.length ? `${path}: ${leaves.join(" / ")}` : `${path}: no variant matched`);
+    } else if (!/^… \+\d+ deeper/.test(it.text)) {
+      issues.push(it.text);
+    }
+  });
+  return issues;
+}
+
+function collectBranches(node, path, out) {
+  node.kids.forEach(k => {
+    const m = UNION_HEAD_RE.exec(k.text);
+    if (m && m[1] === path) collectBranches(k, path, out); else out.push(k);
+  });
+  return out;
+}
+
+function compressValidationError(message) {
+  if (typeof message !== "string" || message.indexOf("failed validation") === -1) return message;
+  let out = message;
+  if (message.length > 500 && message.indexOf("to be one of the following") !== -1) {
+    const lines = message.split("\n");
+    const headAt = lines.findIndex(l => /Expected .+ to be one of the following, but none matched:$/.test(l));
+    if (headAt !== -1) {
+      const tailAt = lines.findIndex((l, i) => i > headAt && /^\s*(at line \d+|HINT:)/.test(l));
+      const treeLines = lines.slice(headAt + 1, tailAt === -1 ? lines.length : tailAt);
+      const lead = lines[headAt].replace(/Expected .+ to be one of the following, but none matched:$/, "");
+      const path = /Expected (.+) to be one of the following, but none matched:$/.exec(lines[headAt])[1];
+      const tree = parseIndented(treeLines);
+      const branches = collectBranches(tree, path, []).map(b => ({ b, issues: branchIssues(b) })).filter(x => x.issues.length);
+      if (branches.length > 1) {
+        const typeMiss = /^Invalid (?:literal|enum) value.* at \S+\.type$/;
+        const scored = branches.map(x => ({ ...x, typeOk: !x.issues.some(i => typeMiss.test(i)) }));
+        scored.sort((a, c) => (c.typeOk - a.typeOk) || (a.issues.length - c.issues.length));
+        const best = scored[0];
+        out = `${lead}${path} matches no variant. Closest (${best.typeOk ? "its type is right" : "no type matched"}): ${best.issues.join("; ")}. ` +
+          `${branches.length - 1} other variants skipped. Valid shapes: bridge.info().reactions, or bridge.setReaction / openOverlay / closeOverlay.` +
+          (tailAt === -1 ? "" : "\n" + lines.slice(tailAt).join("\n"));
+      }
+    }
+  }
+  if (/\.transition/.test(out) && /Required value missing|no variant matched/.test(out) && !/null = instant/.test(out)) {
+    out += (/[.!]$/.test(out) ? " " : ". ") + "A NODE action needs the key `transition` (null = instant).";
+  }
+  if (OVERLAY_KEY_RE.test(out) && !/FRAME propert/.test(out)) {
+    out += (/[.!]$/.test(out) ? " " : ". ") + "overlayPositionType / overlayBackground / overlayBackgroundInteraction are FRAME properties of the overlay target, not keys of the action: set them on the frame (bridge.openOverlay does both).";
+  }
+  return out;
+}
+
+// Same for validation errors a script caught and returned inside its result.
+function compressValidationDeep(value, depth = 0) {
+  if (typeof value === "string") return compressValidationError(value);
+  if (depth > 6 || !value || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map(v => compressValidationDeep(v, depth + 1));
+  const out = {};
+  for (const k of Object.keys(value)) out[k] = compressValidationDeep(value[k], depth + 1);
+  return out;
+}
+
 // Mirrors buildStructuredResult for the failure path, used by handleCallTool's
 // outer catch — every tool failure comes back with the same { ok:false, code,
 // error } shape instead of a single opaque line of text.
 function buildErrorEnvelope(error) {
-  const rawMessage = error && error.message ? error.message : String(error);
+  const rawMessage = compressValidationError(error && error.message ? error.message : String(error));
   const code = (error && error.code) || classifyServerCode(rawMessage) || null;
   return { ok: false, code, error: withServerHint(rawMessage), ...errorLocation(error) };
 }
@@ -2324,7 +2428,7 @@ function applyLineOffset(result, offset) {
   const off = Math.floor(Number(offset));
   if (!result || typeof result !== "object" || !Number.isFinite(off) || off <= 0) return result;
   const out = { ...result };
-  for (const key of ["outline", "found", "compare", "like"]) {
+  for (const key of ["outline", "found", "compare", "like", "flow"]) {
     if (typeof out[key] !== "string" || out[key].indexOf("\n") === -1) continue;
     out[key] = `… lines 0–${off - 1} skipped\n` + out[key].split("\n").slice(off).join("\n");
   }
@@ -2388,7 +2492,7 @@ function buildInspectCode(args = {}) {
     ids: ids ? ids.split(",") : [],
     depth: Number.isFinite(depth) ? Math.max(0, Math.min(6, Math.floor(depth))) : null,
     props: Array.isArray(args.props) && args.props.length ? args.props.map(String) : null,
-    view: args.view === "map" || args.view === "table" ? args.view : null,
+    view: args.view === "map" || args.view === "table" || args.view === "flow" ? args.view : null,
     context: args.context === true,
     find: typeof args.find === "string" && args.find ? args.find : null,
     findText: typeof args.find_text === "string" && args.find_text ? args.find_text : null,
@@ -2420,10 +2524,14 @@ function buildInspectCode(args = {}) {
     "  if (!targets.length) out.found = 'no matches';",
     "  if (more.length) out.found_more = more;",
     "}",
+    "if (a.view === 'flow' && !targets.length && !query) {",
+    "  targets = figma.currentPage.selection.map(n => n.id);", // never the whole page: flow reads only inside what it is given
+    "  if (!targets.length) out.flow = 'pass node_ids: a section or screens (flow reads prototype links only inside the given nodes)';",
+    "}",
     "if (a.like) out.like = bridge.like(a.like, a.ids);",
     "const wantsRead = !a.like && (a.props || query || a.ids.length || a.view || a.context || !a.check);",
     "if (a.compare && targets.length) out.compare = bridge.compare(a.compare, targets);",
-    "if (wantsRead && (targets.length || !query)) {",
+    "if (wantsRead && !out.flow && (targets.length || !query)) {",
     "  const refs = targets.length ? targets : [figma.currentPage];",
     "  if (a.compare) {}",
     "  else if (a.props) out.props = bridge.inspect(refs, a.props);",
@@ -2433,7 +2541,8 @@ function buildInspectCode(args = {}) {
     "    if (a.depth !== null) so.depth = a.depth; else if (query || a.view === 'map') so.depth = query ? 0 : 1; else so.autoBytes = a.autoBytes;",
     "    if (a.view === 'map') so.view = 'map';",
     "    if (a.view === 'table') so.view = 'table';",
-    "    out[query ? 'found' : 'outline'] = bridge.summarize(refs, so);",
+    "    if (a.view === 'flow') so.view = 'flow';",
+    "    out[query ? 'found' : a.view === 'flow' ? 'flow' : 'outline'] = bridge.summarize(refs, so);",
     "  }",
     "  if (a.context) {",
     "    out.context = {};",
@@ -2485,7 +2594,7 @@ const CANVAS_WRITE_RE = new RegExp(
   "figma\\s*\\.\\s*(create|group|ungroup|flatten|union|subtract|intersect|exclude|combineAsVariants|setCurrentPageAsync)|" +
   "\\.(remove|appendChild|insertChild|resize|resizeWithoutConstraints|rescale|swapComponent|createInstance|clone|detachInstance|" +
   "resetOverrides|insertCharacters|deleteCharacters|scrollAndZoomIntoView)\\s*\\(|\\.set[A-Z]\\w*\\s*\\(|" +
-  "bridge\\s*\\.\\s*(replaceWithInstance|setProps|setText|shift|moveInto|fitSection|componentize|setPosition|define|snapshot|checkpoint)\\s*\\(|" +
+  "bridge\\s*\\.\\s*(replaceWithInstance|setProps|setText|shift|moveInto|fitSection|componentize|setReaction|openOverlay|closeOverlay|setPosition|define|snapshot|checkpoint)\\s*\\(|" +
   "\\.(" + WRITE_PROPS.join("|") + ")\\s*(=(?!=)|\\+=|-=)"
 );
 const CAPS_NOTE = 'figma_inspect also does: find / find_text (search names / text under node_ids), props:[...] (exact values: ' +
@@ -2512,7 +2621,7 @@ const WHAT_YOU_GET = {
   map: "canvas map: sections, frames, breakpoints",
   props: "{ id: { prop: value } } for each node"
 };
-const READ_STATE = { streak: 0, total: 0, lastIds: [], lastArgs: null, capsShown: false };
+const READ_STATE = { streak: 0, redirects: 0, total: 0, lastIds: [], lastArgs: null, capsShown: false };
 
 // -> "write" | "read" | "stash" | "cheap" | null
 function classifyScript(code, response) {
@@ -2591,11 +2700,92 @@ function suggestInspect(code, fallbackIds) {
   return args;
 }
 
+// ------------------------------------------------------------------
+// Read guard (4.2.5). Session packs from Antigravity/Gemini Flash showed the
+// nudge above is read and ignored: the script still ran, returned its result,
+// and the model went on to read #54 in a row (60-64% of the input tokens of
+// two prototype sessions). So the NUDGE stays for the first read, but from the
+// next consecutive hand-written read on the script is NOT run: the 2nd read
+// gets the result of the figma_inspect call it should have made, the 3rd and
+// later get a refusal without a result. A figma_inspect call or any write
+// resets the streak. A page-wide findAll over a big file froze the plugin for
+// 2-12 minutes (747 s once), so a READ that scans the whole page is refused
+// up front, and the refusal names the scoped call.
+// `/* run-anyway */` in the script lifts both guards (misread script, or a
+// scan the user really wants).
+// ------------------------------------------------------------------
+const RUN_ANYWAY_RE = /\/[*/]\s*run-anyway\b/;
+const PAGE_ALIAS_RE = /(?:const|let|var)\s+([\w$]+)\s*=\s*(?:await\s+)?figma\s*\.\s*(?:currentPage|root)\s*(?:;|,|\n|$)/g;
+
+// "findAll" | "reactions" | null — does the script walk the whole page / file?
+function pageWideScan(code) {
+  if (typeof code !== "string") return null;
+  const names = ["figma\\s*\\.\\s*(?:currentPage|root)"];
+  PAGE_ALIAS_RE.lastIndex = 0;
+  let m;
+  while ((m = PAGE_ALIAS_RE.exec(code))) names.push(m[1].replace(/\$/g, "\\$"));
+  const base = "(?:" + names.join("|") + ")";
+  if (new RegExp(base + "\\s*\\.\\s*(?:findAll|findOne)\\s*\\(").test(code)) return "findAll";
+  if (/\breactions\b/.test(code) && (
+    new RegExp(base + "\\s*\\.\\s*findAllWithCriteria\\s*\\(").test(code) ||
+    new RegExp("\\b(?:walk|visit|scan|traverse|recurse|collect)\\w*\\s*\\(\\s*" + base + "\\b").test(code) ||
+    new RegExp("\\bof\\s+" + base + "\\s*\\.\\s*children\\b").test(code)
+  )) return "reactions";
+  return null;
+}
+
+const PAGE_SCAN_NOTE = "figma.currentPage.findAll / a walk of the whole page freezes the plugin for minutes on a big file (747 s seen). Scope it to a section: figma_inspect with node_ids, find / find_type (name search), or view:\"flow\" for prototype links; or findAll on a section node in a write script.";
+
+// figma.createComponentFromNode forces every AutoLayout frame of the subtree to
+// FIXED sizing; bridge.componentize restores it. Same call shape, so rewrite.
+function rewriteComponentize(code) {
+  if (typeof code !== "string" || !/figma\s*\.\s*createComponentFromNode\s*\(/.test(code)) return { code, lint: null };
+  const n = (code.match(/figma\s*\.\s*createComponentFromNode\s*\(/g) || []).length;
+  return {
+    code: code.replace(/figma\s*\.\s*createComponentFromNode\s*\(/g, "bridge.componentize("),
+    lint: `figma.createComponentFromNode was replaced by bridge.componentize (${n}×): the raw call turns AutoLayout frames in the subtree FIXED and breaks resizing. Write bridge.componentize(node) yourself next time.`
+  };
+}
+
+// -> null (run the script) | { type: "heavy" | "redirect" | "refuse", args, call, n }
+function readGuard(code) {
+  if (typeof code !== "string" || RUN_ANYWAY_RE.test(code)) return null;
+  const kind = classifyScript(code, null);
+  if (kind !== "read" && kind !== "stash") return null;
+  const heavy = pageWideScan(code);
+  if (heavy) {
+    const ids = suggestInspect(code, READ_STATE.lastIds);
+    const args = heavy === "reactions"
+      ? (ids.node_ids ? { node_ids: ids.node_ids, view: "flow" } : { view: "map" })
+      : (ids.find || ids.node_ids ? ids : { view: "map" });
+    return { type: "heavy", args, call: "figma_inspect " + JSON.stringify(args), reason: heavy, n: READ_STATE.streak };
+  }
+  if (!(READ_STATE.streak >= 1)) return null;
+  const args = kind === "stash" ? READ_STATE.lastArgs : suggestInspect(code, READ_STATE.lastIds);
+  if (!args) return null;
+  READ_STATE.streak += 1;
+  READ_STATE.total += 1;
+  const first = !(READ_STATE.redirects > 0);
+  READ_STATE.redirects = (READ_STATE.redirects || 0) + 1;
+  return { type: first ? "redirect" : "refuse", args, call: "figma_inspect " + JSON.stringify(args), n: READ_STATE.streak };
+}
+
+function guardRefusal(guard) {
+  const body = guard.type === "heavy"
+    ? { ok: false, code: "PAGE_SCAN_BLOCKED", error: "Not run. " + PAGE_SCAN_NOTE, use_instead: guard.call + (guard.reason === "reactions" ? " — pick the section id from a view:\"map\" call if you don't have it" : "") }
+    : {
+        ok: false, code: "READ_REFUSED",
+        error: `Not run: hand-written read #${guard.n} in a row, and no result comes back for those. Call ${guard.call} (long replies page with offset=K), or make the whole change in ONE figma_execute_code. A script that is not a read: add the comment /* run-anyway */.`,
+        use_instead: guard.call
+      };
+  return { isError: true, content: [{ type: "text", text: toJson(body) }] };
+}
+
 // The `use_instead` field for a hand-written read, or null.
 function readNudge(code, response) {
   const kind = classifyScript(code, response);
   if (kind !== "read" && kind !== "stash") {
-    if (kind === "write") READ_STATE.streak = 0;
+    if (kind === "write") resetReadStreak();
     return null;
   }
   READ_STATE.streak += 1;
@@ -2622,6 +2812,7 @@ function readNudge(code, response) {
 
 function resetReadStreak() {
   READ_STATE.streak = 0;
+  READ_STATE.redirects = 0;
 }
 
 async function handleCallTool(name, args = {}) {
@@ -2637,8 +2828,30 @@ async function handleCallTool(name, args = {}) {
         // line number: catch it here (throws SCRIPT_SYNTAX_ERROR + line/at).
         checkAgentSyntax(args.code);
 
+        const rewrite = rewriteComponentize(args.code);
+        const code = rewrite.code;
+        const guard = readGuard(code);
+        if (guard && guard.type === "heavy") return guardRefusal(guard);
+        if (guard && guard.type === "refuse") return guardRefusal(guard);
+        if (guard) {
+          // 2nd read in a row: answer with what figma_inspect returns for it.
+          const inspected = await sendCommandToPlugin({
+            code: buildInspectCode({ ...guard.args, target: args.target }),
+            description: "Inspect",
+            target: args.target
+          }, TIMEOUTS.normal);
+          return renderPluginResponse(
+            { result: applyLineOffset(inspected.result, guard.args.offset), resultStashed: inspected.resultStashed },
+            null,
+            {
+              ...budgetOptions(args),
+              lead: { redirected: `Hand-written read #${guard.n} in a row: your script was NOT run; below is ${guard.call}, which reads the same nodes. Read with figma_inspect (offset=K pages); use figma_execute_code only to change things.` }
+            }
+          );
+        }
+
         const response = await sendCommandToPlugin({
-          code: args.code,
+          code,
           description: desc,
           capture: capture,
           capture_node_ids: normalizedCaptureIds ? normalizedCaptureIds.split(",") : null,
@@ -2662,10 +2875,14 @@ async function handleCallTool(name, args = {}) {
           };
         }
 
-        const nudge = response && response.success !== false ? readNudge(args.code, response) : null;
+        const nudge = response && response.success !== false ? readNudge(code, response) : null;
+        const lint = [rewrite.lint, pageWideScan(code) ? "Whole-page scan: " + PAGE_SCAN_NOTE : null].filter(Boolean).join(" ");
+        const lead = {};
+        if (nudge) lead.use_instead = nudge;
+        if (lint) lead.lint = lint;
         return renderPluginResponse(response, null, {
           ...budgetOptions(args),
-          lead: nudge ? { use_instead: nudge } : null
+          lead: Object.keys(lead).length ? lead : null
         });
       }
 
@@ -3405,6 +3622,6 @@ if (require.main === module) {
   module.exports = {
     TOOLS, SERVER_INSTRUCTIONS, ECONOMY, TIMEOUTS,
     shrinkToBudget, pngSize, collectImages, buildStructuredResult, captureOptions, getActiveTools,
-    buildInspectCode, applyTokenBudget, byteLength, outputBudgetInfo, truncationNote, readNudge, classifyScript, suggestInspect, READ_STATE, resetReadStreak, MCP_CLIENT, activeOutputCeiling, applyLineOffset, checkAgentSyntax, buildErrorEnvelope
+    buildInspectCode, applyTokenBudget, byteLength, outputBudgetInfo, truncationNote, readNudge, classifyScript, suggestInspect, READ_STATE, resetReadStreak, readGuard, guardRefusal, pageWideScan, rewriteComponentize, compressValidationError, readJobSnapshot, jobs, MCP_CLIENT, activeOutputCeiling, applyLineOffset, checkAgentSyntax, buildErrorEnvelope
   };
 }
