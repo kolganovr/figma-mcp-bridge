@@ -1176,7 +1176,22 @@ inspectDone = inspectDone.then(async () => {
   check("openOverlay: overlay look is set on the overlay FRAME",
     sheet.overlayPositionType === "BOTTOM_CENTER" && sheet.overlayBackground.type === "SOLID_COLOR" && sheet.overlayBackground.color.a === 0.4 &&
     sheet.overlayBackgroundInteraction === "CLOSE_ON_CLICK_OUTSIDE", sheet);
-  check("openOverlay: returns a one-line summary", typeof r1 === "string" && /^#\S+ ON_CLICK → OVERLAY #\S+ \(BOTTOM_CENTER, dim #000000@0.4\)$/.test(r1), r1);
+  check("openOverlay: returns a one-line summary", typeof r1 === "string" && /^#\S+ ON_CLICK → OVERLAY #\S+ \(BOTTOM_CENTER, dim #000000@0.4, click outside closes\)$/.test(r1), r1);
+
+  // Real Figma: the overlay look is read-only on the frame ("no setter for property").
+  const roSheet = makeNode("FRAME", "RO sheet", {});
+  ["overlayPositionType", "overlayBackground", "overlayBackgroundInteraction"].forEach((k, i) =>
+    Object.defineProperty(roSheet, k, { get: () => [ "NONE", { type: "NONE" }, "NONE" ][i], configurable: true }));
+  figma.currentPage.appendChild(roSheet);
+  const roHost = makeNode("FRAME", "RO host", {});
+  figma.currentPage.appendChild(roHost);
+  const roBtn = makeNode("INSTANCE", "RO open", { reactions: [] });
+  roHost.appendChild(roBtn);
+  roBtn.setReactionsAsync = async function (list) { this.reactions = list; };
+  let roErr = null, r2 = null;
+  try { r2 = await api.openOverlay(roBtn.id, roSheet.id, { position: "BOTTOM_CENTER", dim: 0.4 }); } catch (e) { roErr = e; }
+  check("openOverlay: read-only overlay look -> link is still set, no throw", !roErr && roBtn.reactions.length === 1 && roBtn.reactions[0].actions[0].navigation === "OVERLAY", roErr && roErr.message);
+  check("openOverlay: read-only overlay look -> result names the manual step", typeof r2 === "string" && /MANUAL STEP/.test(r2) && /Prototype panel/.test(r2) && /BOTTOM_CENTER/.test(r2), r2);
 
   await api.setReaction(back.id, { to: home.id, nav: "NAVIGATE", transition: "PUSH/RIGHT/0.4" });
   const bt = back.reactions[0].actions[0].transition;

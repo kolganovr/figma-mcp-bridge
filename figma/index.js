@@ -138,7 +138,7 @@ const TIMEOUTS = {
   heavy: envNumber("FIGMA_MCP_TIMEOUT_HEAVY_MS", 120000),
   escalate: envNumber("FIGMA_MCP_ESCALATE_MS", 45000)
 };
-const SERVER_VERSION = "4.2.5";
+const SERVER_VERSION = "4.2.6";
 
 // ------------------------------------------------------------------
 // Token economy. In an agent loop the price of a tool call is not its own
@@ -1110,7 +1110,7 @@ const TOOLS = [
     // server's instructions to the model (Antigravity sessions made 0 bridge.*
     // calls in ~220 figma_execute_code runs), while tool descriptions always
     // reach it. The long-form contract stays in instructions + bridge.info().
-    description: "WRITE tool: run JavaScript in the open Figma document (Figma Desktop + 'Antigravity Bridge' plugin) to create, edit, move, style or delete nodes. To READ (explore a section, list children, find layers, check texts / fonts / variants / table columns) call figma_inspect instead: every id in one call, one line per node, view:\"table\" for tables; a read script here costs a model turn per question and its reply names the figma_inspect call to use (use_instead). Every call is a full model turn, so make the whole change in ONE call — all screens / breakpoints, verified in the same code with bridge.check — and put capture_node_ids on that same call instead of a separate figma_screenshot. Globals: `figma`, `await ensureFont(family, style)`, `getFreePosition(w, h)`, `bridge`: bridge.check({ '1:2': { width: 320, fill: '#FFFFFF' } }) -> pass/fail list; bridge.define(name, src) + bridge.require(name) keep helpers between calls (each call is a fresh function body — never eval); `return bridge.info()` lists the rest. Macros: bridge.replaceWithInstance(target, comp, {props, text}), bridge.setProps(inst, {Status: 'Dropdown'}), bridge.setText(root, {layer: '…'}), bridge.shift(ids, {dx, dy}), bridge.moveInto(ids, section, {layout, gap}), bridge.fitSection(s), bridge.context(id), bridge.componentize(node) (never raw createComponentFromNode), bridge.setReaction / openOverlay / closeOverlay (prototype links; `return bridge.info().reactions` has the schema; read links with figma_inspect view:\"flow\"). Never findAll the whole page — scope to a section. Return only the ids/flags you need: responses over max_output_bytes (3500) are shrunk, the full value stays in bridge.state.lastResult.",
+    description: "WRITE tool: run JavaScript in the open Figma document (Figma Desktop + 'Antigravity Bridge' plugin) to create, edit, move, style or delete nodes. To READ (explore a section, list children, find layers, check texts / fonts / variants / table columns) call figma_inspect instead: every id in one call, one line per node, view:\"table\" for tables; a read script here costs a model turn per question and its reply names the figma_inspect call to use (use_instead). Every call is a full model turn, so make the whole change in ONE call — all screens / breakpoints, verified in the same code with bridge.check — and put capture_node_ids on that same call instead of a separate figma_screenshot. Globals: `figma`, `await ensureFont(family, style)`, `getFreePosition(w, h)`, `bridge`: bridge.check({ '1:2': { width: 320, fill: '#FFFFFF' } }) -> pass/fail list; bridge.define(name, src) + bridge.require(name) keep helpers between calls (each call is a fresh function body — never eval); `return bridge.info()` lists the rest. Macros: bridge.replaceWithInstance(target, comp, {props, text}), bridge.setProps(inst, {Status: 'Dropdown'}), bridge.setText(root, {layer: '…'}), bridge.shift(ids, {dx, dy}), bridge.moveInto(ids, section, {layout, gap}), bridge.fitSection(s), bridge.context(id), bridge.componentize(nodeObject) -> new COMPONENT, same name/size/look, NEW id (never raw createComponentFromNode), prototype links: await bridge.openOverlay(triggerId, overlayFrameId, { position: 'BOTTOM_CENTER', dim: 0.4, closeOnOutside: true }) (the overlay look is read-only in the Plugin API: the reply names the MANUAL STEP for the user), bridge.closeOverlay(id), bridge.setReaction(id, { to: frameId, nav: 'NAVIGATE' }); read links with figma_inspect view:\"flow\". Call macros directly, don't read their source. Never findAll the whole page — scope to a section. Return only the ids/flags you need: responses over max_output_bytes (3500) are shrunk, the full value stays in bridge.state.lastResult.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1133,7 +1133,7 @@ const TOOLS = [
         },
         diff: {
           type: "boolean",
-          description: "Requires capture_node_ids. Captures those nodes BEFORE running the code too, so the response includes a before/after image pair instead of just after."
+          description: "Currently ignored (the \"before\" screenshot stalls the plugin); the reply has the after image only."
         },
         scale: {
           type: "number",
@@ -2150,9 +2150,73 @@ function budgetOptions(args) {
   return { maxOutputBytes: info.bytes, capNote: info.capNote };
 }
 
+// Copies of one element (a dropdown on three breakpoints) look alike in an
+// outline but the model does not connect them: bench T1 (15.10) went
+// outline -> depth 4 -> depth 5 -> props -> a dump script before writing,
+// 8-13 turns. When an outline holds 3+ nodes of the same structure whose
+// style differs, say so and name the one call that diffs them.
+const SIMILAR_LINE_RE = /^(\s*)(FRAME|INSTANCE|COMPONENT|GROUP) "((?:[^"\\]|\\.)*)" #(\S+) [\d.]+x([\d.]+) @\S+(.*)$/;
+const DEEPER_RE = /^\s*… \+(\d+) deeper/;
+
+function outlineStyle(rest, h) {
+  const s = { h: h };
+  const br = /\[([^\]]*)\]/.exec(rest);
+  const inner = br ? br[1] : "";
+  s.layout = (/^[HVW]\b/.exec(inner) || [""])[0];
+  s.gap = (/\bgap\S+/.exec(inner) || [""])[0];
+  s.pad = (/\bpad\S+/.exec(inner) || [""])[0];
+  s.align = (/\ba:\S+/.exec(inner) || [""])[0];
+  const after = br ? rest.slice(br.index + br[0].length) : rest;
+  s.fill = (/\bfill:\S+/.exec(after) || [""])[0];
+  s.stroke = (/\bstroke:\S+/.exec(after) || [""])[0];
+  s.r = (/(?:^|\s)(r[\d.,]+)(?=\s|$)/.exec(after) || ["", ""])[1];
+  s.shadow = (/\bshadow:\S+(?: #\S+)?/.exec(after) || [""])[0];
+  return s;
+}
+
+function similarHint(outline) {
+  if (typeof outline !== "string") return null;
+  const lines = outline.split(/\r?\n/);
+  const nodes = [];
+  lines.forEach((line, i) => {
+    const m = SIMILAR_LINE_RE.exec(line);
+    if (!m || m[1].length === 0) return;
+    const indent = m[1].length;
+    let desc = 0;
+    for (let j = i + 1; j < lines.length; j++) {
+      const ind = lines[j].length - lines[j].trimStart().length;
+      if (ind <= indent) break;
+      const d = DEEPER_RE.exec(lines[j]);
+      desc += d ? Number(d[1]) : 1;
+    }
+    if (desc < 2) return;
+    const st = outlineStyle(m[6], m[5]);
+    nodes.push({ id: m[4], sig: m[2] + "|" + st.layout + "|" + desc, st: st });
+  });
+  const groups = {};
+  nodes.forEach(n => { (groups[n.sig] = groups[n.sig] || []).push(n); });
+  const keys = ["stroke", "r", "shadow", "pad", "gap", "fill", "h", "align"];
+  const out = [];
+  Object.values(groups).sort((a, b) => b.length - a.length).forEach(g => {
+    if (g.length < 3 || out.length >= 2) return;
+    const differ = keys.filter(k => g.some(n => n.st[k] !== g[0].st[k]));
+    if (!differ.length) return;
+    const ids = g.slice(0, 8).map(n => "#" + n.id).join(" ") + (g.length > 8 ? " …" : "");
+    out.push(g.length + " nodes of the same structure differ in " + differ.join(", ") + ": " + ids);
+  });
+  if (!out.length) return null;
+  return out.join("; ") + ". If they should match one of them: figma_inspect compare:\"<that id>\" node_ids:[the others] lists every difference in ONE call, then fix them all in ONE write.";
+}
+
 // Tells the model the cheapest next step. Raising max_output_bytes is only
 // offered where it cannot push the reply past a client's spill limit.
-function truncationNote(truncated, stashed, readNudged) {
+function truncationNote(truncated, stashed, readNudged, kind) {
+  // An outline cut by depth: re-reading it level by level (depth 4, then 5)
+  // or slicing lastResult with a script is a turn per step (bench T1 15.10).
+  if (kind === "inspect") {
+    return `outline shrunk ${truncated.from}→${truncated.to} bytes: deeper levels collapsed (… +N deeper). ` +
+      "Don't re-read level by level or with scripts: pass only the ids you need deeper, compare:\"<ref id>\" or props for exact values; offset=K pages.";
+  }
   // A cut hand-written read: slicing lastResult would cost a turn per slice
   // (15 such calls in session e6524905) — point at the paged outline instead.
   if (readNudged) {
@@ -2256,13 +2320,13 @@ function buildStructuredResult(response, extra, options = {}) {
   const lead = options.lead || null;
   const stashed = !!(response && response.resultStashed);
   const readNote = !!(lead && (lead.use_instead || lead.redirected));
-  const noteBytes = byteLength(toJson(truncationNote({ from: 9999999, to: 9999999 }, stashed, readNote))) + 16;
+  const noteBytes = byteLength(toJson(truncationNote({ from: 9999999, to: 9999999 }, stashed, readNote, options.kind))) + 16;
   const shrunk = shrinkToBudget(
     response && response.result !== undefined ? compressValidationDeep(response.result) : null,
     resultBudget(budget, lead ? Object.assign({}, lead, rest) : rest, noteBytes)
   );
   const envelope = Object.assign({ ok: true }, lead || {}, { result: shrunk.value });
-  if (shrunk.truncated) envelope.truncated = truncationNote(shrunk.truncated, stashed, readNote);
+  if (shrunk.truncated) envelope.truncated = truncationNote(shrunk.truncated, stashed, readNote, options.kind);
   return toJson(Object.assign(envelope, rest));
 }
 
@@ -2367,8 +2431,8 @@ function compressValidationError(message) {
   if (/\.transition/.test(out) && /Required value missing|no variant matched/.test(out) && !/null = instant/.test(out)) {
     out += (/[.!]$/.test(out) ? " " : ". ") + "A NODE action needs the key `transition` (null = instant).";
   }
-  if (OVERLAY_KEY_RE.test(out) && !/FRAME propert/.test(out)) {
-    out += (/[.!]$/.test(out) ? " " : ". ") + "overlayPositionType / overlayBackground / overlayBackgroundInteraction are FRAME properties of the overlay target, not keys of the action: set them on the frame (bridge.openOverlay does both).";
+  if (OVERLAY_KEY_RE.test(out) && !/READ-ONLY FRAME propert/.test(out)) {
+    out += (/[.!]$/.test(out) ? " " : ". ") + "overlayPositionType / overlayBackground / overlayBackgroundInteraction are not action keys but READ-ONLY FRAME properties: link with bridge.openOverlay, tell the user to set the overlay look in the Prototype panel.";
   }
   return out;
 }
@@ -2636,6 +2700,54 @@ function classifyScript(code, response) {
   return touchesNodes ? "read" : null;
 }
 
+// After a write the agent spends a turn re-reading what it changed (every T1
+// run in bench 15.10 ended with an inspect props/compare of the same ids).
+// Answer that read in the write's own reply: one outline line per node the
+// code named by id, as they are now. Best-effort: any failure = no `after`.
+const AFTER_WRITE_MAX_IDS = 12;
+const AFTER_WRITE_BYTES = 1400;
+
+async function afterWriteOutline(code, response, target) {
+  if (classifyScript(code, response) !== "write") return null;
+  const codeIds = suggestInspect(code).node_ids || [];
+  // componentize / flatten / clone return NEW ids the code never named (bench
+  // H4: T4 re-read the six new components after the write): those first.
+  let fresh = [];
+  try { fresh = (resultIds(response && response.result)).filter(id => codeIds.indexOf(id) === -1); } catch (e) {}
+  const ids = fresh.concat(codeIds).slice(0, AFTER_WRITE_MAX_IDS);
+  if (!ids.length) return null;
+  // A prototype link is checked with view:"flow" (bench H3: every T3 run
+  // re-read it that way after the write), so show that instead of outlines.
+  const flow = REACTION_MACRO_RE.test(code);
+  try {
+    const r = await sendCommandToPlugin({
+      code: buildInspectCode(flow ? { node_ids: ids, view: "flow" } : { node_ids: ids, depth: 0 }),
+      description: "Inspect (after write)",
+      target: target
+    }, TIMEOUTS.fast);
+    let outline = r && r.result && (flow ? r.result.flow : r.result.outline);
+    if (typeof outline !== "string") return null;
+    // Ids the write replaced (componentize) read as MISSING: noise, not news.
+    outline = outline.split("\n").filter(l => !/^\s*MISSING\b/.test(l)).join("\n");
+    if (!outline) return null;
+    return fitLines(outline, AFTER_WRITE_BYTES).text;
+  } catch (e) {
+    return null;
+  }
+}
+
+// Node ids in a write's result, in order, up to AFTER_WRITE_MAX_IDS.
+function resultIds(result) {
+  const text = typeof result === "string" ? result : JSON.stringify(result);
+  const ids = [];
+  const idRe = /["'`#](I?\d+:\d+(?:;\d+:\d+)*)\b/g;
+  let m;
+  while (text && (m = idRe.exec(text)) && ids.length < AFTER_WRITE_MAX_IDS * 2) {
+    if (ids.indexOf(m[1]) === -1) ids.push(m[1]);
+  }
+  return ids;
+}
+
 // figma_inspect arguments that read what the script read.
 function suggestInspect(code, fallbackIds) {
   const ids = [];
@@ -2747,6 +2859,111 @@ function rewriteComponentize(code) {
   };
 }
 
+// ------------------------------------------------------------------
+// Macro guard (bench H3, 15.10). In bench T3 every run spent 3-4 model turns
+// learning how to call bridge.openOverlay (bridge.info(), typeof, .toString()
+// of the macro = 3 KB of source), and a failed run set the read-only
+// overlayPositionType by hand five times. The server answers a look at a
+// macro with its call shape, and refuses a hand-written overlay before it runs.
+// ------------------------------------------------------------------
+const MACRO_SIGNATURES = {
+  openOverlay: "await bridge.openOverlay(triggerId, overlayFrameId, { position: 'BOTTOM_CENTER', dim: 0.4, closeOnOutside: true }) - prototype link that opens the overlay frame (transition slides in from the edge). position: CENTER | TOP_LEFT | TOP_CENTER | TOP_RIGHT | BOTTOM_LEFT | BOTTOM_CENTER | BOTTOM_RIGHT; dim: alpha 0..1 or '#000000@0.4'. The overlay look is read-only in the Plugin API: the reply says which part is a MANUAL STEP for the user - report it, don't look for a setter.",
+  closeOverlay: "await bridge.closeOverlay(nodeId) - CLOSE action on a node inside an overlay.",
+  setReaction: "await bridge.setReaction(nodeId, { trigger: 'ON_CLICK', to: frameId, nav: 'NAVIGATE', transition: 'MOVE_IN/LEFT' }) - one prototype link (replaces the one with the same trigger); action: 'BACK' | 'CLOSE' | { type: 'URL', url } instead of to/nav.",
+  // bench H4: T4 read typeof + .toString() of componentize before using it.
+  componentize: "bridge.componentize(node) -> the new COMPONENT (sync; pass the node object, e.g. await figma.getNodeByIdAsync(id)). Same name, size, position, look and AutoLayout sizing; the id CHANGES. Many at once: const out = []; for (const id of ids) out.push(bridge.componentize(await figma.getNodeByIdAsync(id)).id); return out;",
+  setProps: "bridge.setProps(instance, { Name: value }) - component properties by readable name ('Label' matches 'Label#12:3'); INSTANCE_SWAP takes a component node or id; returns the instance.",
+  setText: "await bridge.setText(root, { layerNameOrId: 'text' }) - loads the fonts and sets TEXT layers found by id or exact name under root; returns { set: [ids] }.",
+  replaceWithInstance: "await bridge.replaceWithInstance(target, component, { props, text, keepSize: false, remove: true }) - instance of a COMPONENT / COMPONENT_SET / id in target's slot; returns the instance.",
+  shift: "bridge.shift(nodesOrIds, { dx: 0, dy: 0 }) - moves nodes by an offset; returns the count.",
+  moveInto: "bridge.moveInto(nodesOrIds, container, { layout: 'none' | 'row' | 'column', gap: 100, padding: 0 }) - reparents nodes; returns ids.",
+  fitSection: "bridge.fitSection(section, { padding: 100 }) - resizes a SECTION/FRAME to its children + padding; returns the section.",
+  setPosition: "bridge.setPosition(node, x, y) - sets x/y, or explains why not (inside an INSTANCE: use AutoLayout)."
+};
+const MACRO_PEEK_RE = /bridge\s*\.\s*(\w+)\s*\.\s*toString\s*\(|String\s*\(\s*bridge\s*\.\s*(\w+)\s*\)|typeof\s+bridge\s*\.\s*(\w+)|Object\s*\.\s*(?:keys|getOwnPropertyNames)\s*\(\s*bridge\s*\)/g;
+const REACTION_MACRO_RE = /bridge\s*\.\s*(?:setReaction|openOverlay|closeOverlay)\s*\(/;
+const MANUAL_DONE = "Done: the link is set. The overlay look is a MANUAL STEP no script can do (read-only in the Plugin API, no setter anywhere): stop here and tell the user exactly what the result says.";
+const OVERLAY_LOOK_WRITE_RE =/\.overlay(?:PositionType|Background|BackgroundInteraction)\s*=(?!=)/;
+const RAW_OVERLAY_RE = /(\.reactions\s*=(?!=)|setReactionsAsync\s*\()[\s\S]*["'`]OVERLAY["'`]|["'`]OVERLAY["'`][\s\S]*(\.reactions\s*=(?!=)|setReactionsAsync\s*\()/;
+
+function overlayCall(code) {
+  const ids = (suggestInspect(code).node_ids || []).slice(0, 2);
+  return `await bridge.openOverlay(${ids[0] ? JSON.stringify(ids[0]) : "triggerId"}, ${ids[1] ? JSON.stringify(ids[1]) : "overlayFrameId"}, { position: 'BOTTOM_CENTER', dim: 0.4, closeOnOutside: true })`;
+}
+
+// -> null (run the script) | { type: "peek" | "overlay", body }
+function macroGuard(code) {
+  if (typeof code !== "string" || RUN_ANYWAY_RE.test(code)) return null;
+  if (!/bridge\s*\.\s*openOverlay\s*\(/.test(code) && (OVERLAY_LOOK_WRITE_RE.test(code) || RAW_OVERLAY_RE.test(code))) {
+    const look = OVERLAY_LOOK_WRITE_RE.test(code);
+    return {
+      type: "overlay",
+      body: {
+        ok: false, code: "USE_OPEN_OVERLAY",
+        error: "Not run. " + (look
+          ? "overlayPositionType / overlayBackground / overlayBackgroundInteraction are READ-ONLY in the Plugin API (no setter), there is no other way to set them."
+          : "A hand-built OVERLAY reaction misses the overlay look and is easy to get wrong (`actions` array, `transition` key).") +
+          " If bridge.openOverlay already ran and said MANUAL STEP, the task is done: tell the user that step and stop. Otherwise one call makes the link and tries the look; its reply names what the user must set by hand (MANUAL STEP). Swap the ids if the order is wrong. A script that is not this: add /* run-anyway */.",
+        use_instead: overlayCall(code)
+      }
+    };
+  }
+  // A look at a macro (its source, its type, the key list): nothing on the
+  // canvas is read, so answer here with how to call it.
+  if (classifyScript(code, null) === "write" || NODE_READ_RE.test(code)) return null;
+  const names = [];
+  let all = false, m;
+  MACRO_PEEK_RE.lastIndex = 0;
+  while ((m = MACRO_PEEK_RE.exec(code))) {
+    const name = m[1] || m[2] || m[3];
+    if (name) { if (names.indexOf(name) === -1) names.push(name); } else all = true;
+  }
+  const known = names.filter(n => MACRO_SIGNATURES[n]);
+  if (!known.length && !(all && names.length === 0)) return null;
+  const pick = known.length ? known : Object.keys(MACRO_SIGNATURES);
+  const signatures = {};
+  for (const n of pick) signatures[n] = MACRO_SIGNATURES[n];
+  return {
+    type: "peek",
+    body: {
+      ok: true, not_run: true,
+      note: "Answered by the server without running the script: how to call " + pick.map(n => "bridge." + n).join(", ") + ". Call it directly in the write; don't read its source." + (all ? " `return bridge.info()` lists every helper." : ""),
+      signatures
+    }
+  };
+}
+
+// ------------------------------------------------------------------
+// Writes that stall the plugin (bench H5, 15.10). Measured on the live bridge:
+// after an exportAsync, or after a few loads in one call, a further
+// figma.loadFontAsync of an already-loaded font does not resolve for 20-150 s
+// (it seems to wait for a canvas frame, rare while Figma is in the
+// background). Two agent paths hit it and turned a trivial write into a job
+// plus a figma_job_status turn: (1) the per-character loop
+// `for (i...) await figma.loadFontAsync(t.getRangeFontName(i, i + 1))`
+// (T6: 16 loads), (2) diff:true, whose "before" export runs ahead of the
+// plugin's own ensureFont calls (T7, T1, even with `return 1` as the code).
+// (1): `figma` is a parameter of the script body, so a one-line prefix
+// rebinds it to a view whose loadFontAsync loads each family|style once
+// (Proxy over {}: figma's own properties are non-configurable). Same line as
+// the script, so error line numbers stay. (2): diff is not forwarded.
+// ------------------------------------------------------------------
+const FONT_MEMO_PRELUDE = "figma = (function (real) { const m = new Map(); const lf = (f) => { if (!f || !f.family) return real.loadFontAsync(f); const k = f.family + '|' + f.style; if (!m.has(k)) m.set(k, real.loadFontAsync(f).catch(e => { m.delete(k); throw e; })); return m.get(k); }; return new Proxy({}, { get(t, k) { if (k === 'loadFontAsync') return lf; const v = real[k]; return typeof v === 'function' ? v.bind(real) : v; }, set(t, k, v) { real[k] = v; return true; }, has(t, k) { return k in real; } }); })(figma); ";
+const DIFF_OFF_NOTE = "diff:true was ignored: its \"before\" screenshot stalls the plugin for minutes (bench 15.10); the change ran without it.";
+
+function withFontMemo(code) {
+  return typeof code === "string" && /\bloadFontAsync\b/.test(code) ? FONT_MEMO_PRELUDE + code : code;
+}
+
+// The prelude must never show up in an error the agent reads.
+function stripFontMemo(response) {
+  if (!response || typeof response !== "object") return response;
+  for (const k of ["error", "errorLine", "at"]) {
+    if (typeof response[k] === "string" && response[k].indexOf(FONT_MEMO_PRELUDE) !== -1) response[k] = response[k].split(FONT_MEMO_PRELUDE).join("");
+  }
+  return response;
+}
+
 // -> null (run the script) | { type: "heavy" | "redirect" | "refuse", args, call, n }
 function readGuard(code) {
   if (typeof code !== "string" || RUN_ANYWAY_RE.test(code)) return null;
@@ -2830,6 +3047,8 @@ async function handleCallTool(name, args = {}) {
 
         const rewrite = rewriteComponentize(args.code);
         const code = rewrite.code;
+        const macro = macroGuard(code);
+        if (macro) return { isError: macro.type === "overlay", content: [{ type: "text", text: toJson(macro.body) }] };
         const guard = readGuard(code);
         if (guard && guard.type === "heavy") return guardRefusal(guard);
         if (guard && guard.type === "refuse") return guardRefusal(guard);
@@ -2851,14 +3070,15 @@ async function handleCallTool(name, args = {}) {
         }
 
         const response = await sendCommandToPlugin({
-          code,
+          code: withFontMemo(code),
           description: desc,
           capture: capture,
           capture_node_ids: normalizedCaptureIds ? normalizedCaptureIds.split(",") : null,
-          diff: args.diff === true,
+          diff: false, // H5: see DIFF_OFF_NOTE
           ...captureOptions(args),
           target: args.target
         }, TIMEOUTS.heavy, { escalateMs: wantsAsync ? 50 : TIMEOUTS.escalate });
+        stripFontMemo(response);
 
         if (response.__escalated) {
           return {
@@ -2876,10 +3096,13 @@ async function handleCallTool(name, args = {}) {
         }
 
         const nudge = response && response.success !== false ? readNudge(code, response) : null;
-        const lint = [rewrite.lint, pageWideScan(code) ? "Whole-page scan: " + PAGE_SCAN_NOTE : null].filter(Boolean).join(" ");
+        const lint = [rewrite.lint, pageWideScan(code) ? "Whole-page scan: " + PAGE_SCAN_NOTE : null, args.diff === true ? DIFF_OFF_NOTE : null].filter(Boolean).join(" ");
         const lead = {};
         if (nudge) lead.use_instead = nudge;
         if (lint) lead.lint = lint;
+        const after = response && response.success !== false && !nudge ? await afterWriteOutline(code, response, args.target) : null;
+        if (after) lead.after = "Already re-read for you, as they are now (no verify call needed):\n" + after;
+        if (response && response.success !== false && REACTION_MACRO_RE.test(code) && /MANUAL STEP/.test(JSON.stringify(response.result || ""))) lead.done = MANUAL_DONE;
         return renderPluginResponse(response, null, {
           ...budgetOptions(args),
           lead: Object.keys(lead).length ? lead : null
@@ -2894,10 +3117,12 @@ async function handleCallTool(name, args = {}) {
           target: args.target
         }, TIMEOUTS.normal);
         // A read has nothing to roll back or lint — keep only what was read.
+        const plain = !args.compare && !args.like && !args.props && !args.check && (!args.view || args.view === "outline");
+        const similar = plain && response.result ? similarHint(response.result.outline) : null;
         return renderPluginResponse(
           { result: applyLineOffset(response.result, args.offset), resultStashed: response.resultStashed },
           null,
-          budgetOptions(args)
+          { ...budgetOptions(args), kind: "inspect", lead: similar ? { similar: similar } : null }
         );
       }
 
@@ -3622,6 +3847,6 @@ if (require.main === module) {
   module.exports = {
     TOOLS, SERVER_INSTRUCTIONS, ECONOMY, TIMEOUTS,
     shrinkToBudget, pngSize, collectImages, buildStructuredResult, captureOptions, getActiveTools,
-    buildInspectCode, applyTokenBudget, byteLength, outputBudgetInfo, truncationNote, readNudge, classifyScript, suggestInspect, READ_STATE, resetReadStreak, readGuard, guardRefusal, pageWideScan, rewriteComponentize, compressValidationError, readJobSnapshot, jobs, MCP_CLIENT, activeOutputCeiling, applyLineOffset, checkAgentSyntax, buildErrorEnvelope
+    buildInspectCode, applyTokenBudget, byteLength, outputBudgetInfo, truncationNote, similarHint, afterWriteOutline, readNudge, classifyScript, suggestInspect, READ_STATE, resetReadStreak, readGuard, guardRefusal, pageWideScan, macroGuard, resultIds, withFontMemo, stripFontMemo, FONT_MEMO_PRELUDE, rewriteComponentize, compressValidationError, readJobSnapshot, jobs, MCP_CLIENT, activeOutputCeiling, applyLineOffset, checkAgentSyntax, buildErrorEnvelope
   };
 }

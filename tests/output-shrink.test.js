@@ -328,6 +328,35 @@ console.log("\n== 4.2.5: read guard, page scans, componentize, validation errors
     rw.code === `const c = bridge.componentize(frame); const d = bridge.componentize(other);` && /2×/.test(rw.lint) && /bridge\.componentize/.test(rw.lint), rw);
   check("componentize: untouched code gives no lint", srv.rewriteComponentize("return 1;").lint === null && srv.rewriteComponentize("return bridge.componentize(n);").code === "return bridge.componentize(n);");
 
+  // H3: macro guard (bench T3)
+  const peek = srv.macroGuard(`return bridge.openOverlay.toString();`);
+  check("macroGuard: macro source read -> signature, not run", peek && peek.type === "peek" && peek.body.not_run === true && /BOTTOM_CENTER/.test(peek.body.signatures.openOverlay) && Object.keys(peek.body.signatures).length === 1, peek);
+  const peekAll = srv.macroGuard(`return { has: typeof bridge.openOverlay === 'function', keys: Object.keys(bridge) };`);
+  check("macroGuard: typeof + Object.keys(bridge) -> signature + info pointer", peekAll && peekAll.type === "peek" && peekAll.body.signatures.openOverlay && /bridge\.info\(\)/.test(peekAll.body.note), peekAll);
+  const pc = srv.macroGuard(`return typeof bridge.componentize;`);
+  check("macroGuard (H4): componentize peek -> signature with the id change", pc && pc.type === "peek" && /id CHANGES/.test(pc.body.signatures.componentize), pc);
+  const rIds = srv.resultIds([1, 2, 3, 4, 5, 6].map(i => ({ oldId: "12:99" + i, newId: "12:98" + i })));
+  check("resultIds (H4): all twelve ids of six old/new pairs, in order", rIds.length === 12 && rIds[1] === "12:981" && rIds[11] === "12:986", rIds);
+  // H5: font loads memoized, prelude on the script's first line
+  const memo = srv.withFontMemo(`const t = await figma.getNodeByIdAsync("1:2");\nawait figma.loadFontAsync(t.fontName);`);
+  check("withFontMemo (H5): prefix on the same line, line count unchanged", memo.startsWith(srv.FONT_MEMO_PRELUDE + "const t") && memo.split("\n").length === 2, memo.slice(0, 80));
+  check("withFontMemo: code without loadFontAsync untouched", srv.withFontMemo("return 1;") === "return 1;");
+  const stripped = srv.stripFontMemo({ error: "boom\n  at line 1: " + srv.FONT_MEMO_PRELUDE + "const t = x;" });
+  check("stripFontMemo: the prelude never reaches the agent", stripped.error === "boom\n  at line 1: const t = x;", stripped.error);
+  check("withFontMemo: prelude parses as a script body", (() => { try { new (Object.getPrototypeOf(async function () {}).constructor)("figma", memo); return true; } catch (e) { return e.message; } })() === true);
+  check("macroGuard: String(bridge.setReaction) answered", (srv.macroGuard(`return String(bridge.setReaction);`) || {}).type === "peek");
+  check("macroGuard: unknown helper or plain code runs", srv.macroGuard(`return bridge.foo.toString();`) === null && srv.macroGuard(`return bridge.info().reactions;`) === null && srv.macroGuard(`return 1;`) === null);
+  check("macroGuard: a write that names the macro runs", srv.macroGuard(`return await bridge.openOverlay('1:2', '1:3', { dim: 0.4 });`) === null);
+  const look = srv.macroGuard(`const b = await figma.getNodeByIdAsync('10:1975'); const o = await figma.getNodeByIdAsync('10:1999'); o.overlayPositionType = 'BOTTOM_CENTER'; return true;`);
+  check("macroGuard: overlay look write refused with openOverlay call on the script's ids",
+    look && look.type === "overlay" && look.body.code === "USE_OPEN_OVERLAY" && /READ-ONLY/.test(look.body.error) && /bridge\.openOverlay\("10:1975", "10:1999"/.test(look.body.use_instead), look);
+  const raw = srv.macroGuard(`const b = figma.getNodeById("10:2009"); b.reactions = [{ trigger: { type: "ON_CLICK" }, actions: [{ type: "NODE", destinationId: "10:2033", navigation: "OVERLAY", transition: null }] }];`);
+  check("macroGuard: hand-built OVERLAY reaction refused", raw && raw.type === "overlay" && /hand-built/.test(raw.body.error), raw);
+  check("macroGuard: NAVIGATE reaction and run-anyway pass",
+    srv.macroGuard(`b.reactions = [{ trigger: { type: "ON_CLICK" }, actions: [{ type: "NODE", destinationId: "1:3", navigation: "NAVIGATE", transition: null }] }];`) === null &&
+    srv.macroGuard(`/* run-anyway */ o.overlayPositionType = 'CENTER';`) === null);
+  check("execute_code description gives the openOverlay call", /bridge\.openOverlay\(triggerId, overlayFrameId, \{ position: 'BOTTOM_CENTER'/.test(srv.TOOLS.find(t => t.name === "figma_execute_code").description));
+
   const fxAction = fs.readFileSync(path.join(__dirname, "fixtures", "set_reactions_action.txt"), "utf8");
   const fxActions = fs.readFileSync(path.join(__dirname, "fixtures", "set_reactions_actions.txt"), "utf8");
   const c1 = srv.compressValidationError(fxAction);
@@ -335,9 +364,9 @@ console.log("\n== 4.2.5: read guard, page scans, componentize, validation errors
   check("validation: the missing `transition` gets the fix named", /needs the key `transition` \(null = instant\)/.test(c1), c1);
   const c2 = srv.compressValidationError(fxActions);
   check("validation: `actions` union with an overlay key -> closest branch + overlay hint, under 700 bytes",
-    c2.length < 700 && /Unrecognized key\(s\)/.test(c2) && /FRAME properties of the overlay target/.test(c2) && /bridge\.info\(\)\.reactions/.test(c2), c2);
+    c2.length < 700 && /Unrecognized key\(s\)/.test(c2) && /READ-ONLY FRAME properties/.test(c2) && /bridge\.info\(\)\.reactions/.test(c2), c2);
   const c3 = srv.compressValidationError(`in set_reactions: Property "reactions" failed validation: Unrecognized key(s) in object: 'overlayBackground' at [1].actions[0]`);
-  check("validation: a short overlay-key error gets the hint appended", /^in set_reactions/.test(c3) && /FRAME properties/.test(c3), c3);
+  check("validation: a short overlay-key error gets the hint appended", /^in set_reactions/.test(c3) && /READ-ONLY FRAME properties/.test(c3), c3);
   check("validation: other messages pass through", srv.compressValidationError("boom") === "boom" && srv.compressValidationError(null) === null);
   const env = JSON.parse(srv.buildStructuredResult({ result: { success: false, error: fxAction } }, null, { maxOutputBytes: 3500 }));
   check("validation: an error a script caught and returned is compressed inside result", env.result.error.length < 500 && !env.truncated, env);
@@ -353,6 +382,25 @@ console.log("\n== 4.2.5: read guard, page scans, componentize, validation errors
   check("execute_code description names componentize, the reaction macros, flow and the findAll rule",
     /bridge\.componentize/.test(exDesc) && /setReaction/.test(exDesc) && /openOverlay/.test(exDesc) && /flow/.test(exDesc) && /findAll the whole page/.test(exDesc));
   check("figma_inspect schema offers view flow", srv.TOOLS.find(t => t.name === "figma_inspect").inputSchema.properties.view.enum.includes("flow"));
+
+  // similar: copies of one element with different style (bench T1)
+  const SIM = [
+    'FRAME "Фильтры / 1280" #1:1 1280x400 @0,0 [V gap24 pad32 fixed/fixed] fill:#F9FAFB',
+    '  FRAME "Мультиселект" #1:2 280x44 @0,0 [H gap8 pad10,14,10,14 fixed/fixed] fill:#FFFFFF stroke:#D0D5DD/1 r8 shadow:0,1/2 #101828@0.05',
+    '    … +4 deeper',
+    '  FRAME "Dropdown" #1:3 280x44 @296,0 [H gap8 pad10,14,10,14 fixed/fixed] fill:#FFFFFF stroke:#D0D5DD/1 r4',
+    '    FRAME "Frame 2131329286" #1:4 119x34 @14,4 [V gap2 pad0 hug/hug]',
+    '      … +2 deeper',
+    '    VECTOR "chevron" #1:5 16x16 @310,13 stroke:#667085/1.5',
+    '  FRAME "Select" #1:6 340x40 @32,153 [H gap8 pad8,12,8,12 fixed/fixed] fill:#FFFFFF stroke:#D0D5DD/1 r8 shadow:0,1/2 #101828@0.05',
+    '    … +4 deeper'
+  ].join("\n");
+  const sh = srv.similarHint(SIM);
+  check("similar: 3 same-structure nodes with different style -> one hint naming them and compare", typeof sh === "string" && /3 nodes/.test(sh) && /#1:2 #1:3 #1:6/.test(sh) && /r, shadow, pad, h/.test(sh) && /compare:/.test(sh), sh);
+  const SAME = SIM.replace(/ r4$/m, " r8 shadow:0,1/2 #101828@0.05").replace("pad8,12,8,12", "pad10,14,10,14").replace("340x40", "340x44");
+  check("similar: same style (only width differs) -> no hint", srv.similarHint(SAME) === null, srv.similarHint(SAME));
+  check("similar: not an outline -> null", srv.similarHint(undefined) === null && srv.similarHint("FRAME \"a\" #1:1 10x10 @0,0") === null);
+  check("inspect truncation note points at compare/ids, not lastResult", /compare/.test(srv.truncationNote({ from: 3764, to: 2249 }, true, false, "inspect")) && !/lastResult/.test(srv.truncationNote({ from: 3764, to: 2249 }, true, false, "inspect")));
 
   // stalled job: STOP once, then answer at once
   srv.jobs.set("job_stalled", { id: "job_stalled", status: "running", progress: [], createdAt: Date.now() - 400000, updatedAt: Date.now() - 400000 });

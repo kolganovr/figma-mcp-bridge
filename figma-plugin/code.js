@@ -284,9 +284,10 @@ function restoreNodeProps(node, snap) {
     if ("cornerRadius" in snap) node.cornerRadius = snap.cornerRadius;
     if ("reactions" in snap) node.reactions = snap.reactions;
     if ("overlayPositionType" in snap) {
-      node.overlayPositionType = snap.overlayPositionType;
-      node.overlayBackground = snap.overlayBackground;
-      node.overlayBackgroundInteraction = snap.overlayBackgroundInteraction;
+      // Read-only in the Plugin API: try each, never let it abort the restore.
+      for (const k of ["overlayPositionType", "overlayBackground", "overlayBackgroundInteraction"]) {
+        try { if (JSON.stringify(node[k]) !== JSON.stringify(snap[k])) node[k] = snap[k]; } catch (e) {}
+      }
     }
   } catch (e) {
     // Best-effort restore — a single unrestorable property must not abort the rest of the rollback.
@@ -1932,7 +1933,8 @@ function createBridgeApi() {
   // --- prototype reactions -------------------------------------------------
   // Figma's reactions validator answers a wrong shape with a union error of
   // several KB. These build the one valid shape. Overlay look (position, dim,
-  // click outside) is set on the overlay FRAME, never on the action.
+  // click outside) lives on the overlay FRAME, never on the action, and the
+  // Plugin API exposes it read-only.
   const REACTION_DIRECTIONAL = ["MOVE_IN", "MOVE_OUT", "PUSH", "SLIDE_IN", "SLIDE_OUT"];
   const REACTION_SIMPLE = ["DISSOLVE", "SMART_ANIMATE", "SCROLL_ANIMATE"];
   const REACTION_NAV = ["NAVIGATE", "SWAP", "OVERLAY", "SCROLL_TO", "CHANGE_TO"];
@@ -2024,12 +2026,23 @@ function createBridgeApi() {
     }
     let transition = o.transition;
     if (transition === undefined) transition = position.indexOf("BOTTOM") === 0 ? "MOVE_IN/BOTTOM" : position.indexOf("TOP") === 0 ? "MOVE_IN/TOP" : "DISSOLVE";
-    trackModification(target);
-    target.overlayPositionType = position;
-    target.overlayBackground = bg;
-    target.overlayBackgroundInteraction = o.closeOnOutside === false ? "NONE" : "CLOSE_ON_CLICK_OUTSIDE";
     const res = await api.setReaction(node, { trigger: o.trigger, to: target, nav: "OVERLAY", transition: transition, replace: o.replace });
-    return res + " (" + position + ", dim " + (bg.type === "NONE" ? "none" : readHex(bg.color, bg.color.a)) + ")";
+    // The overlay look lives on the FRAME and the Plugin API exposes it read-only
+    // ("no setter for property", bench T3 15.10): the link is set, the look is a
+    // manual step for the user. Say so in the result instead of throwing, so the
+    // agent reports it rather than probing the API for a setter.
+    const want = { overlayPositionType: position, overlayBackground: bg, overlayBackgroundInteraction: o.closeOnOutside === false ? "NONE" : "CLOSE_ON_CLICK_OUTSIDE" };
+    const manual = [];
+    trackModification(target);
+    for (const k of Object.keys(want)) {
+      if (JSON.stringify(target[k]) === JSON.stringify(want[k])) continue;
+      try { target[k] = want[k]; } catch (e) { manual.push(k); continue; }
+      if (JSON.stringify(target[k]) !== JSON.stringify(want[k])) manual.push(k);
+    }
+    const look = position + ", dim " + (bg.type === "NONE" ? "none" : readHex(bg.color, bg.color.a)) + ", click outside " + (want.overlayBackgroundInteraction === "NONE" ? "does nothing" : "closes");
+    if (!manual.length) return res + " (" + look + ")";
+    return res + ". MANUAL STEP for the user: the Plugin API cannot set the overlay look (read-only), so in Figma select frame \"" + target.name +
+      "\" > Prototype panel > Overlay and set: " + look + ". Do not search for another way; tell the user.";
   };
 
   // CLOSE action on `node` (a close button / scrim inside an overlay).
@@ -2100,7 +2113,7 @@ function createBridgeApi() {
         "bridge.moveInto(nodesOrIds, container, { layout: \"none\" | \"row\" | \"column\", gap: 100, padding: 0 })": "reparents nodes; none keeps their canvas position, row/column lays them out; returns ids",
         "bridge.fitSection(section, { padding: 100 })": "resizes a SECTION/FRAME to its children's bbox + padding, children keep their canvas position; returns the section",
         "await bridge.setReaction(node, { trigger: 'ON_CLICK', to: frameId, nav: 'NAVIGATE', transition: 'MOVE_IN/LEFT' })": "adds one prototype link (replaces a reaction with the same trigger; replace: 'all' | 'none'); action: 'BACK' | 'CLOSE' | { type: 'URL', url } instead of to/nav; transition null = instant, 'DISSOLVE', 'SMART_ANIMATE', 'PUSH/LEFT/0.4' or { type, direction, duration, easing }; returns a summary line",
-        "await bridge.openOverlay(node, overlayFrame, { position: 'BOTTOM_CENTER', dim: 0.4, closeOnOutside: true })": "link that opens overlayFrame over the screen AND sets the overlay look on that frame (position, dim, click outside); transition defaults to sliding in from the edge",
+        "await bridge.openOverlay(node, overlayFrame, { position: 'BOTTOM_CENTER', dim: 0.4, closeOnOutside: true })": "link that opens overlayFrame over the screen; transition defaults to sliding in from the edge. The overlay look (position, dim, click outside) is READ-ONLY in the Plugin API: the result says which part is a MANUAL STEP for the user (Prototype panel) - report it, do not probe the API",
         "await bridge.closeOverlay(node)": "CLOSE action on a node inside an overlay",
         "bridge.componentize(node)": "figma.createComponentFromNode that keeps AutoLayout sizing and resize behaviour; use it instead of createComponentFromNode",
         "note": "existing nodes these change are snapshotted into the open checkpoint; an unknown bridge.<name> throws with the list of real helpers"
@@ -2829,6 +2842,7 @@ function resolveCaptureTargets(captureNodeIds, checkpointCreated, checkpointModi
 // crop is mostly unrelated pixels), (3) otherwise up to 4 nodes individually,
 // each at maxPx / sqrt(n) so the whole set costs about one image.
 const CAPTURE_MAX_INDIVIDUAL = 4;
+const BEFORE_SHOT_TIMEOUT_MS = 5000;
 const CAPTURE_MIN_EACH_PX = 384;
 const CAPTURE_ANCESTOR_AREA_FACTOR = 3;
 
@@ -3193,11 +3207,20 @@ figma.ui.onmessage = async (msg) => {
     const trackingFigma = createTrackingFigma();
 
     let beforeShot = null;
+    let beforeShotNote = null;
     if (diff === true && Array.isArray(capture_node_ids) && capture_node_ids.length > 0) {
       const before = capture_node_ids.map(nid => figma.getNodeById(nid)).filter(Boolean);
       if (before.length > 0) {
-        const shot = await exportCaptureTargets(before, scale, max_px);
-        if (shot.images.length > 0) beforeShot = shot.images[0];
+        // The first export of a page Figma has not rendered yet took 45-85 s
+        // (bench 15.10): that pushed a trivial write past the escalation limit
+        // and cost the agent a figma_job_status turn. The "before" image is a
+        // nice-to-have; never let it hold the write.
+        const shot = await Promise.race([
+          exportCaptureTargets(before, scale, max_px),
+          new Promise(resolve => setTimeout(() => resolve(null), BEFORE_SHOT_TIMEOUT_MS))
+        ]);
+        if (shot && shot.images.length > 0) beforeShot = shot.images[0];
+        else if (!shot) beforeShotNote = "diff: the \"before\" screenshot took over " + (BEFORE_SHOT_TIMEOUT_MS / 1000) + " s (Figma still rendering), skipped; the change itself ran.";
       }
     }
 
@@ -3300,7 +3323,7 @@ figma.ui.onmessage = async (msg) => {
         screenshot: screenshot,
         screenshots: screenshots,
         beforeScreenshot: beforeShot ? beforeShot.base64 : null,
-        captureNote: [captureNote, transferNote].filter(Boolean).join(' ') || null,
+        captureNote: [beforeShotNote, captureNote, transferNote].filter(Boolean).join(' ') || null,
         targetName: targetName,
         targetId: targetId,
         checkpointId: cpResult.checkpoint_id,

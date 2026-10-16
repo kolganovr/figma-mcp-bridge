@@ -135,6 +135,9 @@ function startFakePlugin() {
           : "FRAME \"Card\" #1:2 320x200";
         return reply({ id: cmd.id, result: { outline }, resultStashed: true, checkpointId: "cp_2" });
       }
+      if (/n\.opacity = 0\.5/.test(cmd.code || "")) { // a write that names its node by id
+        return reply({ id: cmd.id, result: { done: true }, resultStashed: true });
+      }
       if (cmd.code === "fail-line") { // a runtime error located by the plugin
         return reply({ id: cmd.id, success: false, error: "ReferenceError: foo is not defined", code: "SCRIPT_RUNTIME_ERROR", line: 7, column: 3, at: "foo(1);" });
       }
@@ -202,7 +205,11 @@ async function main() {
     const ok = await master.tool("figma_execute_code", { code: "ok" });
     check("small result comes back whole", ok.body && ok.body.ok === true && ok.body.result.done === true, ok.text);
     check("envelope is compact JSON (no pretty-print whitespace)", !/\n\s+"/.test(ok.text), ok.text);
-    const execCmd = plugin.received[plugin.received.length - 1];
+    const wr = await master.tool("figma_execute_code", { code: "const n = figma.getNodeById('1:2'); n.opacity = 0.5; return 'ok';" });
+    check("a write that names ids gets `after`: those nodes as they are now (no re-read turn)", wr.body && /no verify call needed[^]*FRAME "Card" #1:2 320x200$/.test(wr.body.after) && Object.keys(wr.body).indexOf("after") < Object.keys(wr.body).indexOf("result"), wr.text);
+    const rd = await master.tool("figma_execute_code", { code: "ok" });
+    check("...a call that changes nothing gets no `after`", rd.body && !("after" in rd.body), rd.text);
+    const execCmd = plugin.received.filter(c => c.code === "ok").pop();
     check("plugin is sent scale 1 and max_px 1024 by default", execCmd.scale === 1 && execCmd.max_px === 1024, execCmd);
 
     const big = await master.tool("figma_execute_code", { code: "big" });
@@ -257,7 +264,7 @@ async function main() {
     check("an 80-line outline is cut by whole lines and ends with a paging marker",
       Buffer.byteLength(cut.text) <= 3500 && kept > 20 && cutLines[kept] === `… +${80 - kept} more lines (80 total) — pass offset=${kept}`, cutLines.slice(-2));
     check("...every kept line is intact (nothing cut mid-line)", cutLines.slice(0, kept).every(l => NODE_LINE.test(l)), cutLines.find(l => !NODE_LINE.test(l)));
-    check("...and the truncation note still points at bridge.state.lastResult", /lastResult/.test(cut.body.truncated || ""), cut.body.truncated);
+    check("...and the truncation note points at offset/compare, not at slicing lastResult with scripts", /offset=K/.test(cut.body.truncated || "") && !/lastResult/.test(cut.body.truncated || ""), cut.body.truncated);
     const paged = await master.tool("figma_inspect", { node_ids: ["80-0"], offset: kept });
     const pagedLines = paged.body.result.outline.split("\n");
     const last = pagedLines[pagedLines.length - 1];

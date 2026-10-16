@@ -1,5 +1,37 @@
 # Changelog
 
+## 4.2.6 -- fewer model turns per task (measured on the bench stand)
+
+Measured on an internal bench stand (Antigravity CLI, Gemini Flash low, seven seeded tasks in a live Figma file, k=3,
+pass checked against the file state): median model turns summed over the seven tasks 60.5 -> 50 (-17%),
+input tokens 1.06 M -> 0.83 M (-22%), pass 15/17 -> 21/21 (before -> after this release).
+
+- **Write replies re-read for the model (`after`):** a write reply now leads with a compact outline of the
+  nodes the code touched and of new ids from its result ("Already re-read for you ... no verify call
+  needed"), up to 12 ids within 1400 bytes; after a prototype macro it is `view:"flow"` of those ids.
+  Verify reads after a write dropped from most runs to almost none.
+- **Macro signatures from the server:** a script that only looks at a macro (`bridge.X.toString()`,
+  `String(bridge.X)`, `typeof bridge.X`, `Object.keys(bridge)`) is not sent to the plugin; the reply is the
+  call signature (`componentize`, `setProps`, `setText`, `replaceWithInstance`, `shift`, `moveInto`,
+  `fitSection`, `setPosition`, `setReaction`, `openOverlay`, `closeOverlay`).
+- **Overlay guard:** assigning `overlayPositionType` / `overlayBackground*` or writing a raw OVERLAY
+  reaction without `bridge.openOverlay` is refused up front (`USE_OPEN_OVERLAY`) with a ready call built
+  from the script's ids. When `openOverlay` reports MANUAL STEP, the lead says the link is done and the
+  overlay look is set by the user in the Prototype panel (a `done` field), so the model stops.
+- **Plugin `bridge.openOverlay`:** overlay position / background / background interaction are read-only in
+  the Plugin API; the reaction is set first, the look is tried field by field, and the result reports
+  MANUAL STEP instead of failing with `no setter`. Rollback of the snapshot no longer throws.
+- **Font loads in agent code memoized:** repeated `figma.loadFontAsync` of an already loaded font could
+  hang 20-150 s (after `exportAsync` or a series of loads), sending simple writes into a job. Scripts that
+  call `loadFontAsync` get a one-line prelude loading each family/style once (line numbers unchanged).
+  Runs with `figma_job_status`: 3 of 7 -> 0 of 9.
+- **`diff` is ignored for now:** the plugin's before-snapshot for `diff:true` could hang the same way; the
+  server does not pass it and says so in the lead. (The plugin also caps the before-snapshot at 5 s.)
+- **inspect hints:** `similar` points to `compare` when an outline shows several nodes of the same
+  structure that differ; the shrink note for inspect leads to narrower `node_ids` / `compare` / `props` /
+  `offset=K` instead of a `bridge.state.lastResult` read script.
+- **Plugin reload needed** for the `openOverlay` and before-snapshot changes (`figma-plugin/code.js`).
+
 ## 4.2.5 -- read guard, prototype reactions, safe componentize
 
 Measured on two Antigravity prototype sessions of a second user (Gemini Flash, plugin 4.2.2, intranet file
