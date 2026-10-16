@@ -1,5 +1,36 @@
 # Changelog
 
+## 4.2.7 -- self-contained compare, find with subtree, setText for mixed fonts
+
+Measured on the internal bench stand (Antigravity CLI, Gemini Flash low, seeded tasks in a live Figma file, pass
+checked against the file state): model turns per series on seven tasks 112 -> 83 (-26%, k=3 equivalent), sum of
+medians 36 -> 28, verify turns after a write 11 -> 1 per series, pass 21/21 -> 35/35 (k=5). On three new control
+tasks (table, instance variants across breakpoints, overlay) the gain is small: 77 -> 74 turns, pass 8/9 -> 9/9.
+
+- **`compare` / `like` are self-contained:** the diff shows height (`height 40 (ref 44)`), `strokeAlign` and
+  per-side stroke weights (`stroke sides 0,0,1,0 (ref 1,1,1,1)`), and ends with a `REF #id: ...` line of exact
+  reference values to copy in `figma_execute_code`, so no `props` read is needed after it.
+- **`find` returns a subtree:** with 1-8 root hits (nested hits inside a found container are not roots) the reply
+  is their outline at auto depth; `find_text` names the direct parent layer and the screen.
+- **`view:"flow"` without `node_ids`** walks the top-level screens of the current page, with an honest
+  "scanned N of M" line when the walk is cut.
+- **Outline:** a TEXT line no longer repeats the layer name when it equals the text; mixed fonts show as
+  `mixed(Family/Style+Family/Style) size`; auto depth reserves 300 B for the reply envelope (measured) instead
+  of 500, so outlines go one level deeper within the same 3500 B.
+- **`bridge.setText(textNode, "text")`** loads every font range and keeps styles by words (first word keeps the
+  first word's style, the rest the tail's); tool descriptions point to it instead of `characters =`.
+- **Font memo** also wraps `ensureFont`, so a loop of loads fetches each font once.
+- **After a write:** overlay ids are taken from the `openOverlay` result when the script keeps them in
+  variables; flow in `after` covers the whole top-level screen of the trigger; a write into an instance layer
+  reports that the main component and other instances are untouched; up to 8 nodes are shown at depth 1;
+  `figma_job_status` of a finished write carries `after` too; the misleading "Nothing was created" note is gone
+  when `after` is not empty.
+- **Hints:** `similar` ignores instance internals, bare containers and reference frames and does not mix
+  variants; the table hint needs row/cell/column words, not a lone `header`; `figma_inspect` accepts
+  `node_id` and `ids` as aliases of `node_ids`; tool descriptions spell out `a:start/center` and mention
+  `like` / `compare` in the read-script nudge.
+- **Plugin reload needed** (`figma-plugin/code.js`).
+
 ## 4.2.6 -- fewer model turns per task (measured on the bench stand)
 
 Measured on an internal bench stand (Antigravity CLI, Gemini Flash low, seven seeded tasks in a live Figma file, k=3,

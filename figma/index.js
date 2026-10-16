@@ -138,7 +138,7 @@ const TIMEOUTS = {
   heavy: envNumber("FIGMA_MCP_TIMEOUT_HEAVY_MS", 120000),
   escalate: envNumber("FIGMA_MCP_ESCALATE_MS", 45000)
 };
-const SERVER_VERSION = "4.2.6";
+const SERVER_VERSION = "4.2.7";
 
 // ------------------------------------------------------------------
 // Token economy. In an agent loop the price of a tool call is not its own
@@ -879,7 +879,8 @@ async function sendCommandToPlugin(payload, timeoutMs = 45000, options = {}) {
     // Ledger entry from the very start: elapsed_ms used to count from the
     // moment of escalation, and "what else is running on this plugin" (see
     // findBusyJob) needs in-flight commands, not just escalated ones.
-    const startedAt = touchJob(id, { clientId, kind: cmdPayload.type || "EXECUTE", description: cmdPayload.description || null }).createdAt;
+    const startedAt = touchJob(id, { clientId, kind: cmdPayload.type || "EXECUTE", description: cmdPayload.description || null,
+      script: typeof cmdPayload.code === "string" && cmdPayload.code.length < 60000 ? stripFontMemoCode(cmdPayload.code) : null }).createdAt;
 
     const hardTimer = setTimeout(() => {
       commandResolvers.delete(id);
@@ -1059,7 +1060,7 @@ async function readJobSnapshot(id, waitMs) {
   }
   jobs.delete(job.id);
   if (job.status === "error") return { ok: false, status: "error", job_id: job.id, code: job.code, error: job.error, ...errorLocation(job) };
-  return { ok: true, status: "done", job_id: job.id, response: job.result };
+  return { ok: true, status: "done", job_id: job.id, response: job.result, script: job.script || null };
 }
 
 // ==========================================
@@ -1110,7 +1111,7 @@ const TOOLS = [
     // server's instructions to the model (Antigravity sessions made 0 bridge.*
     // calls in ~220 figma_execute_code runs), while tool descriptions always
     // reach it. The long-form contract stays in instructions + bridge.info().
-    description: "WRITE tool: run JavaScript in the open Figma document (Figma Desktop + 'Antigravity Bridge' plugin) to create, edit, move, style or delete nodes. To READ (explore a section, list children, find layers, check texts / fonts / variants / table columns) call figma_inspect instead: every id in one call, one line per node, view:\"table\" for tables; a read script here costs a model turn per question and its reply names the figma_inspect call to use (use_instead). Every call is a full model turn, so make the whole change in ONE call — all screens / breakpoints, verified in the same code with bridge.check — and put capture_node_ids on that same call instead of a separate figma_screenshot. Globals: `figma`, `await ensureFont(family, style)`, `getFreePosition(w, h)`, `bridge`: bridge.check({ '1:2': { width: 320, fill: '#FFFFFF' } }) -> pass/fail list; bridge.define(name, src) + bridge.require(name) keep helpers between calls (each call is a fresh function body — never eval); `return bridge.info()` lists the rest. Macros: bridge.replaceWithInstance(target, comp, {props, text}), bridge.setProps(inst, {Status: 'Dropdown'}), bridge.setText(root, {layer: '…'}), bridge.shift(ids, {dx, dy}), bridge.moveInto(ids, section, {layout, gap}), bridge.fitSection(s), bridge.context(id), bridge.componentize(nodeObject) -> new COMPONENT, same name/size/look, NEW id (never raw createComponentFromNode), prototype links: await bridge.openOverlay(triggerId, overlayFrameId, { position: 'BOTTOM_CENTER', dim: 0.4, closeOnOutside: true }) (the overlay look is read-only in the Plugin API: the reply names the MANUAL STEP for the user), bridge.closeOverlay(id), bridge.setReaction(id, { to: frameId, nav: 'NAVIGATE' }); read links with figma_inspect view:\"flow\". Call macros directly, don't read their source. Never findAll the whole page — scope to a section. Return only the ids/flags you need: responses over max_output_bytes (3500) are shrunk, the full value stays in bridge.state.lastResult.",
+    description: "WRITE tool: run JavaScript in the open Figma document (Figma Desktop + 'Antigravity Bridge' plugin) to create, edit, move, style or delete nodes. To READ (explore a section, list children, find layers, check texts / fonts / variants / table columns) call figma_inspect instead: every id in one call, one line per node, view:\"table\" for tables; a read script here costs a model turn per question and its reply names the figma_inspect call to use (use_instead). Every call is a full model turn, so make the whole change in ONE call — all screens / breakpoints, verified in the same code with bridge.check — and put capture_node_ids on that same call instead of a separate figma_screenshot. Globals: `figma`, `await ensureFont(family, style)`, `getFreePosition(w, h)`, `bridge`: bridge.check({ '1:2': { width: 320, fill: '#FFFFFF' } }) -> pass/fail list; bridge.define(name, src) + bridge.require(name) keep helpers between calls (each call is a fresh function body — never eval); `return bridge.info()` lists the rest. Macros: bridge.replaceWithInstance(target, comp, {props, text}), bridge.setProps(inst, {Status: 'Dropdown'}), bridge.setText(root, {layer: '…'}) or bridge.setText(textNode, 'new text') (keeps mixed font styles by words: THE way to replace the text of a label with several font styles — never `characters =`, which flattens them, and never a per-character getRangeFontName/setRangeFontName loop), bridge.shift(ids, {dx, dy}), bridge.moveInto(ids, section, {layout, gap}), bridge.fitSection(s), bridge.context(id), bridge.componentize(nodeObject) -> new COMPONENT, same name/size/look, NEW id (never raw createComponentFromNode), prototype links: await bridge.openOverlay(triggerId, overlayFrameId, { position: 'BOTTOM_CENTER', dim: 0.4, closeOnOutside: true }) (the overlay look is read-only in the Plugin API: the reply names the MANUAL STEP for the user), bridge.closeOverlay(id), bridge.setReaction(id, { to: frameId, nav: 'NAVIGATE' }); read links with figma_inspect view:\"flow\". Call macros directly, don't read their source. Never findAll the whole page — scope to a section. Return only the ids/flags you need: responses over max_output_bytes (3500) are shrunk, the full value stays in bridge.state.lastResult.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1161,7 +1162,7 @@ const TOOLS = [
   },
   {
     name: "figma_inspect",
-    description: "READ the live Figma document in ONE call — the tool for any read (not figma_execute_code); pass every node id you need at once instead of one call per node. Default: a compact outline, one line per node (TYPE \"name\" #id WxH @x,y [V gap8 pad16 fill/hug a:start/center] size:fill/hug fill:#FFF stroke:#E8EAF0/0,1,1,1 r0,0,3,3 shadow:… font \"text…\"; non-defaults only), as deep as fits the reply unless `depth` is given; `children:N` marks a node with more below. `like: \"<ref id>\"` (or several) FINDS every copy of the reference under node_ids (screens/sections; default: its section) — instances of the same component, or same name — and diffs each against it: the call for \"redo these like the reference\" when you don't know where the copies are. `compare: \"<ref id>\"` lists, per node_id, every difference from that reference (layout, sizing, stroke, radius, effects, clip, font, variant; children matched by name) — one call for \"make these like that one\", and the check after the write. `props` returns exact values instead: { id: { prop: value } } (also fill, stroke, text, font, layout, padding, parent, children, main, variant, props, absolute, reactions, connector). `find` searches node names under node_ids (or the current page); `find_text` searches text content. `view: \"map\"` = canvas map (sections, breakpoints). `view: \"flow\"` = the prototype links under node_ids (a section or screens): per screen, source, trigger, action, target, transition, plus the overlay settings of overlay targets — never scan the page for `reactions`. `context: true` adds ancestor sections, breakpoints and component variants. `offset` skips the first N outline lines when a reply ends with `pass offset=K`. `check` returns only mismatches. Combine them freely. Changes nothing.",
+    description: "READ the live Figma document in ONE call — the tool for any read (not figma_execute_code); pass every node id you need at once instead of one call per node. Default: a compact outline, one line per node (TYPE \"name\" #id WxH @x,y [V gap8 pad16 fill/hug a:start/center] size:fill/hug fill:#FFF stroke:#E8EAF0/0,1,1,1 r0,0,3,3 shadow:… font \"text…\"; non-defaults only; a TEXT named after its text drops the name; `a:P/C` = primaryAxisAlignItems/counterAxisAlignItems, start = MIN, center = CENTER, end = MAX, between = SPACE_BETWEEN, absent = MIN/MIN), as deep as fits the reply unless `depth` is given; `children:N` marks a node with more below. `like: \"<ref id>\"` (or several) FINDS every copy of the reference under node_ids (screens/sections; default: its section) — instances of the same component, or same name — and diffs each against it: the call for \"redo these like the reference\" when you don't know where the copies are. `compare: \"<ref id>\"` lists, per node_id, every difference from that reference (layout, sizing, stroke, radius, effects, clip, font, variant; children matched by name) and ends with REF lines, the reference's exact values to copy into the write (no props read needed) — one call for \"make these like that one\", and the check after the write. `props` returns exact values instead: { id: { prop: value } } (also fill, stroke, text, font, layout, padding, parent, children, main, variant, props, absolute, reactions, connector). `find` searches node names under node_ids (or the current page); `find_text` searches text content. `view: \"map\"` = canvas map (sections, breakpoints). `view: \"flow\"` = the prototype links under node_ids (a section or screens): per screen, source, trigger, action, target, transition, plus the overlay settings of overlay targets — never scan the page for `reactions`. `context: true` adds ancestor sections, breakpoints and component variants. `offset` skips the first N outline lines when a reply ends with `pass offset=K`. `check` returns only mismatches. Combine them freely. Changes nothing.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1170,6 +1171,8 @@ const TOOLS = [
           items: { type: "string" },
           description: "Node ids to read (\"12:34\" or \"12-34\"). Omit to use the current page."
         },
+        node_id: { type: "string", description: "Alias of node_ids for one id." },
+        ids: { type: "array", items: { type: "string" }, description: "Alias of node_ids." },
         depth: {
           type: "number",
           description: "Outline levels below each node (0 = the nodes only, max 6). Omit it: the outline goes as deep as fits the reply."
@@ -1182,7 +1185,7 @@ const TOOLS = [
         view: {
           type: "string",
           enum: ["outline", "map", "table", "flow"],
-          description: "\"outline\" (default) = one line per node; \"map\" = canvas map: sections, frames, breakpoints and component sets in a few lines; \"table\" = per table (found by structure) the columns: header, width, sizing, cell contents, plus row and cell ids; \"flow\" = prototype links (screen, source, trigger, action, target, transition, overlay settings) under node_ids."
+          description: "\"outline\" (default) = one line per node; \"map\" = canvas map: sections, frames, breakpoints and component sets in a few lines; \"table\" = per table (found by structure) the columns: header, width, sizing, cell contents, plus row and cell ids; \"flow\" = prototype links (screen, source, trigger, action, target, transition, overlay settings) under node_ids (without node_ids: every top-level screen of the current page)."
         },
         context: {
           type: "boolean",
@@ -1190,15 +1193,15 @@ const TOOLS = [
         },
         like: {
           type: "string",
-          description: "Reference node id (several: comma-separated): find its copies under node_ids (default: the reference's top section) and list, per copy, its frame and how it differs (missing children come with the reference's own line, so no extra read is needed). Copies that already match are listed as identical."
+          description: "Reference node id (several: comma-separated): find its copies under node_ids (default: the reference's top section) and list, per copy, its frame and how it differs (missing children come with the reference's own line, and REF lines at the end give the reference's exact values, so no extra read is needed). Copies that already match are listed as identical."
         },
         compare: {
           type: "string",
-          description: "Reference node id: instead of an outline, list how each node_id differs from it (geometry and text content are skipped). 'identical' = nothing to fix."
+          description: "Reference node id: instead of an outline, list how each node_id differs from it (x/y/width and text content are skipped; height, stroke sides/align are compared). Ends with REF lines: the exact values of the differing reference nodes, to copy in figma_execute_code without a props read. 'identical' = nothing to fix."
         },
         find_text: {
           type: "string",
-          description: "Case-insensitive substring of TEXT content to search for under node_ids (or the current page). One line per match: #id \"layer\" «text» in <top frame>."
+          description: "Case-insensitive substring of TEXT content to search for under node_ids (or the current page). One line per match: #id \"layer\" «text» in <parent layer #id>, screen \"<top frame>\" (the parent is the frame to click or edit)."
         },
         offset: {
           type: "number",
@@ -1206,7 +1209,7 @@ const TOOLS = [
         },
         find: {
           type: "string",
-          description: "Case-insensitive substring of node names to search for under node_ids (or the current page). Matches come back as outline lines."
+          description: "Case-insensitive substring of node names to search for under node_ids (or the current page). Up to 8 matches come back with their subtree outline (as deep as fits, no extra read needed); more matches as one line each."
         },
         find_type: {
           type: "string",
@@ -1802,7 +1805,9 @@ const SERVER_INSTRUCTIONS = [
 
 const SERVER_ERROR_HINTS = [
   {
-    test: /timeout|not connected|8765|bridge/i,
+    // Not a bare "bridge": "bridge.foo is not a function" is a script error, not an
+    // offline plugin (Argon audit 16.10, #15).
+    test: /timeout|not connected|8765|bridge (?:is )?(?:offline|not running|unreachable)|no figma plugin/i,
     code: "BRIDGE_OFFLINE",
     hint: "The Figma plugin did not answer. Ask the user to open Figma DESKTOP (not the browser) and launch the Antigravity Bridge plugin (Ctrl+Alt+P / Cmd+Option+P) until the status shows CONNECTED, then retry."
   },
@@ -2174,24 +2179,46 @@ function outlineStyle(rest, h) {
   return s;
 }
 
+// Frames named like a finished example ("… (эталон)", "reference") are shown,
+// not grouped with the targets (h7 T1 offered the reference as a 4th copy).
+const REFERENCE_NAME_RE = /эталон|reference|\bref\b/i;
+
 function similarHint(outline) {
   if (typeof outline !== "string") return null;
   const lines = outline.split(/\r?\n/);
   const nodes = [];
+  const refs = [];
+  const anc = []; // [{ indent, ref }] of the lines above the current one
   lines.forEach((line, i) => {
     const m = SIMILAR_LINE_RE.exec(line);
-    if (!m || m[1].length === 0) return;
+    const indentNow = line.length - line.trimStart().length;
+    while (anc.length && anc[anc.length - 1].indent >= indentNow) anc.pop();
+    if (!m) { anc.push({ indent: indentNow, ref: false }); return; }
+    const inRef = anc.some(a => a.ref) || REFERENCE_NAME_RE.test(m[3]);
+    anc.push({ indent: indentNow, ref: inRef });
+    if (m[1].length === 0) return;
+    // inside an instance (#I<id>;<id>) every layer belongs to the master: not a node to align
+    if (m[4].charAt(0) === "I") return;
     const indent = m[1].length;
-    let desc = 0;
+    // direct children: printed lines one level down, or the children:N marker when the depth cut them
+    let kids = 0, childIndent = -1;
     for (let j = i + 1; j < lines.length; j++) {
       const ind = lines[j].length - lines[j].trimStart().length;
       if (ind <= indent) break;
-      const d = DEEPER_RE.exec(lines[j]);
-      desc += d ? Number(d[1]) : 1;
+      if (DEEPER_RE.test(lines[j])) continue;
+      if (childIndent === -1) childIndent = ind;
+      if (ind === childIndent) kids++;
     }
-    if (desc < 2) return;
+    const cut = /\schildren:(\d+)$/.exec(m[6]);
+    if (!kids && cut) kids = Number(cut[1]);
+    if (kids < 2) return;
     const st = outlineStyle(m[6], m[5]);
-    nodes.push({ id: m[4], sig: m[2] + "|" + st.layout + "|" + desc, st: st });
+    // a bare layout container (a row of fields) is not a styled copy of anything
+    if (!st.fill && !st.stroke && !st.r && !st.shadow) return;
+    if (inRef) { refs.push(m[4]); return; }
+    // instances of different variants differ on purpose (Size=Desktop / Mobile): never one group
+    const variant = m[2] === "INSTANCE" ? (/→.*?(?=\schildren:\d+$|$)/.exec(m[6]) || [""])[0] : "";
+    nodes.push({ id: m[4], sig: m[2] + "|" + st.layout + "|" + kids + "|" + variant, st: st });
   });
   const groups = {};
   nodes.forEach(n => { (groups[n.sig] = groups[n.sig] || []).push(n); });
@@ -2205,7 +2232,8 @@ function similarHint(outline) {
     out.push(g.length + " nodes of the same structure differ in " + differ.join(", ") + ": " + ids);
   });
   if (!out.length) return null;
-  return out.join("; ") + ". If they should match one of them: figma_inspect compare:\"<that id>\" node_ids:[the others] lists every difference in ONE call, then fix them all in ONE write.";
+  const refNote = refs.length ? " (frames named as a reference, not in the group: " + refs.slice(0, 3).map(x => "#" + x).join(" ") + ")" : "";
+  return out.join("; ") + refNote + ". If they should match one of them: figma_inspect compare:\"<that id>\" node_ids:[the others] lists every difference in ONE call, then fix them all in ONE write.";
 }
 
 // Tells the model the cheapest next step. Raising max_output_bytes is only
@@ -2213,6 +2241,12 @@ function similarHint(outline) {
 function truncationNote(truncated, stashed, readNudged, kind) {
   // An outline cut by depth: re-reading it level by level (depth 4, then 5)
   // or slicing lastResult with a script is a turn per step (bench T1 15.10).
+  // props / compare / like / flow / check replies are lists, not an outline: nothing
+  // "deeper" was collapsed (bench p2 T1 cc37aea8 got the outline note on props).
+  if (kind === "inspect-list") {
+    return `result shrunk ${truncated.from}→${truncated.to} bytes (cuts marked with …). ` +
+      "Don't re-read with scripts: pass fewer node_ids or props, or offset=K for the next lines.";
+  }
   if (kind === "inspect") {
     return `outline shrunk ${truncated.from}→${truncated.to} bytes: deeper levels collapsed (… +N deeper). ` +
       "Don't re-read level by level or with scripts: pass only the ids you need deeper, compare:\"<ref id>\" or props for exact values; offset=K pages.";
@@ -2548,6 +2582,8 @@ function budgetBytesFromTokens(budgetTokens) {
 // message type of its own and inherits the job ledger, target routing and
 // bridge.state.lastResult. Arguments travel as a JSON literal, never spliced
 // in as code.
+const AUTO_DEPTH_RESERVE = 300;
+
 function buildInspectCode(args = {}) {
   const ids = normalizeNodeIds(args.node_ids || args.node_id || args.ids);
   const depth = Number(args.depth);
@@ -2565,8 +2601,15 @@ function buildInspectCode(args = {}) {
     check: args.check && typeof args.check === "object" ? args.check : null,
     compare: typeof args.compare === "string" && args.compare ? args.compare.replace(/-/g, ":") : null,
     like: normalizeNodeIds(args.like) ? normalizeNodeIds(args.like).split(",") : null,
-    // No depth: the plugin picks the deepest outline that fits the reply.
-    autoBytes: Math.max(600, outputBudgetInfo(args).bytes - 500)
+    // No depth: the plugin picks the deepest outline that fits the reply. The
+    // envelope around the outline ({"ok":true,"result":{"outline":…},"duration_ms":…}
+    // plus the reserved truncation note) measured 295 B (bench/tools/autodepth_check.js),
+    // so the outline may take the budget minus AUTO_DEPTH_RESERVE (was a guessed 500).
+    autoBytes: Math.max(600, outputBudgetInfo(args).bytes - AUTO_DEPTH_RESERVE),
+    screens: args.screens === true,
+    notes: args.notes === true,
+    findTreeMax: 8,
+    findTreeBytes: Math.max(600, outputBudgetInfo(args).bytes - AUTO_DEPTH_RESERVE)
   };
   const literal = JSON.stringify(spec); // ES2019+: U+2028/2029 are legal in string literals
   return [
@@ -2588,9 +2631,22 @@ function buildInspectCode(args = {}) {
     "  if (!targets.length) out.found = 'no matches';",
     "  if (more.length) out.found_more = more;",
     "}",
+    // No ids: every top-level node of the page (a capped walk that says what it scanned),
+    // not a refusal that costs a turn (h13: 3 empty flow calls).
     "if (a.view === 'flow' && !targets.length && !query) {",
-    "  targets = figma.currentPage.selection.map(n => n.id);", // never the whole page: flow reads only inside what it is given
-    "  if (!targets.length) out.flow = 'pass node_ids: a section or screens (flow reads prototype links only inside the given nodes)';",
+    "  targets = figma.currentPage.children.map(n => n.id);",
+    "  if (!targets.length) out.flow = 'the page is empty';",
+    "}",
+    // flow of whole screens: each id -> the top-level frame it sits in (under the page or a section)
+    "if (a.view === 'flow' && a.screens && targets.length) {",
+    "  const tops = [];",
+    "  for (const id of targets) {",
+    "    let n = figma.getNodeById(id);",
+    "    if (!n) continue;",
+    "    while (n.parent && n.parent.type !== 'PAGE' && n.parent.type !== 'SECTION' && n.parent.type !== 'DOCUMENT') n = n.parent;",
+    "    if (tops.indexOf(n.id) === -1) tops.push(n.id);",
+    "  }",
+    "  if (tops.length) targets = tops;",
     "}",
     "if (a.like) out.like = bridge.like(a.like, a.ids);",
     "const wantsRead = !a.like && (a.props || query || a.ids.length || a.view || a.context || !a.check);",
@@ -2599,14 +2655,28 @@ function buildInspectCode(args = {}) {
     "  const refs = targets.length ? targets : [figma.currentPage];",
     "  if (a.compare) {}",
     "  else if (a.props) out.props = bridge.inspect(refs, a.props);",
-    "  else if (a.findText && !a.view) out.found = hits.map(f => '#' + f.id + ' ' + JSON.stringify(f.name) + ' «' + f.text + '» in ' + f.frame).join('\\n');",
+    "  else if (a.findText && !a.view) out.found = hits.map(f => '#' + f.id + ' ' + JSON.stringify(f.name) + ' «' + f.text + '» in ' + (f.parent ? f.parent + ', screen ' + JSON.stringify(String(f.frame).replace(/ #\\S+$/, '')) : f.frame)).join('\\n');",
     "  else {",
     "    const so = { maxChildren: 200 };",
-    "    if (a.depth !== null) so.depth = a.depth; else if (query || a.view === 'map') so.depth = query ? 0 : 1; else so.autoBytes = a.autoBytes;",
+    // H6: a few hits come with their subtree (the next call was an outline of the same ids in 16 of 24 finds).
+    "    const findTree = query && !a.view && a.depth === null && hits.length > 0 && hits.length <= a.findTreeMax;",
+    "    if (a.depth !== null) so.depth = a.depth; else if (findTree) so.autoBytes = a.findTreeBytes; else if (query || a.view === 'map') so.depth = query ? 0 : 1; else so.autoBytes = a.autoBytes;",
     "    if (a.view === 'map') so.view = 'map';",
     "    if (a.view === 'table') so.view = 'table';",
     "    if (a.view === 'flow') so.view = 'flow';",
-    "    out[query ? 'found' : a.view === 'flow' ? 'flow' : 'outline'] = bridge.summarize(refs, so);",
+    // Hits nested in another hit are shown inside its tree, not counted as roots; one extra line only if the depth did not reach them.
+    "    let s;",
+    "    if (findTree) {",
+    "      const hitSet = new Set(targets);",
+    "      const inHit = id => { let p = figma.getNodeById(id); p = p && p.parent; while (p) { if (hitSet.has(p.id)) return true; p = p.parent; } return false; };",
+    "      const tops = targets.filter(id => !inHit(id));",
+    "      s = bridge.summarize(tops, so);",
+    "      const lost = targets.filter(id => tops.indexOf(id) === -1 && s.indexOf('#' + id + ' ') === -1);",
+    "      if (lost.length) s += '\\n' + bridge.summarize(lost, { depth: 0 });",
+    // depth 1 that does not fit comes back uncapped (up to 200 children): keep the one-line hits then
+    "      if (JSON.stringify(s).length > a.findTreeBytes) s = bridge.summarize(refs, { maxChildren: 200, depth: 0 });",
+    "    } else s = bridge.summarize(refs, so);",
+    "    out[query ? 'found' : a.view === 'flow' ? 'flow' : 'outline'] = s;",
     "  }",
     "  if (a.context) {",
     "    out.context = {};",
@@ -2619,6 +2689,29 @@ function buildInspectCode(args = {}) {
     "        components: c.components.map(x => x.set + ' ×' + x.used + (x.props ? ' ' + Object.keys(x.props).map(k => k + '=' + (Array.isArray(x.props[k]) ? x.props[k].join('|') : x.props[k])).join('; ') : '')), conventions: c.conventions };",
     "    }",
     "  }",
+    "}",
+    // ids of layers inside an instance (I<inst>;<layer>): is the master, and every other instance of it, really untouched?
+    "if (a.notes) {",
+    "  const notes = [];",
+    "  for (const id of a.ids) {",
+    "    if (id.charAt(0) !== 'I' || id.indexOf(';') === -1) continue;",
+    "    const parts = id.slice(1).split(';');",
+    "    const inst = figma.getNodeById(parts[0]);",
+    "    const layer = figma.getNodeById(parts[parts.length - 1]);",
+    "    if (!inst || inst.type !== 'INSTANCE' || !layer || !figma.getNodeById(id)) continue;",
+    "    const main = inst.mainComponent;",
+    "    if (!main) continue;",
+    "    const all = typeof main.getInstancesAsync === 'function' ? await main.getInstancesAsync() : (main.instances || []);",
+    "    const others = all.filter(i => i.id !== inst.id);",
+    "    const differ = [];",
+    "    for (const o of others) {",
+    "      const cid = 'I' + o.id + ';' + parts.slice(1).join(';');",
+    "      if (!figma.getNodeById(cid)) continue;",
+    "      if (!/: identical$/.test(bridge.compare(layer.id, [cid]).split('\\n')[0])) differ.push(o.id);",
+    "    }",
+    "    notes.push('NOTE ' + id + ': an override inside instance #' + inst.id + '; main COMPONENT ' + JSON.stringify(main.name) + ' #' + main.id + ' and ' + (others.length - differ.length) + ' other instance' + (others.length - differ.length === 1 ? '' : 's') + ' untouched' + (differ.length ? ' (' + differ.length + ' differ from the master: ' + differ.slice(0, 4).map(x => '#' + x).join(' ') + ')' : ''));",
+    "  }",
+    "  if (notes.length) out.notes = notes;",
     "}",
     "if (a.check) out.check = bridge.check(a.check);",
     "return out;"
@@ -2661,10 +2754,18 @@ const CANVAS_WRITE_RE = new RegExp(
   "bridge\\s*\\.\\s*(replaceWithInstance|setProps|setText|shift|moveInto|fitSection|componentize|setReaction|openOverlay|closeOverlay|setPosition|define|snapshot|checkpoint)\\s*\\(|" +
   "\\.(" + WRITE_PROPS.join("|") + ")\\s*(=(?!=)|\\+=|-=)"
 );
+const WHAT_YOU_GET = {
+  outline: 'one line per node: TYPE "name" #id WxH @x,y [layout] fill font "text" →component variant',
+  table: "per table: header, each column's title, width, sizing, cell texts and component variant counts, row/cell ids",
+  map: "canvas map: sections, frames, breakpoints",
+  props: "{ id: { prop: value } } for each node",
+  like: "like:'<ref id>' finds the copies of a correct node under node_ids and lists how each differs, then REF lines with the reference's exact values",
+  compare: "compare:'<ref id>' lists how each node_id differs from the reference, then REF lines with its exact values to copy into the write"
+};
 const CAPS_NOTE = 'figma_inspect also does: find / find_text (search names / text under node_ids), props:[...] (exact values: ' +
   '"font", "text", "layout", "padding", "props" = componentProperties, "variant", "main", "reactions", or any raw property), ' +
   'context:true (parent sections, breakpoints, component variants), view:"map" (canvas map), view:"table" (per table: headers, widths, ' +
-  'cell contents and variant counts per column, row/cell ids), check (pass/fail).';
+  'cell contents and variant counts per column, row/cell ids), check (pass/fail), ' + WHAT_YOU_GET.like + ', ' + WHAT_YOU_GET.compare + '.';
 // Script property -> figma_inspect props name. Geometry, names, types, text,
 // fonts, layout, fills and instance variants are already on every outline
 // line, so only these make a props read worth suggesting.
@@ -2677,14 +2778,10 @@ const PROP_HINTS = [
   [/\blayoutGrow\b/, "layoutGrow"], [/\blayoutAlign\b/, "layoutAlign"], [/\bconstraints\b/, "constraints"],
   [/\bfills\b/, "fill"], [/\bstrokes\b/, "stroke"], [/\bcornerRadius\b/, "cornerRadius"], [/\bvisible\b/, "visible"]
 ];
-const TABLE_HINT_RE = /\b(table|tables|row|rows|header|headers|cell|cells|column|columns)\b|таблиц|строк|заголов|ячейк|колонк|столб/i;
+// "header" / "заголов" alone is a page header, not a table one (T7 `const header = ...` got view:"table"):
+// only row / cell / column words, which a table walk cannot do without, count.
+const TABLE_HINT_RE = /\b(table|tables|row|rows|cell|cells|column|columns)\b|таблиц|строк|ячейк|колонк|столб/i;
 const OUTLINE_COVERS =["font", "text", "layout", "fill", "stroke", "cornerRadius", "visible", "variant", "main"];
-const WHAT_YOU_GET = {
-  outline: 'one line per node: TYPE "name" #id WxH @x,y [layout] fill font "text" →component variant',
-  table: "per table: header, each column's title, width, sizing, cell texts and component variant counts, row/cell ids",
-  map: "canvas map: sections, frames, breakpoints",
-  props: "{ id: { prop: value } } for each node"
-};
 const READ_STATE = { streak: 0, redirects: 0, total: 0, lastIds: [], lastArgs: null, capsShown: false };
 
 // -> "write" | "read" | "stash" | "cheap" | null
@@ -2706,27 +2803,37 @@ function classifyScript(code, response) {
 // code named by id, as they are now. Best-effort: any failure = no `after`.
 const AFTER_WRITE_MAX_IDS = 12;
 const AFTER_WRITE_BYTES = 1400;
+const AFTER_WRITE_DEEP_IDS = 8; // up to this many nodes the after-write outline goes one level down
 
 async function afterWriteOutline(code, response, target) {
   if (classifyScript(code, response) !== "write") return null;
   const codeIds = suggestInspect(code).node_ids || [];
+  // A prototype link is checked with view:"flow" (bench H3: every T3 run
+  // re-read it that way after the write), so show that instead of outlines.
+  const flow = REACTION_MACRO_RE.test(code);
   // componentize / flatten / clone return NEW ids the code never named (bench
   // H4: T4 re-read the six new components after the write): those first.
   let fresh = [];
   try { fresh = (resultIds(response && response.result)).filter(id => codeIds.indexOf(id) === -1); } catch (e) {}
-  const ids = fresh.concat(codeIds).slice(0, AFTER_WRITE_MAX_IDS);
+  let ids = fresh.concat(codeIds).slice(0, AFTER_WRITE_MAX_IDS);
+  if (flow) {
+    // ids kept in variables never reach the code text: the macro's own result has them
+    const ov = overlayIds(code, response);
+    const modified = response && Array.isArray(response.modified) ? response.modified.map(String) : [];
+    ids = (ov || (codeIds.length ? codeIds : modified)).slice(0, AFTER_WRITE_MAX_IDS);
+  }
   if (!ids.length) return null;
-  // A prototype link is checked with view:"flow" (bench H3: every T3 run
-  // re-read it that way after the write), so show that instead of outlines.
-  const flow = REACTION_MACRO_RE.test(code);
   try {
+    // flow: the whole screen of the trigger (and of the overlay), not the two nodes: every link on it
     const r = await sendCommandToPlugin({
-      code: buildInspectCode(flow ? { node_ids: ids, view: "flow" } : { node_ids: ids, depth: 0 }),
+      code: buildInspectCode(flow ? { node_ids: ids, view: "flow", screens: true } : { node_ids: ids, depth: ids.length <= AFTER_WRITE_DEEP_IDS ? 1 : 0, notes: true }),
       description: "Inspect (after write)",
       target: target
     }, TIMEOUTS.fast);
     let outline = r && r.result && (flow ? r.result.flow : r.result.outline);
     if (typeof outline !== "string") return null;
+    // a layer inside an instance: say the master and the other instances are intact (compared for real in the plugin)
+    if (!flow && Array.isArray(r.result.notes) && r.result.notes.length) outline = r.result.notes.join("\n") + "\n" + outline;
     // Ids the write replaced (componentize) read as MISSING: noise, not news.
     outline = outline.split("\n").filter(l => !/^\s*MISSING\b/.test(l)).join("\n");
     if (!outline) return null;
@@ -2873,7 +2980,7 @@ const MACRO_SIGNATURES = {
   // bench H4: T4 read typeof + .toString() of componentize before using it.
   componentize: "bridge.componentize(node) -> the new COMPONENT (sync; pass the node object, e.g. await figma.getNodeByIdAsync(id)). Same name, size, position, look and AutoLayout sizing; the id CHANGES. Many at once: const out = []; for (const id of ids) out.push(bridge.componentize(await figma.getNodeByIdAsync(id)).id); return out;",
   setProps: "bridge.setProps(instance, { Name: value }) - component properties by readable name ('Label' matches 'Label#12:3'); INSTANCE_SWAP takes a component node or id; returns the instance.",
-  setText: "await bridge.setText(root, { layerNameOrId: 'text' }) - loads the fonts and sets TEXT layers found by id or exact name under root; returns { set: [ids] }.",
+  setText: "await bridge.setText(root, { layerNameOrId: 'text' }) or bridge.setText(textNodeOrId, 'text') - loads all fonts and sets TEXT layers found by id or exact name under root, KEEPING font styles by words (first word keeps its style, the tail from the first space keeps its own; more styles: word by word, extra words take the last). Replace text with it, never with `characters =` (that flattens mixed fonts) or a per-character getRangeFontName loop. Returns { set: [ids] }.",
   replaceWithInstance: "await bridge.replaceWithInstance(target, component, { props, text, keepSize: false, remove: true }) - instance of a COMPONENT / COMPONENT_SET / id in target's slot; returns the instance.",
   shift: "bridge.shift(nodesOrIds, { dx: 0, dy: 0 }) - moves nodes by an offset; returns the count.",
   moveInto: "bridge.moveInto(nodesOrIds, container, { layout: 'none' | 'row' | 'column', gap: 100, padding: 0 }) - reparents nodes; returns ids.",
@@ -2886,9 +2993,48 @@ const MANUAL_DONE = "Done: the link is set. The overlay look is a MANUAL STEP no
 const OVERLAY_LOOK_WRITE_RE =/\.overlay(?:PositionType|Background|BackgroundInteraction)\s*=(?!=)/;
 const RAW_OVERLAY_RE = /(\.reactions\s*=(?!=)|setReactionsAsync\s*\()[\s\S]*["'`]OVERLAY["'`]|["'`]OVERLAY["'`][\s\S]*(\.reactions\s*=(?!=)|setReactionsAsync\s*\()/;
 
+// Overlay frames bridge.openOverlay already linked in this server's life:
+// overlay id -> trigger id. A later script that tries to set the look on that
+// frame is told the task is done (bench T3: 3 of 3 h7 runs re-read and tried).
+const OVERLAY_LINKED = new Map();
+const OPEN_OVERLAY_IDS_RE = /bridge\s*\.\s*openOverlay\s*\(\s*["'`]([^"'`]+)["'`]\s*,\s*["'`]([^"'`]+)["'`]/;
+const OVERLAY_HEADER_RE = /^OVERLAY SETTINGS \(frame properties of the overlay target, not part of the action\)$/m;
+const OVERLAY_HEADER_DONE = "OVERLAY SETTINGS = the frame's CURRENT look, read-only for scripts: it stays like this until the user sets it by hand (the MANUAL STEP), not a failed write";
+
+// Trigger first, overlay frame second: destinationId or the frame whose look the
+// script sets is the overlay, never the trigger (Argon audit #18: p2 T3 043ebeed).
 function overlayCall(code) {
-  const ids = (suggestInspect(code).node_ids || []).slice(0, 2);
-  return `await bridge.openOverlay(${ids[0] ? JSON.stringify(ids[0]) : "triggerId"}, ${ids[1] ? JSON.stringify(ids[1]) : "overlayFrameId"}, { position: 'BOTTOM_CENTER', dim: 0.4, closeOnOutside: true })`;
+  const ids = suggestInspect(code).node_ids || [];
+  let ov = (code.match(/destinationId\s*:\s*["'`]([^"'`]+)["'`]/) || [])[1] || null;
+  if (!ov && OVERLAY_LOOK_WRITE_RE.test(code) && ids.length === 1) ov = ids[0];
+  let trig = ids.find(id => id !== ov) || null;
+  if (!ov && ids.length >= 2) { trig = ids[0]; ov = ids[1]; }
+  if (ov && !trig && OVERLAY_LINKED.has(ov)) trig = OVERLAY_LINKED.get(ov);
+  return `await bridge.openOverlay(${trig ? JSON.stringify(trig) : "triggerId"}, ${ov ? JSON.stringify(ov) : "overlayFrameId"}, { position: 'BOTTOM_CENTER', dim: 0.4, closeOnOutside: true })`;
+}
+
+// [trigger, overlay] of a bridge.openOverlay call: the literals in the code, else
+// (ids kept in variables, h13 T3#3 08732f9d) the macro's own modified list,
+// which is [trigger, overlay] (checked live on T3).
+function overlayIds(code, response) {
+  const m = code.match(OPEN_OVERLAY_IDS_RE);
+  if (m) return [m[1], m[2]];
+  if (/bridge\s*\.\s*openOverlay\s*\(/.test(code) && response && Array.isArray(response.modified) && response.modified.length >= 2) {
+    return [String(response.modified[0]), String(response.modified[1])];
+  }
+  return null;
+}
+
+// `done` for a successful bridge.openOverlay, self-contained: the model often
+// returns its own string and drops the macro's MANUAL STEP text (h7 f7d2ca3a).
+function overlayDone(code, ids) {
+  const m = ids ? [null, ids[0], ids[1]] : code.match(OPEN_OVERLAY_IDS_RE);
+  if (!m) return MANUAL_DONE;
+  const pos = (code.match(/position\s*:\s*["'`](\w+)["'`]/) || [])[1];
+  const dim = (code.match(/dim\s*:\s*([\d.]+)/) || [])[1];
+  const outside = /closeOnOutside\s*:\s*true/.test(code);
+  const want = [pos ? "position " + pos : null, dim ? "background #000000 at " + Math.round(Number(dim) * 100) + "%" : null, outside ? "close when clicking outside" : null].filter(Boolean).join(", ");
+  return `Done: #${m[1]} opens overlay #${m[2]}. The overlay look is a MANUAL STEP (read-only in the Plugin API, no setter anywhere; OVERLAY SETTINGS below show the current values, not a failed write). Don't re-check or retry: answer now and tell the user to select frame #${m[2]} > Prototype panel > Overlay and set ${want || "position, background and click-outside"}.`;
 }
 
 // -> null (run the script) | { type: "peek" | "overlay", body }
@@ -2896,6 +3042,16 @@ function macroGuard(code) {
   if (typeof code !== "string" || RUN_ANYWAY_RE.test(code)) return null;
   if (!/bridge\s*\.\s*openOverlay\s*\(/.test(code) && (OVERLAY_LOOK_WRITE_RE.test(code) || RAW_OVERLAY_RE.test(code))) {
     const look = OVERLAY_LOOK_WRITE_RE.test(code);
+    const linked = look && (suggestInspect(code).node_ids || []).find(id => OVERLAY_LINKED.has(id));
+    if (linked) {
+      return {
+        type: "overlay",
+        body: {
+          ok: false, code: "OVERLAY_ALREADY_LINKED", not_run: true,
+          done: `Already done: bridge.openOverlay linked #${OVERLAY_LINKED.get(linked)} → overlay #${linked}. Its look is read-only for scripts (no setter anywhere): this is the MANUAL STEP. Answer now: tell the user to select frame #${linked} > Prototype panel > Overlay and set position, background and click-outside there.`
+        }
+      };
+    }
     return {
       type: "overlay",
       body: {
@@ -2948,11 +3104,15 @@ function macroGuard(code) {
 // (Proxy over {}: figma's own properties are non-configurable). Same line as
 // the script, so error line numbers stay. (2): diff is not forwarded.
 // ------------------------------------------------------------------
-const FONT_MEMO_PRELUDE = "figma = (function (real) { const m = new Map(); const lf = (f) => { if (!f || !f.family) return real.loadFontAsync(f); const k = f.family + '|' + f.style; if (!m.has(k)) m.set(k, real.loadFontAsync(f).catch(e => { m.delete(k); throw e; })); return m.get(k); }; return new Proxy({}, { get(t, k) { if (k === 'loadFontAsync') return lf; const v = real[k]; return typeof v === 'function' ? v.bind(real) : v; }, set(t, k, v) { real[k] = v; return true; }, has(t, k) { return k in real; } }); })(figma); ";
+const FONT_MEMO_PRELUDE = "ensureFont = (function (real) { const m = new Map(); return function (family, style) { const k = (family || 'Inter') + '|' + (style || 'Regular'); if (!m.has(k)) m.set(k, Promise.resolve(real(family, style)).catch(e => { m.delete(k); throw e; })); return m.get(k); }; })(ensureFont); figma = (function (real) { const m = new Map(); const lf = (f) => { if (!f || !f.family) return real.loadFontAsync(f); const k = f.family + '|' + f.style; if (!m.has(k)) m.set(k, real.loadFontAsync(f).catch(e => { m.delete(k); throw e; })); return m.get(k); }; return new Proxy({}, { get(t, k) { if (k === 'loadFontAsync') return lf; const v = real[k]; return typeof v === 'function' ? v.bind(real) : v; }, set(t, k, v) { real[k] = v; return true; }, has(t, k) { return k in real; } }); })(figma); ";
 const DIFF_OFF_NOTE = "diff:true was ignored: its \"before\" screenshot stalls the plugin for minutes (bench 15.10); the change ran without it.";
 
 function withFontMemo(code) {
-  return typeof code === "string" && /\bloadFontAsync\b/.test(code) ? FONT_MEMO_PRELUDE + code : code;
+  return typeof code === "string" && /\b(loadFontAsync|ensureFont)\b/.test(code) ? FONT_MEMO_PRELUDE + code : code;
+}
+
+function stripFontMemoCode(code) {
+  return typeof code === "string" && code.indexOf(FONT_MEMO_PRELUDE) === 0 ? code.slice(FONT_MEMO_PRELUDE.length) : code;
 }
 
 // The prelude must never show up in an error the agent reads.
@@ -2973,7 +3133,7 @@ function readGuard(code) {
   if (heavy) {
     const ids = suggestInspect(code, READ_STATE.lastIds);
     const args = heavy === "reactions"
-      ? (ids.node_ids ? { node_ids: ids.node_ids, view: "flow" } : { view: "map" })
+      ? (ids.node_ids ? { node_ids: ids.node_ids, view: "flow" } : { view: "flow" })
       : (ids.find || ids.node_ids ? ids : { view: "map" });
     return { type: "heavy", args, call: "figma_inspect " + JSON.stringify(args), reason: heavy, n: READ_STATE.streak };
   }
@@ -3095,14 +3255,23 @@ async function handleCallTool(name, args = {}) {
           };
         }
 
-        const nudge = response && response.success !== false ? readNudge(code, response) : null;
+        const ok = response && response.success !== false;
+        const opened = ok ? overlayIds(code, response) : null;
+        if (opened) OVERLAY_LINKED.set(opened[1], opened[0]);
+        const nudge = ok ? readNudge(code, response) : null;
         const lint = [rewrite.lint, pageWideScan(code) ? "Whole-page scan: " + PAGE_SCAN_NOTE : null, args.diff === true ? DIFF_OFF_NOTE : null].filter(Boolean).join(" ");
         const lead = {};
+        // done goes first: models act on the first thing they read (Argon audit #23)
+        if (ok && (opened || (REACTION_MACRO_RE.test(code) && /MANUAL STEP/.test(JSON.stringify(response.result || ""))))) lead.done = overlayDone(code, opened);
         if (nudge) lead.use_instead = nudge;
         if (lint) lead.lint = lint;
-        const after = response && response.success !== false && !nudge ? await afterWriteOutline(code, response, args.target) : null;
-        if (after) lead.after = "Already re-read for you, as they are now (no verify call needed):\n" + after;
-        if (response && response.success !== false && REACTION_MACRO_RE.test(code) && /MANUAL STEP/.test(JSON.stringify(response.result || ""))) lead.done = MANUAL_DONE;
+        let after = ok && !nudge ? await afterWriteOutline(code, response, args.target) : null;
+        if (after && lead.done) after = after.replace(OVERLAY_HEADER_RE, OVERLAY_HEADER_DONE);
+        if (after) {
+          lead.after = "Already re-read for you, as they are now (no verify call needed):\n" + after;
+          // "Nothing was created, modified ... no screenshot" next to a filled `after` reads as "nothing happened"
+          if (typeof response.captureNote === "string" && /Nothing was created, modified/.test(response.captureNote)) response.captureNote = null;
+        }
         return renderPluginResponse(response, null, {
           ...budgetOptions(args),
           lead: Object.keys(lead).length ? lead : null
@@ -3119,10 +3288,15 @@ async function handleCallTool(name, args = {}) {
         // A read has nothing to roll back or lint — keep only what was read.
         const plain = !args.compare && !args.like && !args.props && !args.check && (!args.view || args.view === "outline");
         const similar = plain && response.result ? similarHint(response.result.outline) : null;
+        // a flow re-read after bridge.openOverlay: say the look is the manual step, not a miss
+        if (response.result && typeof response.result.flow === "string" && OVERLAY_LINKED.size &&
+            [...OVERLAY_LINKED.keys()].some(id => response.result.flow.indexOf("#" + id + ":") !== -1)) {
+          response.result.flow = response.result.flow.replace(OVERLAY_HEADER_RE, OVERLAY_HEADER_DONE);
+        }
         return renderPluginResponse(
           { result: applyLineOffset(response.result, args.offset), resultStashed: response.resultStashed },
           null,
-          { ...budgetOptions(args), kind: "inspect", lead: similar ? { similar: similar } : null }
+          { ...budgetOptions(args), kind: plain ? "inspect" : "inspect-list", lead: similar ? { similar: similar } : null }
         );
       }
 
@@ -3135,7 +3309,15 @@ async function handleCallTool(name, args = {}) {
             });
 
         if (snap.status === "done") {
-          return renderPluginResponse(snap.response, { status: "done", job_id: snap.job_id }, budgetOptions(args));
+          // a write that ran long gets the same re-read as one that did not (h13 T6: job_status, then a verify turn)
+          let lead = null;
+          try {
+            const jr = snap.response;
+            const ok = jr && jr.success !== false;
+            const after = ok && snap.script ? await afterWriteOutline(snap.script, jr, args.target) : null;
+            if (after) lead = { after: "Already re-read for you, as they are now (no verify call needed):\n" + after };
+          } catch (e) { lead = null; }
+          return renderPluginResponse(snap.response, { status: "done", job_id: snap.job_id }, { ...budgetOptions(args), lead });
         }
         if (snap.ok === false) {
           return {
@@ -3845,8 +4027,8 @@ if (require.main === module) {
 } else {
   // Pure helpers for tests (tests/token-economy.test.js); nothing is bound.
   module.exports = {
-    TOOLS, SERVER_INSTRUCTIONS, ECONOMY, TIMEOUTS,
+    TOOLS, SERVER_INSTRUCTIONS, ECONOMY, TIMEOUTS, CAPS_NOTE, WHAT_YOU_GET,
     shrinkToBudget, pngSize, collectImages, buildStructuredResult, captureOptions, getActiveTools,
-    buildInspectCode, applyTokenBudget, byteLength, outputBudgetInfo, truncationNote, similarHint, afterWriteOutline, readNudge, classifyScript, suggestInspect, READ_STATE, resetReadStreak, readGuard, guardRefusal, pageWideScan, macroGuard, resultIds, withFontMemo, stripFontMemo, FONT_MEMO_PRELUDE, rewriteComponentize, compressValidationError, readJobSnapshot, jobs, MCP_CLIENT, activeOutputCeiling, applyLineOffset, checkAgentSyntax, buildErrorEnvelope
+    buildInspectCode, applyTokenBudget, byteLength, outputBudgetInfo, truncationNote, similarHint, afterWriteOutline, readNudge, classifyScript, suggestInspect, READ_STATE, resetReadStreak, readGuard, guardRefusal, pageWideScan, macroGuard, overlayCall, overlayDone, OVERLAY_LINKED, resultIds, overlayIds, withFontMemo, stripFontMemo, FONT_MEMO_PRELUDE, rewriteComponentize, compressValidationError, readJobSnapshot, jobs, MCP_CLIENT, activeOutputCeiling, applyLineOffset, checkAgentSyntax, buildErrorEnvelope
   };
 }

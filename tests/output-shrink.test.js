@@ -133,7 +133,7 @@ function inspectSection(s) { return { id: s.id, children: (s.children || []).map
 return { ref: inspectSection(ref), target: inspectSection(target) };`;
   const READ_TABLE = `const b = await figma.getNodeByIdAsync("194:85088");
 const headers = b.findOne(n => n.name === 'Заголовки');
-return headers.children.map(c => ({ name: c.name, w: c.width, text: (c.findOne(t => t.type === 'TEXT') || {}).characters }));`;
+return headers.children.map(cell => ({ name: cell.name, w: cell.width, text: (cell.findOne(t => t.type === 'TEXT') || {}).characters }));`;
   const READ_FONT = `const n = await figma.getNodeByIdAsync("194:84942"); return { fontName: n.fontName, size: n.fontSize };`;
   const READ_CB = `const n = await figma.getNodeByIdAsync("194:85120"); const cb = n.findAll(x => x.name === 'checkbox' && x.type === 'INSTANCE');
 return cb.map(c => c.componentProperties);`;
@@ -155,6 +155,17 @@ return cb.map(c => c.componentProperties);`;
   const s2 = srv.suggestInspect(READ_TABLE);
   check("suggest: a walk into table headers/rows -> view:table for the screen",
     JSON.stringify(s2) === JSON.stringify({ node_ids: ["194:85088"], view: "table" }), s2);
+  // #38: a page header is not a table header; node_id / ids are node_ids
+  const T7H = srv.suggestInspect(`const frame = await figma.getNodeByIdAsync("20:2"); const header = frame.children.find(c => c.name === 'Header'); return header.children.map(c => c.name);`);
+  check("suggest (#38): `const header = ...` + .children does not become view:table", !T7H || T7H.view !== "table", T7H);
+  const T8H = srv.suggestInspect(`const t = await figma.getNodeByIdAsync("20:2"); const header = t.children[0]; return header.children.map(c => c.name) + t.children[1].children.length + ' rows';`);
+  check("suggest (#38): header together with rows still reads as a table", T8H && T8H.view === "table", T8H);
+  const specIds = c => JSON.parse(/^const a = (.*);$/m.exec(c)[1]).ids;
+  check("inspect (#38): node_id and ids behave like node_ids",
+    JSON.stringify(specIds(srv.buildInspectCode({ node_id: "1-2" }))) === JSON.stringify(["1:2"]) && JSON.stringify(specIds(srv.buildInspectCode({ ids: ["1:2", "3:4"] }))) === JSON.stringify(["1:2", "3:4"]) &&
+    srv.buildInspectCode({ node_id: "1:2" }) === srv.buildInspectCode({ node_ids: ["1:2"] }));
+  const inspectProps38 = srv.TOOLS.find(t => t.name === "figma_inspect").inputSchema.properties;
+  check("inspect (#38): schema names the aliases", inspectProps38.node_id.type === "string" && inspectProps38.ids.type === "array");
   const s2b = srv.suggestInspect(`const n = await figma.getNodeByIdAsync("5:5"); const f = n.findOne(x => x.name === 'Футер'); return f.children.map(c => c.name);`);
   check("suggest: findOne of a non-table layer -> find + depth", JSON.stringify(s2b) === JSON.stringify({ node_ids: ["5:5"], find: "Футер", depth: 2 }), s2b);
   const s3 = srv.suggestInspect(READ_FONT);
@@ -281,6 +292,16 @@ console.log("\n== defaults and metadata ==");
   check("execute_code lists the macros", ["replaceWithInstance", "setProps", "setText", "shift", "moveInto", "fitSection", "context"].every(m => desc.includes("bridge." + m)), desc.slice(-500));
   check("server instructions stay within the ~2000-char cut and mention the macros",
     srv.SERVER_INSTRUCTIONS.length <= 2000 && /replaceWithInstance/.test(srv.SERVER_INSTRUCTIONS), srv.SERVER_INSTRUCTIONS.length);
+  // #41: the rules added to the descriptions must not turn them into manuals
+  // (each description is re-sent on every turn).
+  const lens = srv.TOOLS.map(t => [t.name, t.description.length]);
+  check("every tool description stays <= 2400 chars", lens.every(([, n]) => n <= 2400), lens.filter(([, n]) => n > 2000));
+  check("all tool descriptions together stay <= 9000 chars", lens.reduce((a, [, n]) => a + n, 0) <= 9000, lens.reduce((a, [, n]) => a + n, 0));
+  const insp = srv.TOOLS.find(t => t.name === "figma_inspect").description;
+  check("inspect decodes a:start/center (start = MIN, end = MAX)", /primaryAxisAlignItems\/counterAxisAlignItems/.test(insp) && /start = MIN/.test(insp) && /end = MAX/.test(insp));
+  check("inspect: compare gives REF lines for the write", /compare[^.]*REF lines/.test(insp));
+  check("execute_code: setText is the way for mixed styles, no characters = / getRangeFontName loop", /bridge\.setText\(textNode, 'new text'\)/.test(desc) && /never `characters =`/.test(desc) && /getRangeFontName/.test(desc));
+  check("use_instead caps note mentions like and compare", /like:'<ref id>'/.test(srv.CAPS_NOTE || "") && /compare:'<ref id>'/.test(srv.CAPS_NOTE || ""));
 }
 
 console.log("\n== 4.2.5: read guard, page scans, componentize, validation errors, stalled jobs ==");
@@ -341,6 +362,16 @@ console.log("\n== 4.2.5: read guard, page scans, componentize, validation errors
   const memo = srv.withFontMemo(`const t = await figma.getNodeByIdAsync("1:2");\nawait figma.loadFontAsync(t.fontName);`);
   check("withFontMemo (H5): prefix on the same line, line count unchanged", memo.startsWith(srv.FONT_MEMO_PRELUDE + "const t") && memo.split("\n").length === 2, memo.slice(0, 80));
   check("withFontMemo: code without loadFontAsync untouched", srv.withFontMemo("return 1;") === "return 1;");
+  // #37: ensureFont in a loop (16 calls) gets the prelude and loads each family|style once
+  const efCode = "for (let i = 0; i < 16; i++) await ensureFont(i % 2 ? 'Oswald' : 'Inter', i % 2 ? 'Light' : 'Medium');\nawait ensureFont();\nreturn 1;";
+  const efMemo = srv.withFontMemo(efCode);
+  check("withFontMemo (#37): code with ensureFont gets the prelude, line count unchanged", efMemo.startsWith(srv.FONT_MEMO_PRELUDE) && efMemo.split("\n").length === 3, efMemo.slice(0, 60));
+  const efCalls = [];
+  const efReal = async (family, style) => { efCalls.push(String(family) + "|" + String(style)); };
+  const AsyncFn = Object.getPrototypeOf(async function () {}).constructor;
+  AsyncFn("figma", "ensureFont", efMemo)({ loadFontAsync: async () => {} }, efReal).then(r => {
+    check("withFontMemo (#37): 16 ensureFont calls load each font once (+ the default one)", r === 1 && efCalls.length === 3 && efCalls.slice().sort().join() === "Inter|Medium,Oswald|Light,undefined|undefined", efCalls);
+  });
   const stripped = srv.stripFontMemo({ error: "boom\n  at line 1: " + srv.FONT_MEMO_PRELUDE + "const t = x;" });
   check("stripFontMemo: the prelude never reaches the agent", stripped.error === "boom\n  at line 1: const t = x;", stripped.error);
   check("withFontMemo: prelude parses as a script body", (() => { try { new (Object.getPrototypeOf(async function () {}).constructor)("figma", memo); return true; } catch (e) { return e.message; } })() === true);
@@ -352,13 +383,34 @@ console.log("\n== 4.2.5: read guard, page scans, componentize, validation errors
     look && look.type === "overlay" && look.body.code === "USE_OPEN_OVERLAY" && /READ-ONLY/.test(look.body.error) && /bridge\.openOverlay\("10:1975", "10:1999"/.test(look.body.use_instead), look);
   const raw = srv.macroGuard(`const b = figma.getNodeById("10:2009"); b.reactions = [{ trigger: { type: "ON_CLICK" }, actions: [{ type: "NODE", destinationId: "10:2033", navigation: "OVERLAY", transition: null }] }];`);
   check("macroGuard: hand-built OVERLAY reaction refused", raw && raw.type === "overlay" && /hand-built/.test(raw.body.error), raw);
+  // Argon #18: the frame whose look is set / the destinationId is the overlay, never the trigger
+  check("overlayCall: look write on one frame -> it is the overlay (2nd arg)", /openOverlay\(triggerId, "15:22150"/.test(srv.overlayCall(`const o = await figma.getNodeByIdAsync('15:22150'); o.overlayPositionType = 'BOTTOM_CENTER';`)), srv.overlayCall(`const o = await figma.getNodeByIdAsync('15:22150'); o.overlayPositionType = 'BOTTOM_CENTER';`));
+  check("overlayCall: raw reaction -> node is trigger, destinationId is overlay", /openOverlay\("10:2009", "10:2033"/.test(raw.body.use_instead), raw.body.use_instead);
+  // Argon #23: done is self-contained even when the script drops the macro's MANUAL STEP text
+  const od = srv.overlayDone(`await bridge.openOverlay('21:2062', '21:2086', { position: 'BOTTOM_CENTER', dim: 0.4, closeOnOutside: true }); return 'ok';`);
+  check("overlayDone: names both ids, the wanted look, says MANUAL STEP and not to re-check", /#21:2062 opens overlay #21:2086/.test(od) && /BOTTOM_CENTER/.test(od) && /40%/.test(od) && /clicking outside/.test(od) && /MANUAL STEP/.test(od) && /Don't re-check/.test(od), od);
+  // #39: ids kept in variables (h13 T3#3 08732f9d) come from the macro's own result
+  const VAR_CODE = `const btnId = '21:2062'; const sheetId = '21:2086'; const r = await bridge.openOverlay(btnId, sheetId, { position: 'BOTTOM_CENTER', dim: 0.4, closeOnOutside: true }); return r;`;
+  check("overlayIds (#39): literals win; variables -> response.modified [trigger, overlay]; no macro -> null",
+    JSON.stringify(srv.overlayIds(`await bridge.openOverlay('1:2', '3:4', {});`, null)) === JSON.stringify(["1:2", "3:4"]) &&
+    JSON.stringify(srv.overlayIds(VAR_CODE, { modified: ["21:2062", "21:2086"] })) === JSON.stringify(["21:2062", "21:2086"]) &&
+    srv.overlayIds(VAR_CODE, { modified: ["21:2062"] }) === null && srv.overlayIds("return 1;", { modified: ["1:1", "2:2"] }) === null);
+  const odv = srv.overlayDone(VAR_CODE, ["21:2062", "21:2086"]);
+  check("overlayDone (#39): with ids from the result names both and the wanted look", /#21:2062 opens overlay #21:2086/.test(odv) && /BOTTOM_CENTER/.test(odv) && /40%/.test(odv), odv);
+  const scr = srv.buildInspectCode({ node_ids: ["1:2", "3:4"], view: "flow", screens: true });
+  check("inspect (#39): screens:true -> the flow is built for the top-level screens of the ids", JSON.parse(/^const a = (.*);$/m.exec(scr)[1]).screens === true && /tops\.push\(n\.id\)/.test(scr), scr.slice(0, 200));
+  srv.OVERLAY_LINKED.set("21:2086", "21:2062");
+  const again = srv.macroGuard(`const t = await figma.getNodeByIdAsync('21:2086'); t.overlayPositionType = 'BOTTOM_CENTER'; return t.overlayPositionType;`);
+  check("macroGuard: look write on an overlay openOverlay already linked -> OVERLAY_ALREADY_LINKED with done, not run", again && again.body.code === "OVERLAY_ALREADY_LINKED" && again.body.not_run === true && /MANUAL STEP/.test(again.body.done) && /#21:2062/.test(again.body.done), again);
+  srv.OVERLAY_LINKED.clear();
   check("macroGuard: NAVIGATE reaction and run-anyway pass",
     srv.macroGuard(`b.reactions = [{ trigger: { type: "ON_CLICK" }, actions: [{ type: "NODE", destinationId: "1:3", navigation: "NAVIGATE", transition: null }] }];`) === null &&
     srv.macroGuard(`/* run-anyway */ o.overlayPositionType = 'CENTER';`) === null);
   check("execute_code description gives the openOverlay call", /bridge\.openOverlay\(triggerId, overlayFrameId, \{ position: 'BOTTOM_CENTER'/.test(srv.TOOLS.find(t => t.name === "figma_execute_code").description));
 
-  const fxAction = fs.readFileSync(path.join(__dirname, "fixtures", "set_reactions_action.txt"), "utf8");
-  const fxActions = fs.readFileSync(path.join(__dirname, "fixtures", "set_reactions_actions.txt"), "utf8");
+  // CRLF-normalized: a Windows checkout (core.autocrlf) turns the fixtures into CRLF.
+  const fxAction = fs.readFileSync(path.join(__dirname, "fixtures", "set_reactions_action.txt"), "utf8").replace(/\r\n/g, "\n");
+  const fxActions = fs.readFileSync(path.join(__dirname, "fixtures", "set_reactions_actions.txt"), "utf8").replace(/\r\n/g, "\n");
   const c1 = srv.compressValidationError(fxAction);
   check("validation: legacy `action` union (2.8 KB) -> the matching branch, under 500 bytes", c1.length < 500 && /transition: Required value missing/.test(c1) && /8 other variants skipped/.test(c1) && /at line 17/.test(c1), c1);
   check("validation: the missing `transition` gets the fix named", /needs the key `transition` \(null = instant\)/.test(c1), c1);
@@ -374,8 +426,8 @@ console.log("\n== 4.2.5: read guard, page scans, componentize, validation errors
   check("validation: thrown errors are compressed too", err.error.length < 700 && /8 other variants skipped/.test(err.error), err.error.length);
 
   const flowCode = srv.buildInspectCode({ node_ids: ["1:2"], view: "flow" });
-  check("inspect: view flow -> so.view = 'flow', result under `flow`, no ids falls back to the selection (never the page)",
-    /"view":"flow"/.test(flowCode) && /if \(a\.view === 'flow'\) so\.view = 'flow';/.test(flowCode) && /figma\.currentPage\.selection/.test(flowCode) && /out\.flow = 'pass node_ids/.test(flowCode), flowCode);
+  check("inspect: view flow -> so.view = 'flow', result under `flow`, no ids -> every top-level node of the page (#35)",
+    /"view":"flow"/.test(flowCode) && /if \(a\.view === 'flow'\) so\.view = 'flow';/.test(flowCode) && /figma\.currentPage\.children\.map/.test(flowCode) && !/pass node_ids/.test(flowCode), flowCode);
   check("inspect: flow result pages with offset", /^… lines 0–1 skipped\n/.test(srv.applyLineOffset({ flow: "a\nb\nc" }, 2).flow));
   check("write detection: reaction macros are writes", ["setReaction", "openOverlay", "closeOverlay"].every(m => srv.classifyScript(`await bridge.${m}("1:2", {});`) === "write"));
   const exDesc = srv.TOOLS.find(t => t.name === "figma_execute_code").description;
@@ -386,21 +438,68 @@ console.log("\n== 4.2.5: read guard, page scans, componentize, validation errors
   // similar: copies of one element with different style (bench T1)
   const SIM = [
     'FRAME "Фильтры / 1280" #1:1 1280x400 @0,0 [V gap24 pad32 fixed/fixed] fill:#F9FAFB',
-    '  FRAME "Мультиселект" #1:2 280x44 @0,0 [H gap8 pad10,14,10,14 fixed/fixed] fill:#FFFFFF stroke:#D0D5DD/1 r8 shadow:0,1/2 #101828@0.05',
-    '    … +4 deeper',
+    '  FRAME "Мультиселект" #1:2 280x44 @0,0 [H gap8 pad10,14,10,14 fixed/fixed] fill:#FFFFFF stroke:#D0D5DD/1 r8 shadow:0,1/2 #101828@0.05 children:2',
     '  FRAME "Dropdown" #1:3 280x44 @296,0 [H gap8 pad10,14,10,14 fixed/fixed] fill:#FFFFFF stroke:#D0D5DD/1 r4',
     '    FRAME "Frame 2131329286" #1:4 119x34 @14,4 [V gap2 pad0 hug/hug]',
     '      … +2 deeper',
     '    VECTOR "chevron" #1:5 16x16 @310,13 stroke:#667085/1.5',
-    '  FRAME "Select" #1:6 340x40 @32,153 [H gap8 pad8,12,8,12 fixed/fixed] fill:#FFFFFF stroke:#D0D5DD/1 r8 shadow:0,1/2 #101828@0.05',
-    '    … +4 deeper'
+    '  FRAME "Select" #1:6 340x40 @32,153 [H gap8 pad8,12,8,12 fixed/fixed] fill:#FFFFFF stroke:#D0D5DD/1 r8 shadow:0,1/2 #101828@0.05 children:2'
   ].join("\n");
   const sh = srv.similarHint(SIM);
   check("similar: 3 same-structure nodes with different style -> one hint naming them and compare", typeof sh === "string" && /3 nodes/.test(sh) && /#1:2 #1:3 #1:6/.test(sh) && /r, shadow, pad, h/.test(sh) && /compare:/.test(sh), sh);
   const SAME = SIM.replace(/ r4$/m, " r8 shadow:0,1/2 #101828@0.05").replace("pad8,12,8,12", "pad10,14,10,14").replace("340x40", "340x44");
   check("similar: same style (only width differs) -> no hint", srv.similarHint(SAME) === null, srv.similarHint(SAME));
+  // #36: fixture = outline of h7 T1 (0073d214, turn 2), a bare "Filters row" next to the real dropdowns
+  const H7 = [
+    'FRAME "Фильтры / 1280" #21:18 1280x400 @0,0 [V gap24 pad32,32,0,32 fixed/fixed] fill:#F9FAFB',
+    '  TEXT "Фильтры отчёта" #21:19 193x29 @32,32 size:hug/hug fill:#000000 Inter/Medium 24 "Фильтры отчёта"',
+    '  FRAME "Filters row" #21:26 576x44 @32,85 [H gap16 pad0 hug/hug]',
+    '    FRAME "Мультиселект потребителей" #21:27 280x44 @0,0 [H gap8 pad10,14,10,14 fixed/fixed a:between/center] fill:#FFFFFF stroke:#D0D5DD/1 r8 shadow:0,1/2 #101828@0.05 children:2',
+    '    FRAME "Dropdown" #21:32 280x44 @296,0 [H gap8 pad10,14,10,14 fixed/fixed a:between/center] fill:#FFFFFF stroke:#D0D5DD/1 r4 children:2',
+    'FRAME "Фильтры / 768" #21:20 768x400 @1400,0 [V gap24 pad32,32,0,32 fixed/fixed] fill:#F9FAFB',
+    '  FRAME "Мультиселект потребителей copy" #21:37 340x44 @32,85 [H gap8 pad10,14,10,14 fixed/fixed a:between/center] fill:#FFFFFF stroke:#E4E7EC/0,0,1,0 r8 shadow:0,1/2 #101828@0.05',
+    '    FRAME "Frame 2131329286" #21:38 119x34 @14,4.5 [V gap2 pad0 hug/hug] children:2',
+    '    VECTOR "chevron-down" #21:41 16x16 @310,13.5 size:fixed/fixed stroke:#667085/1.5',
+    '  FRAME "Select" #21:42 340x40 @32,153 [H gap8 pad8,12,8,12 fixed/fixed a:between/center] fill:#FFFFFF stroke:#D0D5DD/1 r8 shadow:0,1/2 #101828@0.05',
+    '    FRAME "Frame 2131329286" #21:43 89x34 @13,3 [V gap2 pad0 hug/hug] children:2',
+    '    VECTOR "chevron-down" #21:46 16x16 @311,12 size:fixed/fixed stroke:#667085/1.5'
+  ].join("\n");
+  const h7 = srv.similarHint(H7);
+  check("similar: bare row not grouped; dropdowns 21:27, 21:32 (children:N) and the copies are (#36)",
+    typeof h7 === "string" && !/#21:26\b/.test(h7) && /#21:27 #21:32 #21:37 #21:42/.test(h7), h7);
+  const REFS = H7 + '\nFRAME "Фильтры / 1280 (эталон)" #21:24 1280x300 @0,600 [V gap24 pad32 fixed/fixed] fill:#F9FAFB\n' +
+    '  FRAME "Мультиселект" #21:52 280x36 @32,85 [H gap8 pad6,14,6,14 fixed/fixed] fill:#FFFFFF stroke:#98A2B3/1 r2 children:2';
+  const hr = srv.similarHint(REFS);
+  check("similar: a node inside a frame named (эталон) is noted, not grouped (#36)",
+    /not in the group: #21:52/.test(hr) && !/ #21:52 /.test(hr.split(" (frames")[0]) && /#21:27 #21:32 #21:37 #21:42/.test(hr), hr);
+  const NESTED = 'PAGE "Фильтры" #21:17\n' + H7.split("\n").map(l => "  " + l).join("\n") + '\n  FRAME "Фильтры / 1280 (эталон)" #21:24 1280x300 @0,600 [V gap24 pad32 fixed/fixed] fill:#F9FAFB\n' +
+    '    FRAME "Мультиселект" #21:52 280x36 @32,85 [H gap8 pad6,14,6,14 fixed/fixed] fill:#FFFFFF stroke:#98A2B3/1 r2 children:2';
+  const hn = srv.similarHint(NESTED);
+  check("similar: the (эталон) frame one level below the page root is found by its ancestors too (#36)", /not in the group: [^)]*#21:52/.test(hn) && !/ #21:52 /.test(hn.split(" (frames")[0]) && /#21:27 #21:32 #21:37 #21:42/.test(hn), hn);
+  const HDR = [
+    'FRAME "Главная / 1280" #5:1 1280x800 @0,0 [V gap0 pad0 fixed/fixed] fill:#FFFFFF',
+    '  INSTANCE "Header" #5:2 1280x64 @0,0 [H gap16 pad0,24,0,24 fixed/fixed a:between/center] fill:#FFFFFF stroke:#EAECF0/0,0,1,0 →"Header" Size=Desktop children:3',
+    '    FRAME "Logo" #I5:2;7:1 120x24 @24,20 [H gap4 pad0 hug/hug] fill:#101828 children:2',
+    '    FRAME "Nav" #I5:2;7:4 400x24 @200,20 [H gap8 pad0 hug/hug] fill:#F2F4F7 children:2',
+    'FRAME "Главная / 768" #6:1 768x800 @1400,0 [V gap0 pad0 fixed/fixed] fill:#FFFFFF',
+    '  INSTANCE "Header" #6:2 768x64 @0,0 [H gap16 pad0,24,0,24 fixed/fixed a:between/center] fill:#FFFFFF stroke:#EAECF0/0,0,1,0 →"Header" Size=Tablet children:3',
+    '    FRAME "Logo" #I6:2;7:1 120x24 @24,20 [H gap4 pad0 hug/hug] fill:#101828 children:2',
+    '    FRAME "Nav" #I6:2;7:4 300x24 @200,20 [H gap8 pad0 hug/hug] fill:#F2F4F7 children:2',
+    'FRAME "Главная / 360" #7:1 360x800 @2300,0 [V gap0 pad0 fixed/fixed] fill:#FFFFFF',
+    '  INSTANCE "Header" #7:2 360x56 @0,0 [H gap16 pad0,16,0,16 fixed/fixed a:between/center] fill:#FFFFFF stroke:#EAECF0/0,0,1,0 →"Header" Size=Mobile children:3',
+    '    FRAME "Logo" #I7:2;7:1 96x24 @16,16 [H gap4 pad0 hug/hug] fill:#101828 children:2',
+    '    FRAME "Nav" #I7:2;7:4 200x24 @100,16 [H gap8 pad0 hug/hug] fill:#F2F4F7 children:2'
+  ].join("\n");
+  const hh = srv.similarHint(HDR);
+  check("similar: 3 Header instances with internals (#I...) -> no hint, the internals are never offered (#36)", hh === null || (!/#I/.test(hh) && !/Header/.test(hh) && hh.indexOf("#5:2") === -1), hh);
   check("similar: not an outline -> null", srv.similarHint(undefined) === null && srv.similarHint("FRAME \"a\" #1:1 10x10 @0,0") === null);
   check("inspect truncation note points at compare/ids, not lastResult", /compare/.test(srv.truncationNote({ from: 3764, to: 2249 }, true, false, "inspect")) && !/lastResult/.test(srv.truncationNote({ from: 3764, to: 2249 }, true, false, "inspect")));
+  const ln = srv.truncationNote({ from: 5000, to: 3000 }, true, false, "inspect-list");
+  check("props/compare truncation note: no 'outline'/'deeper', offers fewer ids/props and offset", !/outline|deeper/.test(ln) && /props/.test(ln) && /offset=K/.test(ln) && !/lastResult/.test(ln), ln);
+  const scriptErr = srv.buildErrorEnvelope(new Error("bridge.setTextt is not a function"));
+  check("script error naming bridge.xxx is not BRIDGE_OFFLINE and gets no plugin hint", scriptErr.code !== "BRIDGE_OFFLINE" && !/Antigravity Bridge plugin/.test(scriptErr.error), scriptErr);
+  const offline = srv.buildErrorEnvelope(new Error("Timeout waiting for Figma Plugin response."));
+  check("timeout is still BRIDGE_OFFLINE with the plugin hint", offline.code === "BRIDGE_OFFLINE" && /HINT:/.test(offline.error), offline);
 
   // stalled job: STOP once, then answer at once
   srv.jobs.set("job_stalled", { id: "job_stalled", status: "running", progress: [], createdAt: Date.now() - 400000, updatedAt: Date.now() - 400000 });

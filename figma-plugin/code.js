@@ -513,7 +513,16 @@ function readFont(n) {
   if (n.type !== "TEXT") return null;
   const f = n.fontName !== figma.mixed ? n.fontName : null;
   const size = n.fontSize !== figma.mixed ? readRound(n.fontSize) : "mixed";
-  return f ? f.family + "/" + f.style + " " + size : "mixed " + size;
+  if (f) return f.family + "/" + f.style + " " + size;
+  // mixed(Oswald/Medium+Oswald/Light) 16: which fonts, so a text edit does not have to read the ranges first
+  let names = "";
+  try {
+    if (typeof n.getRangeAllFontNames === "function") {
+      const all = n.getRangeAllFontNames(0, String(n.characters || "").length);
+      names = all.slice(0, 3).map(x => x.family + "/" + x.style).join("+") + (all.length > 3 ? "+…" : "");
+    }
+  } catch (e) {}
+  return "mixed" + (names ? "(" + names + ")" : "") + " " + size;
 }
 
 // The facts session 9672b93e had to fetch with ~20 extra props calls are put
@@ -576,7 +585,10 @@ function readChildSizing(n) {
 // fill:… stroke:…/w r8 shadow:… "text…"
 function describeNodeLine(n, textChars) {
   if (!n) return "MISSING";
-  const parts = [n.type, JSON.stringify(n.name), "#" + n.id];
+  // A TEXT layer named after its own text (Figma's default) shows the text once:
+  // the name doubled the line (h13 T1 outline: 3828 B, shrunk).
+  const sameName = n.type === "TEXT" && n.name === String(n.characters || "");
+  const parts = sameName ? [n.type, "#" + n.id] : [n.type, JSON.stringify(n.name), "#" + n.id];
   if (typeof n.width === "number") parts.push(readRound(n.width) + "x" + readRound(n.height));
   if (typeof n.x === "number" && n.type !== "PAGE") parts.push("@" + readRound(n.x) + "," + readRound(n.y));
   const layout = readLayout(n);
@@ -689,7 +701,7 @@ function summarizeFlow(refs) {
   const screens = {};
   const order = [];
   const overlays = {};
-  let scanned = 0, links = 0, sources = 0, partial = false;
+  let scanned = 0, links = 0, sources = 0, partial = false, rootsDone = 0;
   const visit = (n) => {
     scanned++;
     if (Array.isArray(n.reactions) && n.reactions.length) {
@@ -708,6 +720,7 @@ function summarizeFlow(refs) {
     }
   };
   list.forEach(ref => {
+    if (partial) return;
     const root = readNode(ref);
     if (!root) return;
     const stack = [root];
@@ -717,8 +730,10 @@ function summarizeFlow(refs) {
       visit(n);
       if ("children" in n && n.children) for (let i = n.children.length - 1; i >= 0; i--) stack.push(n.children[i]);
     }
+    if (!partial) rootsDone++;
   });
-  const lines = ["FLOW: " + links + " link" + (links === 1 ? "" : "s") + " from " + sources + " node" + (sources === 1 ? "" : "s") + " in " + order.length + " screen" + (order.length === 1 ? "" : "s") + " (scanned " + scanned + " nodes" + (partial ? ", STOPPED at the scan cap: pass a smaller section" : "") + ")"];
+  const lines = ["FLOW: " + links + " link" + (links === 1 ? "" : "s") + " from " + sources + " node" + (sources === 1 ? "" : "s") + " in " + order.length + " screen" + (order.length === 1 ? "" : "s") + " (scanned " + scanned + " nodes" +
+    (partial ? ", STOPPED at the scan cap: scanned " + rootsDone + " of " + list.length + " top-level nodes, pass node_ids (a section or screens) for the rest" : "") + ")"];
   order.forEach(id => { lines.push(screens[id].head); screens[id].lines.forEach(l => lines.push(l)); });
   const ov = Object.keys(overlays);
   if (ov.length) { lines.push("OVERLAY SETTINGS (frame properties of the overlay target, not part of the action)"); ov.forEach(id => lines.push("  " + flowOverlayText(overlays[id]))); }
@@ -1082,11 +1097,22 @@ function inspectNodes(refs, props) {
 // Session 9672b93e spent ~60 figma_inspect calls diffing a correct dropdown
 // against six broken copies prop by prop. This walks the reference and each
 // target in parallel (children matched by type+name, then by position) and
-// lists only what differs. Geometry (x/y/width/height) and text content are
-// not compared: breakpoints legitimately differ there.
+// lists only what differs. x/y/width and text content are not compared:
+// breakpoints legitimately differ there. Height is (h13 T1: Select 40 vs 44 was
+// the one fix the diff did not show, so the model read props after it).
 // ---------------------------------------------------------------------------
+// Stroke weight per side "top,right,bottom,left" (uniform weight repeated).
+function strokeSides(n) {
+  if (typeof n.strokeTopWeight === "number" && (n.strokeWeight === figma.mixed || typeof n.strokeWeight !== "number")) {
+    return [n.strokeTopWeight, n.strokeRightWeight, n.strokeBottomWeight, n.strokeLeftWeight].map(readRound).join(",");
+  }
+  if (typeof n.strokeWeight === "number") { const w = readRound(n.strokeWeight); return [w, w, w, w].join(","); }
+  return null;
+}
+
 function shapeOf(n) {
   const s = { type: n.type };
+  if (n.type !== "TEXT" && typeof n.height === "number") s.height = readRound(n.height);
   const layout = readLayout(n);
   if (layout) s.layout = layout;
   const al = readAlign(n);
@@ -1095,7 +1121,15 @@ function shapeOf(n) {
   if (sizing) s.size = sizing;
   if (n.layoutPositioning === "ABSOLUTE") s.abs = "yes";
   if ("fills" in n) { const f = readPaints(n.fills); if (f) s.fill = f; }
-  if ("strokes" in n) { const st = readPaints(n.strokes); if (st) s.stroke = st + readStrokeWeight(n); }
+  if ("strokes" in n) {
+    const st = readPaints(n.strokes);
+    if (st) {
+      s.stroke = st;
+      const sides = strokeSides(n);
+      if (sides) s["stroke sides"] = sides;
+      if (n.strokeAlign) s.strokeAlign = n.strokeAlign;
+    }
+  }
   const r = readRadius(n);
   if (r) s.radius = r;
   const fx = readEffects(n);
@@ -1118,7 +1152,7 @@ function compareKids(n) {
 // describeNodeLine with the id first and the name dropped (the path already
 // shows it): #12:3 TEXT 120x16 @0,0 size:fill/hug font "…" children:2
 function refLine(n) {
-  const line = describeNodeLine(n).replace(/^(\S+) "(?:[^"\\]|\\.)*" (#\S+)/, "$2 $1");
+  const line = describeNodeLine(n).replace(/^(\S+) (?:"(?:[^"\\]|\\.)*" )?(#\S+)/, "$2 $1");
   const kids = compareKids(n).length;
   return kids ? line + " children:" + kids : line;
 }
@@ -1143,15 +1177,74 @@ function matchChildren(refKids, tgtKids) {
   return { pairs, missing: stillMissing, extra: tgtKids.filter(c => !used.has(c)) };
 }
 
+// The exact values of a reference node, ready to write (h13 T1: after compare
+// the model read props of the reference to get them, 15 extra turns over 3 runs):
+// REF #1:2: height 44, H pad 10,14,10,14, gap 8, fill #FFFFFF, stroke #D0D5DD 1 INSIDE all sides, radius 8, shadow DROP 0,1 blur 2 #101828@0.05
+function refSpecLine(n, path) {
+  const p = [];
+  if (n.type !== "TEXT" && typeof n.height === "number") p.push("height " + readRound(n.height));
+  if ("layoutMode" in n && n.layoutMode && n.layoutMode !== "NONE") {
+    p.push(n.layoutMode === "VERTICAL" ? "V" : n.layoutMode === "HORIZONTAL" ? "H" : n.layoutMode);
+    p.push("pad " + [n.paddingTop, n.paddingRight, n.paddingBottom, n.paddingLeft].map(readRound).join(","));
+    p.push("gap " + readRound(n.itemSpacing));
+    const al = readAlign(n);
+    if (al) p.push(al);
+  }
+  const sizing = [n.layoutSizingHorizontal, n.layoutSizingVertical].filter(Boolean).map(x => String(x).toLowerCase()).join("/");
+  if (sizing && n.parent && "layoutMode" in n.parent && n.parent.layoutMode && n.parent.layoutMode !== "NONE") p.push("size " + sizing);
+  if (n.layoutPositioning === "ABSOLUTE") p.push("absolute");
+  if ("fills" in n) { const f = readPaints(n.fills); if (f) p.push("fill " + f); }
+  if ("strokes" in n) {
+    const st = readPaints(n.strokes);
+    if (st) {
+      const sides = strokeSides(n);
+      const same = sides && sides.split(",").every(w => w === sides.split(",")[0]);
+      p.push("stroke " + st + (sides ? (same ? " " + sides.split(",")[0] : "") : "") + (n.strokeAlign ? " " + n.strokeAlign : "") +
+        (sides ? (same ? " all sides" : " sides " + sides) : ""));
+    }
+  }
+  const r = readRadius(n);
+  if (r) p.push("radius " + r.slice(1));
+  if (Array.isArray(n.effects)) n.effects.filter(e => e && e.visible !== false).forEach(e => {
+    if (e.type === "DROP_SHADOW" || e.type === "INNER_SHADOW") {
+      const off = e.offset || { x: 0, y: 0 };
+      p.push("shadow " + (e.type === "DROP_SHADOW" ? "DROP " : "INNER ") + readRound(off.x) + "," + readRound(off.y) + " blur " + readRound(e.radius) +
+        (e.spread ? " spread " + readRound(e.spread) : "") + " " + readHex(e.color, e.color ? e.color.a : 1));
+    } else p.push((e.type === "BACKGROUND_BLUR" ? "bg-blur " : "blur ") + readRound(e.radius));
+  });
+  if (typeof n.opacity === "number" && n.opacity < 1) p.push("opacity " + readRound(n.opacity));
+  if (n.clipsContent === true) p.push("clip");
+  if (n.type === "TEXT") p.push("font " + readFont(n));
+  if (n.type === "INSTANCE") p.push(readInstanceOf(n));
+  return "REF " + (path ? path + " " : "") + "#" + n.id + ": " + (p.join(", ") || n.type);
+}
+
+const REF_LINES_MAX = 3;
+const REF_TAIL = " - copy from the ref node in figma_execute_code, no props read needed";
+
+// [{ node, path }] of reference nodes with differing props -> the REF lines.
+function refSpecLines(list) {
+  const seen = new Set();
+  const uniq = list.filter(x => !seen.has(x.node.id) && seen.add(x.node.id));
+  if (!uniq.length) return [];
+  const lines = uniq.slice(0, REF_LINES_MAX).map(x => refSpecLine(x.node, x.path));
+  if (uniq.length > REF_LINES_MAX) lines.push("… +" + (uniq.length - REF_LINES_MAX) + " more ref nodes differ");
+  lines[lines.length - 1] += REF_TAIL;
+  return lines;
+}
+
 // One block per target: a header line, then one line per node that differs:
 //   <path> #targetId: key target (ref value); …
-// "identical" when nothing differs. opts: depth (8), maxLines (200).
+// "identical" when nothing differs; then REF lines (refSpecLine) of the
+// reference nodes that differ. opts: depth (8), maxLines (200), refSink
+// (an array: REF nodes go there instead of into the text — likeNodes).
 function compareNodes(refRef, targets, opts) {
   const o = opts || {};
   const ref = readNode(refRef);
   if (!ref) return "MISSING reference " + refRef;
   const maxDepth = Number.isFinite(o.depth) ? o.depth : 8;
   const maxLines = Number.isFinite(o.maxLines) ? o.maxLines : 200;
+  const refNodes = o.refSink || [];
   const blocks = [];
   (Array.isArray(targets) ? targets : [targets]).forEach(tRef => {
     const tgt = readNode(tRef);
@@ -1168,7 +1261,11 @@ function compareNodes(refRef, targets, opts) {
         if (a[k] === b[k]) return;
         out.push(k + " " + (b[k] === undefined ? "none" : b[k]) + " (ref " + (a[k] === undefined ? "none" : a[k]) + ")");
       });
-      if (out.length) { diffs += out.length; lines.push("  " + (path || ".") + " #" + t.id + ": " + out.join("; ")); }
+      if (out.length) {
+        diffs += out.length; lines.push("  " + (path || ".") + " #" + t.id + ": " + out.join("; "));
+        // a rename or another variant alone needs no values to copy
+        if (out.some(x => !/^(name|component) /.test(x))) refNodes.push({ node: r, path: path || "" });
+      }
       if (a.type !== b.type || level >= maxDepth) return;
       // Another variant brings its own insides: the variant line is the fix,
       // its children would only add noise (session 87bd6b0a: 23 lines per copy).
@@ -1208,6 +1305,7 @@ function compareNodes(refRef, targets, opts) {
     blocks.push("#" + tgt.id + " " + JSON.stringify(tgt.name) + " vs ref #" + ref.id + ": " + (diffs ? diffs + " diffs" : "identical"));
     lines.forEach(l => blocks.push(l));
   });
+  if (!o.refSink) refSpecLines(refNodes).forEach(l => blocks.push(l));
   return blocks.join("\n");
 }
 
@@ -1320,8 +1418,10 @@ function likeNodes(refList, rootList, opts) {
     // breakpoint is printed once, with the copies it applies to.
     const groups = [];
     const byKey = {};
+    const refSink = [];
+    const co = Object.assign({}, o, { refSink });
     copies.forEach((c, k) => {
-      const lines = compareNodes(ref, [c], o).split("\n");
+      const lines = compareNodes(ref, [c], co).split("\n");
       const same = /: identical$/.test(lines[0]);
       const body = same ? [] : lines.slice(1);
       const key = same ? "=" : body.map(l => l.replace(/ #[^\s:]+/g, "")).join("\n");
@@ -1335,6 +1435,7 @@ function likeNodes(refList, rootList, opts) {
       out.push(n + " — " + g.head + (g.ids.length > 1 ? " (ids below: " + g.ids[0].split(" ")[0] + ")" : "") + ": " + g.ids.join(", "));
       g.body.forEach(l => out.push(l));
     });
+    refSpecLines(refSink).forEach(l => out.push(l));
   });
   return out.join("\n");
 }
@@ -1399,7 +1500,9 @@ function findNodes(query, opts) {
     return {
       id: n.id, name: n.name, type: n.type,
       text: String(n.characters || "").slice(0, 40),
-      frame: top ? top.name + " #" + top.id : null
+      frame: top ? top.name + " #" + top.id : null,
+      // the layer the text sits in (a button frame to click, a row to edit), unless that is the screen itself
+      parent: n.parent && n.parent !== top ? n.parent.type + " " + JSON.stringify(n.parent.name) + " #" + n.parent.id : null
     };
   });
   if (matches.length > limit) out.push("… +" + (matches.length - limit) + " more (" + matches.length + " total) — narrow with root/type/limit");
@@ -1483,6 +1586,49 @@ async function loadFontsForTextNode(textNode) {
   for (const font of wanted) {
     await ensureFont(font.family, font.style);
   }
+}
+
+// New text for a TEXT node without losing its font styles. Plain `characters =`
+// gives the whole text the style of one place (T6: "Oswald Medium" first word +
+// "Oswald Light" tail became all one style in 12 of 12 runs). The old text's
+// words carry their style; new word i takes the style of old word i (words
+// beyond the old count take the last one), the whitespace before a word goes
+// with that word: first word -> first style, tail from the first space -> the
+// second style.
+function textWords(text) {
+  const out = [];
+  const re = /\S+/g;
+  let m;
+  while ((m = re.exec(text))) out.push({ start: m.index, end: m.index + m[0].length });
+  return out;
+}
+
+function fontRangesForNewText(node, value) {
+  if (node.fontName !== figma.mixed || typeof node.getStyledTextSegments !== "function" || typeof node.setRangeFontName !== "function") return null;
+  const segs = node.getStyledTextSegments(["fontName"]);
+  const oldWords = textWords(String(node.characters || ""));
+  const newWords = textWords(value);
+  if (!segs.length || !oldWords.length || !newWords.length) return null;
+  const fontAt = i => { const s = segs.find(x => i >= x.start && i < x.end) || segs[segs.length - 1]; return s.fontName; };
+  const wordFonts = oldWords.map(w => fontAt(w.start));
+  const ranges = [];
+  newWords.forEach((w, i) => {
+    const start = i === 0 ? 0 : newWords[i - 1].end;
+    const end = i === newWords.length - 1 ? value.length : w.end;
+    const font = wordFonts[Math.min(i, wordFonts.length - 1)];
+    const last = ranges[ranges.length - 1];
+    if (last && last.font.family === font.family && last.font.style === font.style && last.end === start) last.end = end;
+    else ranges.push({ start: start, end: end, font: font });
+  });
+  return ranges;
+}
+
+async function setTextKeepingFonts(node, value) {
+  await loadFontsForTextNode(node);
+  const ranges = fontRangesForNewText(node, value);
+  trackModification(node);
+  node.characters = value;
+  if (ranges) ranges.forEach(r => { if (r.end > r.start) node.setRangeFontName(r.start, r.end, r.font); });
 }
 
 // ==========================================================================
@@ -1784,6 +1930,10 @@ function createBridgeApi() {
   // every key resolved.
   api.setText = async function (root, map) {
     const r = macroNodes(root, "setText")[0];
+    if (typeof map === "string") {
+      if (r.type !== "TEXT") throw new Error("bridge.setText(node, \"string\"): \"" + r.name + "\" is a " + r.type + ", not a TEXT layer. For layers inside it: bridge.setText(root, { layerNameOrId: \"text\" })");
+      map = { [r.id]: map };
+    }
     const texts = (r.type === "TEXT" ? [r] : []).concat(scanNodes(r, ["TEXT"]));
     const plan = [];
     Object.keys(map || {}).forEach(key => {
@@ -1801,9 +1951,7 @@ function createBridgeApi() {
     });
     const set = [];
     for (const step of plan) {
-      await loadFontsForTextNode(step.node);
-      trackModification(step.node);
-      step.node.characters = step.value;
+      await setTextKeepingFonts(step.node, step.value);
       set.push(step.node.id);
     }
     return { set: set };
@@ -2107,7 +2255,7 @@ function createBridgeApi() {
       },
       macros: {
         "bridge.setProps(instance, { Name: value })": "sets component properties by readable name (\"Label\" matches \"Label#12:3\", case-insensitive); INSTANCE_SWAP takes a component node or id; unknown name -> error listing the real properties and variants; returns the instance",
-        "await bridge.setText(root, { layerNameOrId: \"text\" })": "loads every font of the node, sets characters on TEXT layers found by id or exact name under root; unknown layer -> error listing text layers; returns { set: [ids] }",
+        "await bridge.setText(root, { layerNameOrId: \"text\" })": "loads every font of the node, sets characters on TEXT layers found by id or exact name under root; unknown layer -> error listing text layers; returns { set: [ids] }. Use it to replace text instead of `characters =`: it KEEPS font styles by words (first word keeps its style, the tail from the first space keeps its own; with more styles word by word, extra words take the last). Also bridge.setText(textNodeOrId, \"new text\") for one TEXT node",
         "await bridge.replaceWithInstance(target, component, { props, text, keepSize: false, remove: true })": "puts an instance of COMPONENT / COMPONENT_SET (default variant) / INSTANCE / id into target's slot (same index, position or AutoLayout sizing), applies props/text, removes target; returns the instance",
         "bridge.shift(nodesOrIds, { dx: 0, dy: 0 })": "moves nodes by an offset; returns the count",
         "bridge.moveInto(nodesOrIds, container, { layout: \"none\" | \"row\" | \"column\", gap: 100, padding: 0 })": "reparents nodes; none keeps their canvas position, row/column lays them out; returns ids",

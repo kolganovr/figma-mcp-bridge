@@ -405,6 +405,10 @@ let inspectDone = Promise.resolve();
   check("outline: a node cut off by depth says how many children it has", / children:2$/.test(ddLine), ddLine);
   const ddKids = api.summarize(dd.id, { depth: 1 }).split("\n");
   check("outline: child of an AutoLayout parent shows its sizing", /TEXT "Label" .* size:fill\/hug/.test(ddKids[1]), ddKids[1]);
+  const autoNamed = makeNode("TEXT", "Выберите город", { characters: "Выберите город", fontName: { family: "Inter", style: "Regular" }, fontSize: 14 });
+  figma.currentPage.appendChild(autoNamed);
+  const anLine = api.summarize(autoNamed.id, { depth: 0 });
+  check("outline: TEXT named after its text shows the text once (#32)", anLine.indexOf("TEXT #" + autoNamed.id + " ") === 0 && anLine.split("Выберите город").length === 2, anLine);
   check("outline: absolute child is marked", / abs$/.test(ddKids[2]), ddKids[2]);
 
   const deep = makeNode("FRAME", "Deep", { width: 10, height: 10 });
@@ -428,13 +432,30 @@ let inspectDone = Promise.resolve();
   figma.currentPage.appendChild(ddBad);
   const diff = api.compare(dd.id, [ddBad.id]);
   check("compare: header names target, reference and diff count", new RegExp("^#" + ddBad.id + " \"Dropdown copy\" vs ref #" + dd.id + ": \\d+ diffs").test(diff), diff);
-  check("compare: root layout and stroke differences, target first", /layout H gap18 pad0 fixed\/hug \(ref V gap0 pad0 fixed\/hug\)/.test(diff) && /stroke #E8EAF0\/1 \(ref #E8EAF0\/0,1,1,1\)/.test(diff) && /effects none \(ref shadow/.test(diff), diff);
+  check("compare: root layout and stroke differences, target first", /layout H gap18 pad0 fixed\/hug \(ref V gap0 pad0 fixed\/hug\)/.test(diff) && /stroke sides 1,1,1,1 \(ref 0,1,1,1\)/.test(diff) && /effects none \(ref shadow/.test(diff), diff);
   check("compare: children matched by name, text content ignored", /Label #\S+: size hug\/hug \(ref fill\/hug\)$/m.test(diff) && !/Other text/.test(diff), diff);
   check("compare: a renamed child of the same type is paired, the name shown", /Bar #\S+: name "Extra" \(ref "Bar"\); abs none \(ref yes\)/.test(diff), diff);
   dd.appendChild(makeNode("ELLIPSE", "Dot"));
   ddBad.appendChild(makeNode("VECTOR", "Icon"));
   const diff2 = api.compare(dd.id, [ddBad.id]);
   check("compare: missing and extra children", /Dot: missing in target \(ref #\S+ ELLIPSE 100x100/.test(diff2) && /Icon #\S+: extra in target \(VECTOR\)/.test(diff2), diff2);
+  // #31: height, strokeAlign and per-side weights in the diff, then the REF line with exact values.
+  const mkSelect = (h, sides) => makeNode("FRAME", "Select", Object.assign({
+    width: 320, height: h, layoutMode: "HORIZONTAL", itemSpacing: 8, paddingTop: 10, paddingRight: 14, paddingBottom: 10, paddingLeft: 14,
+    fills: [{ type: "SOLID", color: { r: 1, g: 1, b: 1 } }], strokes: [{ type: "SOLID", color: { r: 208 / 255, g: 213 / 255, b: 221 / 255 } }],
+    strokeAlign: sides ? "CENTER" : "INSIDE", cornerRadius: 8,
+    effects: [{ type: "DROP_SHADOW", visible: true, offset: { x: 0, y: 1 }, radius: 2, color: { r: 16 / 255, g: 24 / 255, b: 40 / 255, a: 0.05 } }]
+  }, sides ? { strokeWeight: figma.mixed, strokeTopWeight: 0, strokeRightWeight: 0, strokeBottomWeight: 1, strokeLeftWeight: 0 } : { strokeWeight: 1 }));
+  const selRef = mkSelect(44, false), selBad = mkSelect(40, true);
+  selBad.width = 280;
+  figma.currentPage.appendChild(selRef); figma.currentPage.appendChild(selBad);
+  const sdiff = api.compare(selRef.id, [selBad.id]);
+  check("compare: height and stroke sides/align in the diff, width not (#31)",
+    /height 40 \(ref 44\)/.test(sdiff) && /stroke sides 0,0,1,0 \(ref 1,1,1,1\)/.test(sdiff) && /strokeAlign CENTER \(ref INSIDE\)/.test(sdiff) && !/width|280/.test(sdiff), sdiff);
+  const refLn = sdiff.split("\n").pop();
+  check("compare: ends with the REF line of exact values to copy (#31)",
+    refLn === "REF #" + selRef.id + ": height 44, H, pad 10,14,10,14, gap 8, fill #FFFFFF, stroke #D0D5DD 1 INSIDE all sides, radius 8, shadow DROP 0,1 blur 2 #101828@0.05 - copy from the ref node in figma_execute_code, no props read needed", refLn);
+  check("compare: identical -> no REF line", !/REF/.test(api.compare(selRef.id, selRef.id)));
   check("compare: a node against itself is identical", /: identical$/.test(api.compare(dd.id, dd.id)), api.compare(dd.id, dd.id));
 
   // 4.2.4: session 87bd6b0a — rows whose texts sit in an extra auto-named frame.
@@ -510,8 +531,39 @@ let inspectDone = Promise.resolve();
     check("figma_inspect: find_text returns id, text and frame per hit", typeof ft.found === "string" && ft.found.indexOf("#" + title.id) === 0 && /«Submit your application/.test(ft.found) && / in /.test(ft.found), ft);
     const ctx = await inspect({ node_ids: [card.id], context: true });
     check("figma_inspect: context keyed by id, next to the outline", ctx.context && ctx.context[card.id] && ctx.context[card.id].node.indexOf("#" + card.id) !== -1 && typeof ctx.context[card.id].pageWidths === "string" && typeof ctx.outline === "string", ctx);
+    // H6 (4f99b3a, moved onto the 4.2.6 base): a few hits come with their subtree
+    const fTree = await inspect({ find: "Deep" });
+    check("figma_inspect: find with few hits -> their subtree, no follow-up read (4.2.6)", fTree.found.split("\n").length === 6 && !/children:/.test(fTree.found), fTree.found);
+    const fNested = await inspect({ node_ids: [deep.id], find: "L" });
+    const nestedLines = fNested.found.split("\n");
+    check("figma_inspect: hits nested in another hit are shown once, inside its tree (#34)", nestedLines.length === 5 && /^FRAME "L0"/.test(nestedLines[0]) && /^ {8}FRAME "L4"/.test(nestedLines[4]), fNested.found);
+    const fMany = await inspect({ node_ids: [card.id], find: "row 1" });
+    check("figma_inspect: find with more than 8 hits -> one line each", fMany.found.split("\n").length === 11 && fMany.found.split("\n").every(l => !/^ /.test(l)), fMany.found);
+    // find_text names the layer the text sits in
+    const ftBox = makeNode("FRAME", "Фильтры", { layoutMode: "HORIZONTAL" });
+    const ftScreen = makeNode("FRAME", "Каталог");
+    const ftTxt = makeNode("TEXT", "Label", { characters: "Фильтры", fontName: { family: "Inter", style: "Regular" }, fontSize: 14 });
+    ftBox.appendChild(ftTxt); ftScreen.appendChild(ftBox); figma.currentPage.appendChild(ftScreen);
+    const ftp = await inspect({ node_ids: [ftScreen.id], find_text: "Фильтры" });
+    check("figma_inspect: find_text gives the parent layer and the screen (#34)", ftp.found === "#" + ftTxt.id + ' "Label" «Фильтры» in FRAME "Фильтры" #' + ftBox.id + ', screen "Каталог"', ftp.found);
     const cmp = await inspect({ node_ids: [ddBad.id], compare: dd.id });
     check("figma_inspect: compare -> diff text, no outline", typeof cmp.compare === "string" && /diffs/.test(cmp.compare) && !cmp.outline, cmp);
+    // #33: the auto-depth outline plus the real reply envelope stays within the 3500 B budget, and uses it.
+    {
+      const big = makeNode("FRAME", "Big screen", { layoutMode: "VERTICAL" });
+      for (let i = 0; i < 37; i++) {
+        const sec = makeNode("FRAME", "Section " + i, { layoutMode: "VERTICAL" });
+        for (let j = 0; j < 6; j++) sec.appendChild(makeNode("TEXT", "Label " + i + "-" + j, { characters: "Подпись " + i + "-" + j, fontName: { family: "Inter", style: "Regular" }, fontSize: 14 }));
+        big.appendChild(sec);
+      }
+      figma.currentPage.appendChild(big);
+      const srvMod = require(path.join(ROOT, "figma", "index.js"));
+      const big1 = await inspect({ node_ids: [big.id] });
+      const text = srvMod.buildStructuredResult({ result: big1, durationMs: 1234 }, null, { kind: "inspect" });
+      const bytes = Buffer.byteLength(text);
+      check("auto depth: outline + envelope fit 3500 B untruncated and use the room (#33)",
+        bytes <= 3500 && !JSON.parse(text).truncated && bytes >= 3000 && /\+\d+ more|children:/.test(big1.outline), bytes + " " + JSON.stringify(JSON.parse(text).truncated));
+    }
     const auto = await inspect({ node_ids: [deep.id] });
     check("figma_inspect: no depth -> the whole small tree in one read", auto.outline.split("\n").length === 6, auto.outline);
     const reac = await inspect({ node_ids: [card.id], props: ["reactions"] });
@@ -860,6 +912,36 @@ console.log("\n== setText ==");
     const msg = await rejects(() => api.setText(card, { Title: "Never", Nope: "x" }));
     check("setText: unknown layer -> error listing text layers", /no TEXT layer "Nope"/.test(msg) && /"Title" #/.test(msg) && /"Body" #/.test(msg), msg);
     check("setText: nothing written when any key is unknown", title.characters === "Self");
+
+    // #37: styles survive by words. Old text "Premium plan details": first word Medium, the tail (from the first space) Light.
+    const OM = { family: "Oswald", style: "Medium" }, OL = { family: "Oswald", style: "Light" };
+    const mkMixed = (chars, segs) => {
+      const n = makeNode("TEXT", "Caption", { characters: chars, fontName: figma.mixed, fontSize: 16 });
+      n.rangeFonts = [];
+      n.getStyledTextSegments = () => segs;
+      n.getRangeAllFontNames = () => segs.map(x => x.fontName).filter((f, i, a) => a.findIndex(g => g.style === f.style) === i);
+      n.setRangeFontName = (a, b, f) => n.rangeFonts.push([a, b, f.style]);
+      return n;
+    };
+    const cap = mkMixed("Premium plan details", [{ start: 0, end: 7, fontName: OM }, { start: 7, end: 20, fontName: OL }]);
+    card.appendChild(cap);
+    fontCalls.length = 0;
+    await api.setText(cap, "Бизнес тариф для команд");
+    check("setText: new text via the TEXT node; first word keeps Medium, the tail from the first space Light (#37)",
+      cap.characters === "Бизнес тариф для команд" && JSON.stringify(cap.rangeFonts) === JSON.stringify([[0, 6, "Medium"], [6, 23, "Light"]]), cap.rangeFonts);
+    check("setText: loaded both fonts of the old ranges", fontCalls.includes("Oswald/Medium") && fontCalls.includes("Oswald/Light"), fontCalls);
+    const cap3 = mkMixed("A bb ccc dddd", [{ start: 0, end: 1, fontName: OM }, { start: 1, end: 4, fontName: OL }, { start: 4, end: 13, fontName: { family: "Oswald", style: "Bold" } }]);
+    card.appendChild(cap3);
+    await api.setText(cap3, "один два три четыре пять");
+    check("setText: three styles go word by word, extra words take the last style (#37)",
+      JSON.stringify(cap3.rangeFonts) === JSON.stringify([[0, 4, "Medium"], [4, 8, "Light"], [8, 24, "Bold"]]), cap3.rangeFonts);
+    const capOne = mkMixed("Solo", [{ start: 0, end: 2, fontName: OM }, { start: 2, end: 4, fontName: OL }]);
+    await api.setText(capOne, "Другое");
+    check("setText: a one-word text keeps the first style (#37)", capOne.rangeFonts.length === 1 && capOne.rangeFonts[0][2] === "Medium", capOne.rangeFonts);
+    const notText = await rejects(() => api.setText(card, "x"));
+    check("setText: a string for a non-TEXT node says how to address layers", /not a TEXT layer/.test(notText) && /layerNameOrId/.test(notText), notText);
+    check("setText: the rule is in bridge.info()", /KEEPS font styles by words/.test(JSON.stringify(api.info())), "");
+    check("outline: mixed fonts are named, mixed(Oswald/Medium+Oswald/Light) 16 (#37)", / mixed\(Oswald\/Medium\+Oswald\/Light\) 16 /.test(api.summarize(cap.id, { depth: 0 })), api.summarize(cap.id, { depth: 0 }));
 
     const big = makeNode("FRAME", "Big");
     for (let i = 0; i < 25; i++) big.appendChild(makeNode("TEXT", "T" + i, { characters: "x", fontName: { family: "Inter", style: "Regular" } }));
@@ -1225,6 +1307,39 @@ inspectDone = inspectDone.then(async () => {
   check("flow: a screen without links reports none", /FLOW: 0 links/.test(none) && /no prototype links/.test(none), none);
   check("flow: missing ids do not throw", /FLOW: 0 links/.test(api.summarize(["nope:1"], { view: "flow" })));
 
+  // #35: view:"flow" without node_ids walks every top-level node of the current page
+  const flowAll = await new (Object.getPrototypeOf(async function () {}).constructor)("figma", "bridge", require(path.join(ROOT, "figma", "index.js")).buildInspectCode({ view: "flow" }))(figma, api);
+  check("flow: no node_ids -> the page's screens are scanned, no refusal (#35)",
+    typeof flowAll.flow === "string" && /^FLOW: [1-9]\d* links? from /.test(flowAll.flow) && !/pass node_ids/.test(flowAll.flow) && flowAll.flow.indexOf('SCREEN "Home" #' + home.id) !== -1, flowAll.flow);
+
+  // #40: a write into a layer inside an instance says the master and the other instances are intact (compared for real)
+  {
+    const AF = Object.getPrototypeOf(async function () {}).constructor;
+    const srvMod = require(path.join(ROOT, "figma", "index.js"));
+    const master = makeNode("COMPONENT", "Карточка товара");
+    const mLayer = makeNode("FRAME", "Badge", { layoutMode: "HORIZONTAL", itemSpacing: 4, fills: [{ type: "SOLID", color: { r: 1, g: 0, b: 0 } }] });
+    master.appendChild(mLayer);
+    const insts = [1, 2, 3].map(i => {
+      const inst = makeNode("INSTANCE", "Карточка " + i, { mainComponent: master });
+      const copy = makeNode("FRAME", "Badge", { id: "I" + inst.id + ";" + mLayer.id, layoutMode: "HORIZONTAL", itemSpacing: 4, fills: [{ type: "SOLID", color: { r: 1, g: 0, b: 0 } }] });
+      inst.appendChild(copy);
+      return { inst, copy };
+    });
+    master.getInstancesAsync = async () => insts.map(x => x.inst);
+    const noteOf = () => new AF("figma", "bridge", srvMod.buildInspectCode({ node_ids: [insts[1].copy.id], notes: true, depth: 1 }))(figma, api);
+    let nres = await noteOf();
+    check("after (#40): a layer inside an instance -> main COMPONENT #id and N other instances untouched",
+      Array.isArray(nres.notes) && nres.notes[0] === "NOTE " + insts[1].copy.id + ": an override inside instance #" + insts[1].inst.id + '; main COMPONENT "Карточка товара" #' + master.id + " and 2 other instances untouched", nres.notes);
+    insts[2].copy.itemSpacing = 40; // a neighbour that really differs from the master
+    nres = await noteOf();
+    check("after (#40): a neighbour that differs from the master is counted, not hidden", /and 1 other instance untouched \(1 differ from the master: #/.test(nres.notes[0]), nres.notes);
+    check("after (#40): ids of ordinary nodes give no notes", (await new AF("figma", "bridge", srvMod.buildInspectCode({ node_ids: [master.id], notes: true, depth: 0 }))(figma, api)).notes === undefined);
+  }
+
+  // #39: the flow after a reaction write covers the whole screen of the trigger (and of the overlay)
+  const flowScr = await new (Object.getPrototypeOf(async function () {}).constructor)("figma", "bridge", require(path.join(ROOT, "figma", "index.js")).buildInspectCode({ node_ids: [btn.id], view: "flow", screens: true }))(figma, api);
+  const fsLines = flowScr.flow.split("\n");
+  check("flow after write (#39): ids -> their top-level screen, all its links", /^FLOW: [1-9]\d* links?/.test(fsLines[0]) && fsLines.some(l => /^SCREEN "Home" #/.test(l)), flowScr.flow);
   // checkpoint rollback restores reactions and overlay look
   const cp = api.checkpoint("reactions");
   await api.openOverlay(btn.id, detail.id, { position: "TOP_CENTER", dim: false, transition: null });
