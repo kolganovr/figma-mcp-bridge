@@ -1,21 +1,21 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.kolganovr/figma-mcp-bridge",
+  "name": "io.github.kolganovr/layerhand",
   "description": "Write to a live Figma canvas, get a screenshot back, and roll back mistakes. Zero deps, free plan.",
   "repository": {
-    "url": "https://github.com/kolganovr/figma-mcp-bridge",
+    "url": "https://github.com/kolganovr/layerhand",
     "source": "github"
   },
-  "version": "4.2.7",
+  "version": "4.3.0",
   "packages": [
     {
       "registryType": "npm",
-      "identifier": "@kolganovr/figma-mcp-bridge",
-      "version": "4.2.7",
+      "identifier": "layerhand",
+      "version": "4.3.0",
       "transport": {
         "type": "stdio"
       }
     }
   ],
-  "websiteUrl": "https://github.com/kolganovr/figma-mcp-bridge#quickstart"
+  "websiteUrl": "https://github.com/kolganovr/layerhand#quickstart"
 }

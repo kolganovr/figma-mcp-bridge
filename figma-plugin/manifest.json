@@ -1,5 +1,5 @@
 {
-  "name": "Antigravity Bridge",
+  "name": "Layerhand",
   "id": "antigravity-figma-bridge",
   "api": "1.0.0",
   "main": "code.js",
@@ -7,6 +7,6 @@
   "editorType": ["figma", "figjam"],
   "networkAccess": {
     "allowedDomains": ["*"],
-    "reasoning": "Local connection to Antigravity MCP bridge"
+    "reasoning": "Local connection to the Layerhand MCP server"
   }
 }

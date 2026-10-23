@@ -1,6 +1,15 @@
 # Changelog
 
-## Unreleased
+## 4.3.0 -- renamed to Layerhand
+
+- **New name: Layerhand.** Two other projects are also called "Figma MCP Bridge", and Figma's brand guidelines ask
+  third-party products not to use "Figma" or "Fig" in their names. The npm package is now `layerhand`
+  (`npx layerhand`), the repo is `kolganovr/layerhand` (old links redirect), the MCP Registry name is
+  `io.github.kolganovr/layerhand`, and the Figma plugin is called "Layerhand".
+- **Nothing to migrate:** tool names (`figma_*`), the plugin id, the install folder `~/.figma-mcp-bridge` and the
+  token file stay the same. After `npx layerhand --update` Figma may list the plugin under its old name
+  "Antigravity Bridge" until you re-import the manifest.
+- `@kolganovr/figma-mcp-bridge` is deprecated in favor of `layerhand`.
 
 - **MCP tool annotations:** every tool now declares `readOnlyHint`, `destructiveHint`, `idempotentHint` and
   `openWorldHint` (live tools never leave the machine; `figma_execute_code` and `figma_rollback` can delete nodes).

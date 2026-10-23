@@ -1,8 +1,8 @@
-# Figma MCP Bridge — Instructions & Best Practices
+# Layerhand — Instructions & Best Practices
 
 ## Overview
 This MCP server connects AI coding assistants (such as Antigravity, Claude, Cursor) with Figma. It supports two modes:
-1. **Interactive Live Bridge (Local)**: Real-time two-way interaction with an open Figma document via the *Antigravity Bridge* plugin (`http://127.0.0.1:8765`). Full read/write access to the Figma canvas.
+1. **Interactive Live Bridge (Local)**: Real-time two-way interaction with an open Figma document via the *Layerhand* plugin (`http://127.0.0.1:8765`). Full read/write access to the Figma canvas.
 2. **REST API (Cloud)**: Read-only access to Figma files, nodes, comments, styles, and image exports via Figma REST API (`FIGMA_PERSONAL_ACCESS_TOKEN`) with **Token Optimizer** saving 85%+ context tokens.
 
 ---
@@ -213,7 +213,7 @@ When analyzing design files or screen trees from Figma Cloud:
   ```jsx
   <Frame name="Header" row gap="16" pad="14, 20" bg="#0F1729" radius="16">
     <Icon name="ic_shield_check" size="24" stroke="#4ADE80" strokeWidth="2" />
-    <Text color="#FFFFFF" font="Inter Bold 16px">Antigravity Bridge</Text>
+    <Text color="#FFFFFF" font="Inter Bold 16px">Layerhand</Text>
     <Instance name="Button" row pad="8, 14" bg="#6366F1" Type="Primary">
       <Text color="#FFFFFF" font="Inter SemiBold 13px">Save</Text>
     </Instance>

@@ -1,10 +1,10 @@
 {
-  "name": "@kolganovr/figma-mcp-bridge",
-  "version": "4.2.7",
+  "name": "layerhand",
+  "version": "4.3.0",
   "description": "Zero-dependency MCP bridge with write access to a live Figma canvas, auto-framed screenshot feedback, and one-call rollback. Works on the Figma free plan.",
-  "mcpName": "io.github.kolganovr/figma-mcp-bridge",
+  "mcpName": "io.github.kolganovr/layerhand",
   "bin": {
-    "figma-mcp-bridge": "install.mjs"
+    "layerhand": "install.mjs"
   },
   "files": [
     "figma/",
@@ -21,17 +21,19 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/kolganovr/figma-mcp-bridge.git"
+    "url": "git+https://github.com/kolganovr/layerhand.git"
   },
-  "homepage": "https://github.com/kolganovr/figma-mcp-bridge#readme",
+  "homepage": "https://github.com/kolganovr/layerhand#readme",
   "bugs": {
-    "url": "https://github.com/kolganovr/figma-mcp-bridge/issues"
+    "url": "https://github.com/kolganovr/layerhand/issues"
   },
   "keywords": [
     "mcp",
     "mcp-server",
     "figma",
     "figma-plugin",
+    "figma-mcp",
+    "layerhand",
     "model-context-protocol",
     "ai-agent",
     "claude",

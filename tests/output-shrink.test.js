@@ -497,7 +497,7 @@ console.log("\n== 4.2.5: read guard, page scans, componentize, validation errors
   const ln = srv.truncationNote({ from: 5000, to: 3000 }, true, false, "inspect-list");
   check("props/compare truncation note: no 'outline'/'deeper', offers fewer ids/props and offset", !/outline|deeper/.test(ln) && /props/.test(ln) && /offset=K/.test(ln) && !/lastResult/.test(ln), ln);
   const scriptErr = srv.buildErrorEnvelope(new Error("bridge.setTextt is not a function"));
-  check("script error naming bridge.xxx is not BRIDGE_OFFLINE and gets no plugin hint", scriptErr.code !== "BRIDGE_OFFLINE" && !/Antigravity Bridge plugin/.test(scriptErr.error), scriptErr);
+  check("script error naming bridge.xxx is not BRIDGE_OFFLINE and gets no plugin hint", scriptErr.code !== "BRIDGE_OFFLINE" && !/Layerhand plugin/.test(scriptErr.error), scriptErr);
   const offline = srv.buildErrorEnvelope(new Error("Timeout waiting for Figma Plugin response."));
   check("timeout is still BRIDGE_OFFLINE with the plugin hint", offline.code === "BRIDGE_OFFLINE" && /HINT:/.test(offline.error), offline);
 

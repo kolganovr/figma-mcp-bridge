@@ -4,15 +4,15 @@ Thanks for looking. Bug reports, ideas and pull requests are all welcome.
 
 ## Questions and ideas
 
-Use [Discussions](https://github.com/kolganovr/figma-mcp-bridge/discussions). Bugs go to
-[Issues](https://github.com/kolganovr/figma-mcp-bridge/issues) with the output of
-`npx @kolganovr/figma-mcp-bridge --doctor`.
+Use [Discussions](https://github.com/kolganovr/layerhand/discussions). Bugs go to
+[Issues](https://github.com/kolganovr/layerhand/issues) with the output of
+`npx layerhand --doctor`.
 
 ## Running it from a clone
 
 ```bash
-git clone https://github.com/kolganovr/figma-mcp-bridge.git
-cd figma-mcp-bridge
+git clone https://github.com/kolganovr/layerhand.git
+cd layerhand
 node install.mjs          # copies server + plugin, registers the MCP server
 node install.mjs --doctor # checks the setup
 ```
