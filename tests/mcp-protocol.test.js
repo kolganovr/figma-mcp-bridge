@@ -84,7 +84,7 @@ async function main() {
   const server = startServer({ FIGMA_PERSONAL_ACCESS_TOKEN: "", FIGMA_API_KEY: "", FIGMA_MCP_LEGACY_TOOLS: "", FIGMA_BRIDGE_PORT: "18764" });
   try {
     const init = await server.call("initialize", { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "test", version: "0" } });
-    check("initialize responds with serverInfo.name", init.result && init.result.serverInfo && init.result.serverInfo.name === "layerhand", init);
+    check("initialize responds with serverInfo.name", init.result && init.result.serverInfo && init.result.serverInfo.name === "mokido", init);
     check("initialize advertises tools capability", init.result && init.result.capabilities && "tools" in init.result.capabilities, init);
     check("serverInfo.version is 4.3.0", init.result.serverInfo.version === "4.3.0", init.result.serverInfo);
     check("initialize instructions mention figma_read_canvas", /figma_read_canvas/.test(init.result.instructions || ""), init.result && init.result.instructions);

@@ -21,9 +21,9 @@ Limits that apply:
 ## Reporting a vulnerability
 
 Please do not open a public issue. Use GitHub's private reporting:
-[Report a vulnerability](https://github.com/kolganovr/layerhand/security/advisories/new).
+[Report a vulnerability](https://github.com/kolganovr/mokido/security/advisories/new).
 You will get a reply within a few days. Fixes go out as a patch release with a note in `CHANGELOG.md`.
 
 ## Supported versions
 
-Only the latest release on npm (`layerhand`) gets security fixes.
+Only the latest release on npm (`mokido`) gets security fixes.

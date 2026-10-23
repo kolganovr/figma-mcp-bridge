@@ -373,7 +373,7 @@ async function main() {
       check("a tokenless plugin -> PLUGIN_TOKEN_REJECTED", res.isError && res.body && res.body.code === "PLUGIN_TOKEN_REJECTED", res.body);
       check("...naming the installed manifest and forbidding a token in source",
         res.body && /Import plugin from manifest/.test(res.body.error) && /figma-plugin[\\/]manifest\.json/.test(res.body.error) && /Do NOT write the token/.test(res.body.error), res.body && res.body.error);
-      check("...without the generic 'launch the plugin' hint on top", res.body && !/launch the Layerhand plugin/.test(res.body.error), res.body && res.body.error);
+      check("...without the generic 'launch the plugin' hint on top", res.body && !/launch the Mokido plugin/.test(res.body.error), res.body && res.body.error);
     } finally {
       await server.stop();
     }

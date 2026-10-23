@@ -1,6 +1,6 @@
 <div align="center">
 
-# ⚡ Layerhand
+# ⚡ Mokido
 
 **MCP server for Figma design. Let an AI agent design in Figma — and actually see what it drew.**
 
@@ -20,7 +20,7 @@ canvas, then closes the loop by handing the rendered PNG back to the model for v
 
 ---
 
-![Layerhand Demo](assets/demo.gif)
+![Mokido Demo](assets/demo.gif)
 
 *Agent generates the design, visually audits the rendered output, detects layout defects, and self-corrects in real time — zero human in the loop.*
 
@@ -101,15 +101,15 @@ latency, and results (including multi-megabyte base64 PNGs) stream straight back
 ## Quickstart
 
 ```bash
-npx layerhand
+npx mokido
 ```
 
 Or, to read the installer before it touches your machine — it's the same script either way,
 just fetched differently:
 
 ```bash
-git clone https://github.com/kolganovr/layerhand.git
-cd layerhand
+git clone https://github.com/kolganovr/mokido.git
+cd mokido
 node install.mjs
 ```
 
@@ -122,13 +122,13 @@ this project ever needs, for the installer and the server alike.
 Then, in **Figma Desktop**:
 
 1. **Plugins → Development → Import plugin from manifest…** → pick `figma-plugin/manifest.json`
-2. Press **`Ctrl + Alt + P`** (macOS: `Cmd + Option + P`) to launch **Layerhand**
+2. Press **`Ctrl + Alt + P`** (macOS: `Cmd + Option + P`) to launch **Mokido**
 3. Status turns green — **`CONNECTED`**
 
 Restart your AI client so it picks up the new tools. Verify anytime with:
 
 ```bash
-npx layerhand --doctor   # or: node install.mjs --doctor
+npx mokido --doctor   # or: node install.mjs --doctor
 ```
 
 <details>
@@ -138,7 +138,7 @@ The live canvas tools need no token. If you also want to read *unopened* cloud f
 (`get_file`, `get_node`, `get_styles`, …), supply a personal access token:
 
 ```bash
-npx layerhand --token "your_figma_personal_access_token"
+npx mokido --token "your_figma_personal_access_token"
 # or: node install.mjs --token "your_figma_personal_access_token"
 ```
 
@@ -454,7 +454,7 @@ same transport a real MCP client uses — rather than importing internals.
 ## Repository layout
 
 ```
-layerhand/
+mokido/
 ├── figma/                    # MCP server (Node.js, stdio + WebSocket)
 │   ├── index.js              # protocol, tool router, job ledger, target router
 │   ├── optimizer/            # AST pruner, style collapser, JSX/tree serializers

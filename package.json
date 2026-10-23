@@ -1,10 +1,10 @@
 {
-  "name": "layerhand",
+  "name": "mokido",
   "version": "4.3.0",
   "description": "Zero-dependency MCP bridge with write access to a live Figma canvas, auto-framed screenshot feedback, and one-call rollback. Works on the Figma free plan.",
-  "mcpName": "io.github.kolganovr/layerhand",
+  "mcpName": "io.github.kolganovr/mokido",
   "bin": {
-    "layerhand": "install.mjs"
+    "mokido": "install.mjs"
   },
   "files": [
     "figma/",
@@ -21,11 +21,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/kolganovr/layerhand.git"
+    "url": "git+https://github.com/kolganovr/mokido.git"
   },
-  "homepage": "https://github.com/kolganovr/layerhand#readme",
+  "homepage": "https://github.com/kolganovr/mokido#readme",
   "bugs": {
-    "url": "https://github.com/kolganovr/layerhand/issues"
+    "url": "https://github.com/kolganovr/mokido/issues"
   },
   "keywords": [
     "mcp",
@@ -33,7 +33,7 @@
     "figma",
     "figma-plugin",
     "figma-mcp",
-    "layerhand",
+    "mokido",
     "model-context-protocol",
     "ai-agent",
     "claude",
