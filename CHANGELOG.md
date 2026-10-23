@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- **MCP tool annotations:** every tool now declares `readOnlyHint`, `destructiveHint`, `idempotentHint` and
+  `openWorldHint` (live tools never leave the machine; `figma_execute_code` and `figma_rollback` can delete nodes).
+  Clients can use them for permission prompts; tool descriptions are unchanged, so no extra tokens per turn.
+- **CI:** GitHub Actions runs all seven suites on Node 18 and 22, Ubuntu and Windows.
+
 ## 4.2.7 -- self-contained compare, find with subtree, setText for mixed fonts
 
 Measured on the internal bench stand (Antigravity CLI, Gemini Flash low, seeded tasks in a live Figma file, pass

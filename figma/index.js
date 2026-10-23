@@ -1767,6 +1767,44 @@ const TOOL_TIERS = {
   get_image_fills: "legacy"
 };
 
+// MCP tool annotations (spec 2025-03-26+): behaviour hints clients use for
+// permission prompts and registries (Glama TDQS) use to judge safety. Kept
+// apart from the descriptions so the text the model reads doesn't grow.
+// Live tools never leave the machine (openWorldHint false); REST tools call
+// api.figma.com. execute_code / rollback can delete nodes, hence destructive.
+const READ_LIVE = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
+const WRITE_LIVE = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false };
+const READ_REST = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true };
+const TOOL_ANNOTATIONS = {
+  figma_execute_code: { ...WRITE_LIVE, destructiveHint: true },
+  figma_inspect: READ_LIVE,
+  figma_read_canvas: READ_LIVE,
+  figma_screenshot: READ_LIVE,
+  figma_find_components: READ_LIVE,
+  figma_insert_component_instance: WRITE_LIVE,
+  figma_insert_svg: WRITE_LIVE,
+  figma_get_variables: READ_LIVE,
+  figma_rollback: { ...WRITE_LIVE, destructiveHint: true },
+
+  figma_get_selection: READ_LIVE,
+  figma_get_canvas_layout: READ_LIVE,
+  figma_set_variables_mode: { ...WRITE_LIVE, idempotentHint: true },
+  figma_job_status: { ...READ_LIVE, idempotentHint: false },
+  figma_list_targets: READ_LIVE,
+
+  get_file: READ_REST,
+  get_node: READ_REST,
+  get_image: READ_REST,
+  get_styles: READ_REST,
+  get_components: READ_REST,
+  get_comments: READ_REST,
+  post_comment: { ...READ_REST, readOnlyHint: false, idempotentHint: false },
+
+  figma_create_ui_card: WRITE_LIVE,
+  get_me: READ_REST,
+  get_image_fills: READ_REST
+};
+
 function getActiveTools() {
   const hasRestToken = !!FIGMA_TOKEN;
   const legacyEnabled = process.env.FIGMA_MCP_LEGACY_TOOLS === "1";
@@ -1775,7 +1813,7 @@ function getActiveTools() {
     if (tier === "rest") return hasRestToken;
     if (tier === "legacy") return legacyEnabled;
     return true;
-  });
+  }).map(t => TOOL_ANNOTATIONS[t.name] ? { ...t, annotations: TOOL_ANNOTATIONS[t.name] } : t);
 }
 
 // ==========================================================================

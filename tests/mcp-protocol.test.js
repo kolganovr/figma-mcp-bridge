@@ -106,7 +106,12 @@ async function main() {
     for (const t of list.result.tools) {
       check(`tool "${t.name}" has a non-empty description`, typeof t.description === "string" && t.description.length > 10);
       check(`tool "${t.name}" declares an object inputSchema`, t.inputSchema && t.inputSchema.type === "object");
+      check(`tool "${t.name}" declares readOnlyHint/destructiveHint annotations`, t.annotations && typeof t.annotations.readOnlyHint === "boolean" && typeof t.annotations.destructiveHint === "boolean", t.annotations);
     }
+    check("read tools are annotated read-only, writes are not",
+      byName.figma_inspect.annotations.readOnlyHint === true && byName.figma_get_selection.annotations.readOnlyHint === true &&
+      byName.figma_execute_code.annotations.readOnlyHint === false && byName.figma_execute_code.annotations.destructiveHint === true &&
+      byName.figma_rollback.annotations.destructiveHint === true && byName.figma_insert_svg.annotations.destructiveHint === false);
 
     console.log("\n== figma_list_targets (pure server state, no plugin needed) ==");
     const targets = await server.call("tools/call", { name: "figma_list_targets", arguments: {} });
