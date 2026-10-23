@@ -1,0 +1,21 @@
+name: Feature request
+description: Something the agent should be able to do in Figma, or do in fewer calls
+labels: [enhancement]
+body:
+  - type: textarea
+    id: task
+    attributes:
+      label: The task
+      description: What you asked the agent to do in Figma, and where it got stuck or spent too many calls.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would help
+      description: A tool option, a bridge macro, a better error hint. Rough is fine.
+  - type: input
+    id: client
+    attributes:
+      label: AI client and model
+      placeholder: "Claude Code / Sonnet, Cursor, Codex, Antigravity / Gemini Flash..."
