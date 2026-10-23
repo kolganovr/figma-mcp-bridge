@@ -1,0 +1,50 @@
+name: Bug report
+description: Something in the bridge, the Figma plugin or the installer does not work
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you asked the agent to do, what it did, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Output of --doctor
+      description: Run `npx @kolganovr/figma-mcp-bridge --doctor` and paste the output.
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Bridge version
+      placeholder: "4.2.7"
+    validations:
+      required: true
+  - type: dropdown
+    id: client
+    attributes:
+      label: AI client
+      options:
+        - Claude Code
+        - Claude Desktop
+        - Antigravity
+        - Cursor
+        - Windsurf
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS and Figma Desktop version
+      placeholder: "Windows 11, Figma 125.x"
+  - type: textarea
+    id: log
+    attributes:
+      label: Tool call and error
+      description: The failing tool call and the bridge reply or error, if you have them.
+      render: text
