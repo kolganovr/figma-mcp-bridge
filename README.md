@@ -259,9 +259,11 @@ Every default is overridable per call, and per install through env: `FIGMA_MCP_S
 
 ## What's new
 
-4.2.4: `figma_inspect like: "<ref id>"` finds every copy of a reference (same component, name or
-children) on the given screens or its section and diffs each, grouped by diff set — "where are the broken
-ones and what is off" in one call. History: [CHANGELOG.md](CHANGELOG.md).
+4.2.7: `compare` / `like` diffs end with a `REF` line of exact reference values, so the agent fixes copies
+without an extra `props` read; `find` returns the subtree of what it found; `view: "flow"` works without
+`node_ids`; `bridge.setText` keeps mixed fonts. On the internal bench (Gemini Flash, seeded tasks) model turns
+per series went 112 -> 83 and verify turns after a write 11 -> 1. Reload the Figma plugin after updating.
+History: [CHANGELOG.md](CHANGELOG.md).
 
 ## Tool reference
 
