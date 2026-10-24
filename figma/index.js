@@ -93,7 +93,7 @@ function noteRejectedPlugin(req) {
   lastRejectedPlugin = { at: Date.now(), tokenless };
   if (Date.now() - lastRejectLogAt > 60000) {
     lastRejectLogAt = Date.now();
-    console.error("[Figma MCP Bridge] " + wrongPluginCopyMessage(lastRejectedPlugin));
+    console.error("[Mokido] " + wrongPluginCopyMessage(lastRejectedPlugin));
   }
 }
 
@@ -103,7 +103,7 @@ function wrongPluginCopyMessage(rejected) {
     (rejected.tokenless ? "no bridge token" : "a different bridge token") +
     ", so Figma is running a plugin copy install.mjs did not produce (typically this repository's figma-plugin/ imported directly" +
     (rejected.tokenless ? "" : ", or a copy from an older install") +
-    `).\n\nHINT: the user fixes it once: Figma → Plugins → Development → Import plugin from manifest… → ${INSTALLED_PLUGIN_MANIFEST}, then remove the old "Antigravity Bridge" entry. ` +
+    `).\n\nHINT: the user fixes it once: Figma → Plugins → Development → Import plugin from manifest… → ${INSTALLED_PLUGIN_MANIFEST}, then remove the old entry (named "Antigravity Bridge" before 4.3.0, or a duplicate "Mokido"). ` +
     "Do NOT write the token into ui.html or any other source file — it would leak into the repository.";
 }
 
@@ -138,7 +138,7 @@ const TIMEOUTS = {
   heavy: envNumber("FIGMA_MCP_TIMEOUT_HEAVY_MS", 120000),
   escalate: envNumber("FIGMA_MCP_ESCALATE_MS", 45000)
 };
-const SERVER_VERSION = "4.2.7";
+const SERVER_VERSION = "4.3.0";
 
 // ------------------------------------------------------------------
 // Token economy. In an agent loop the price of a tool call is not its own
@@ -412,7 +412,7 @@ function handleWsUpgrade(req, socket, head) {
       }
 
       if (payloadLen > MAX_WS_MESSAGE_BYTES) {
-        console.error(`[Figma MCP Bridge] Dropping oversized WebSocket frame (${payloadLen} bytes).`);
+        console.error(`[Mokido] Dropping oversized WebSocket frame (${payloadLen} bytes).`);
         socket.destroy();
         cleanupClient();
         return;
@@ -464,7 +464,7 @@ function handleWsUpgrade(req, socket, head) {
         client.fragmentBytes += payload.length;
 
         if (client.fragmentBytes > MAX_WS_MESSAGE_BYTES) {
-          console.error(`[Figma MCP Bridge] Dropping oversized fragmented message (${client.fragmentBytes} bytes).`);
+          console.error(`[Mokido] Dropping oversized fragmented message (${client.fragmentBytes} bytes).`);
           socket.destroy();
           cleanupClient();
           return;
@@ -581,7 +581,7 @@ const bridgeServer = http.createServer((req, res) => {
   if (!isAuthorized(req)) {
     res.writeHead(403, { "Content-Type": "application/json" });
     return res.end(JSON.stringify({
-      error: "Forbidden: the Figma bridge only accepts requests from the Antigravity Bridge plugin. " +
+      error: "Forbidden: the Figma bridge only accepts requests from the Mokido plugin. " +
              "If you are the plugin, make sure install.mjs baked the matching bridge token into it."
     }));
   }
@@ -716,9 +716,9 @@ bridgeServer.on("error", (err) => {
   if (err.code === "EADDRINUSE") {
     isBridgeMaster = false;
     listenAttemptInFlight = false;
-    console.error(`[Figma MCP Bridge] Port ${BRIDGE_PORT} is already in use. Forwarding commands to existing bridge instance.`);
+    console.error(`[Mokido] Port ${BRIDGE_PORT} is already in use. Forwarding commands to existing bridge instance.`);
   } else {
-    console.error(`[Figma MCP Bridge] Server error:`, err);
+    console.error(`[Mokido] Server error:`, err);
   }
 });
 
@@ -736,7 +736,7 @@ function tryBecomeMaster() {
       listenAttemptInFlight = false;
       if (!BRIDGE_TOKEN) {
         console.error(
-          "[Figma MCP Bridge] WARNING: no FIGMA_BRIDGE_TOKEN configured. " +
+          "[Mokido] WARNING: no FIGMA_BRIDGE_TOKEN configured. " +
           "Only the Origin allowlist is protecting :8765 — re-run install.mjs to provision a token."
         );
       }
@@ -861,7 +861,7 @@ async function sendCommandToPlugin(payload, timeoutMs = 45000, options = {}) {
       throw err;
     }
     const err = new Error(
-      "No Figma plugin is connected to the bridge. Ask the user to open Figma DESKTOP (not the browser) and launch the Antigravity Bridge plugin (Ctrl+Alt+P / Cmd+Option+P) until the status shows CONNECTED, then retry."
+      "No Figma plugin is connected to the bridge. Ask the user to open Figma DESKTOP (not the browser) and launch the Mokido plugin (Ctrl+Alt+P / Cmd+Option+P) until the status shows CONNECTED, then retry."
     );
     err.code = "NO_CONNECTED_CLIENTS";
     throw err;
@@ -898,7 +898,7 @@ async function sendCommandToPlugin(payload, timeoutMs = 45000, options = {}) {
         );
         err.code = "PLUGIN_BUSY";
       } else {
-        err = new Error("Timeout waiting for Figma Plugin response. Ensure Figma is active and Antigravity Bridge plugin is running.");
+        err = new Error("Timeout waiting for Figma Plugin response. Ensure Figma is active and Mokido plugin is running.");
         err.code = "BRIDGE_OFFLINE";
       }
       reject(err);
@@ -1011,7 +1011,7 @@ async function proxyToMaster(pathname, { method = "GET", body, timeoutMs = 45000
       throw wrapped;
     }
     if (aborted) {
-      const wrapped = new Error("Timeout waiting for Figma Plugin response. Ensure Figma is active and Antigravity Bridge plugin is running.");
+      const wrapped = new Error("Timeout waiting for Figma Plugin response. Ensure Figma is active and Mokido plugin is running.");
       wrapped.code = "BRIDGE_OFFLINE";
       throw wrapped;
     }
@@ -1111,7 +1111,7 @@ const TOOLS = [
     // server's instructions to the model (Antigravity sessions made 0 bridge.*
     // calls in ~220 figma_execute_code runs), while tool descriptions always
     // reach it. The long-form contract stays in instructions + bridge.info().
-    description: "WRITE tool: run JavaScript in the open Figma document (Figma Desktop + 'Antigravity Bridge' plugin) to create, edit, move, style or delete nodes. To READ (explore a section, list children, find layers, check texts / fonts / variants / table columns) call figma_inspect instead: every id in one call, one line per node, view:\"table\" for tables; a read script here costs a model turn per question and its reply names the figma_inspect call to use (use_instead). Every call is a full model turn, so make the whole change in ONE call — all screens / breakpoints, verified in the same code with bridge.check — and put capture_node_ids on that same call instead of a separate figma_screenshot. Globals: `figma`, `await ensureFont(family, style)`, `getFreePosition(w, h)`, `bridge`: bridge.check({ '1:2': { width: 320, fill: '#FFFFFF' } }) -> pass/fail list; bridge.define(name, src) + bridge.require(name) keep helpers between calls (each call is a fresh function body — never eval); `return bridge.info()` lists the rest. Macros: bridge.replaceWithInstance(target, comp, {props, text}), bridge.setProps(inst, {Status: 'Dropdown'}), bridge.setText(root, {layer: '…'}) or bridge.setText(textNode, 'new text') (keeps mixed font styles by words: THE way to replace the text of a label with several font styles — never `characters =`, which flattens them, and never a per-character getRangeFontName/setRangeFontName loop), bridge.shift(ids, {dx, dy}), bridge.moveInto(ids, section, {layout, gap}), bridge.fitSection(s), bridge.context(id), bridge.componentize(nodeObject) -> new COMPONENT, same name/size/look, NEW id (never raw createComponentFromNode), prototype links: await bridge.openOverlay(triggerId, overlayFrameId, { position: 'BOTTOM_CENTER', dim: 0.4, closeOnOutside: true }) (the overlay look is read-only in the Plugin API: the reply names the MANUAL STEP for the user), bridge.closeOverlay(id), bridge.setReaction(id, { to: frameId, nav: 'NAVIGATE' }); read links with figma_inspect view:\"flow\". Call macros directly, don't read their source. Never findAll the whole page — scope to a section. Return only the ids/flags you need: responses over max_output_bytes (3500) are shrunk, the full value stays in bridge.state.lastResult.",
+    description: "WRITE tool: run JavaScript in the open Figma document (Figma Desktop + 'Mokido' plugin) to create, edit, move, style or delete nodes. To READ (explore a section, list children, find layers, check texts / fonts / variants / table columns) call figma_inspect instead: every id in one call, one line per node, view:\"table\" for tables; a read script here costs a model turn per question and its reply names the figma_inspect call to use (use_instead). Every call is a full model turn, so make the whole change in ONE call — all screens / breakpoints, verified in the same code with bridge.check — and put capture_node_ids on that same call instead of a separate figma_screenshot. Globals: `figma`, `await ensureFont(family, style)`, `getFreePosition(w, h)`, `bridge`: bridge.check({ '1:2': { width: 320, fill: '#FFFFFF' } }) -> pass/fail list; bridge.define(name, src) + bridge.require(name) keep helpers between calls (each call is a fresh function body — never eval); `return bridge.info()` lists the rest. Macros: bridge.replaceWithInstance(target, comp, {props, text}), bridge.setProps(inst, {Status: 'Dropdown'}), bridge.setText(root, {layer: '…'}) or bridge.setText(textNode, 'new text') (keeps mixed font styles by words: THE way to replace the text of a label with several font styles — never `characters =`, which flattens them, and never a per-character getRangeFontName/setRangeFontName loop), bridge.shift(ids, {dx, dy}), bridge.moveInto(ids, section, {layout, gap}), bridge.fitSection(s), bridge.context(id), bridge.componentize(nodeObject) -> new COMPONENT, same name/size/look, NEW id (never raw createComponentFromNode), prototype links: await bridge.openOverlay(triggerId, overlayFrameId, { position: 'BOTTOM_CENTER', dim: 0.4, closeOnOutside: true }) (the overlay look is read-only in the Plugin API: the reply names the MANUAL STEP for the user), bridge.closeOverlay(id), bridge.setReaction(id, { to: frameId, nav: 'NAVIGATE' }); read links with figma_inspect view:\"flow\". Call macros directly, don't read their source. Never findAll the whole page — scope to a section. Return only the ids/flags you need: responses over max_output_bytes (3500) are shrunk, the full value stays in bridge.state.lastResult.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1767,6 +1767,44 @@ const TOOL_TIERS = {
   get_image_fills: "legacy"
 };
 
+// MCP tool annotations (spec 2025-03-26+): behaviour hints clients use for
+// permission prompts and registries (Glama TDQS) use to judge safety. Kept
+// apart from the descriptions so the text the model reads doesn't grow.
+// Live tools never leave the machine (openWorldHint false); REST tools call
+// api.figma.com. execute_code / rollback can delete nodes, hence destructive.
+const READ_LIVE = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
+const WRITE_LIVE = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false };
+const READ_REST = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true };
+const TOOL_ANNOTATIONS = {
+  figma_execute_code: { ...WRITE_LIVE, destructiveHint: true },
+  figma_inspect: READ_LIVE,
+  figma_read_canvas: READ_LIVE,
+  figma_screenshot: READ_LIVE,
+  figma_find_components: READ_LIVE,
+  figma_insert_component_instance: WRITE_LIVE,
+  figma_insert_svg: WRITE_LIVE,
+  figma_get_variables: READ_LIVE,
+  figma_rollback: { ...WRITE_LIVE, destructiveHint: true },
+
+  figma_get_selection: READ_LIVE,
+  figma_get_canvas_layout: READ_LIVE,
+  figma_set_variables_mode: { ...WRITE_LIVE, idempotentHint: true },
+  figma_job_status: { ...READ_LIVE, idempotentHint: false },
+  figma_list_targets: READ_LIVE,
+
+  get_file: READ_REST,
+  get_node: READ_REST,
+  get_image: READ_REST,
+  get_styles: READ_REST,
+  get_components: READ_REST,
+  get_comments: READ_REST,
+  post_comment: { ...READ_REST, readOnlyHint: false, idempotentHint: false },
+
+  figma_create_ui_card: WRITE_LIVE,
+  get_me: READ_REST,
+  get_image_fills: READ_REST
+};
+
 function getActiveTools() {
   const hasRestToken = !!FIGMA_TOKEN;
   const legacyEnabled = process.env.FIGMA_MCP_LEGACY_TOOLS === "1";
@@ -1775,7 +1813,7 @@ function getActiveTools() {
     if (tier === "rest") return hasRestToken;
     if (tier === "legacy") return legacyEnabled;
     return true;
-  });
+  }).map(t => TOOL_ANNOTATIONS[t.name] ? { ...t, annotations: TOOL_ANNOTATIONS[t.name] } : t);
 }
 
 // ==========================================================================
@@ -1787,7 +1825,7 @@ function getActiveTools() {
 // token-economy rules first, the execution model next, reference last. The
 // long-form guide lives in docs/GUIDE.md and bridge.info().
 const SERVER_INSTRUCTIONS = [
-  "Figma MCP Bridge: LIVE read/write of the open Figma Desktop file (Antigravity Bridge plugin); REST tools optional.",
+  "Mokido: LIVE read/write of the open Figma Desktop file (Mokido plugin); REST tools optional.",
   "",
   "TOKEN ECONOMY — every call re-reads the whole conversation, and what it returns stays there:",
   "1. READ with figma_inspect: every id in ONE call; find / props / context; like:'<ref id>' = find its copies + diff each; compare:'<ref id>' = diff given ids; view:'map'/'table'/'flow' (prototype links); figma_read_canvas = page tree. No read scripts in figma_execute_code (use_instead).",
@@ -1809,7 +1847,7 @@ const SERVER_ERROR_HINTS = [
     // offline plugin (Argon audit 16.10, #15).
     test: /timeout|not connected|8765|bridge (?:is )?(?:offline|not running|unreachable)|no figma plugin/i,
     code: "BRIDGE_OFFLINE",
-    hint: "The Figma plugin did not answer. Ask the user to open Figma DESKTOP (not the browser) and launch the Antigravity Bridge plugin (Ctrl+Alt+P / Cmd+Option+P) until the status shows CONNECTED, then retry."
+    hint: "The Figma plugin did not answer. Ask the user to open Figma DESKTOP (not the browser) and launch the Mokido plugin (Ctrl+Alt+P / Cmd+Option+P) until the status shows CONNECTED, then retry."
   },
   {
     test: /FIGMA_PERSONAL_ACCESS_TOKEN|401|403|Unauthorized/i,
@@ -3373,7 +3411,7 @@ async function handleCallTool(name, args = {}) {
         // Session 9672b93e: an empty list sent the model grepping the server
         // source for 8 turns. Nothing is broken — the plugin just isn't running.
         const body = { ok: true, targets };
-        if (!targets.length) body.hint = "No Figma file is connected. Ask the user to open the file in Figma DESKTOP and run the Antigravity Bridge plugin (Ctrl+Alt+P / Cmd+Option+P) until it shows CONNECTED, then call figma_list_targets again. Nothing to debug in the server.";
+        if (!targets.length) body.hint = "No Figma file is connected. Ask the user to open the file in Figma DESKTOP and run the Mokido plugin (Ctrl+Alt+P / Cmd+Option+P) until it shows CONNECTED, then call figma_list_targets again. Nothing to debug in the server.";
         return { content: [{ type: "text", text: toJson(body) }] };
       }
 
@@ -3792,7 +3830,7 @@ function startOfficialSdkServer() {
       const types = require(path.join(loc, "types.js"));
 
       const server = new Server({
-        name: "figma-mcp",
+        name: "mokido",
         version: SERVER_VERSION
       }, {
         capabilities: { tools: {} },
@@ -3839,7 +3877,7 @@ function startUniversalStdioServer() {
         result: {
           protocolVersion: "2024-11-05",
           capabilities: { tools: {} },
-          serverInfo: { name: "figma-mcp", version: SERVER_VERSION },
+          serverInfo: { name: "mokido", version: SERVER_VERSION },
           instructions: SERVER_INSTRUCTIONS
         }
       });
@@ -3956,7 +3994,7 @@ function startUniversalStdioServer() {
 // as a zip) — means there is nothing to compare against, so skip silently
 // rather than guess.
 // ------------------------------------------------------------------
-const UPDATE_REPO = "kolganovr/figma-mcp-bridge";
+const UPDATE_REPO = "kolganovr/mokido";
 const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 function readJsonSafe(filePath) {
@@ -3985,7 +4023,7 @@ async function checkForUpdates() {
 
     if (!fresh) {
       const res = await fetch(`https://api.github.com/repos/${UPDATE_REPO}/commits/main`, {
-        headers: { "User-Agent": "figma-mcp-bridge", "Accept": "application/vnd.github+json" },
+        headers: { "User-Agent": "mokido", "Accept": "application/vnd.github+json" },
         signal: AbortSignal.timeout(4000)
       });
       // Rate-limited, repo moved, offline resolver returning a captive
@@ -4005,7 +4043,7 @@ async function checkForUpdates() {
 
     if (remoteSha && remoteSha !== localCommit) {
       console.error(
-        `[Figma MCP Bridge] Update available on main (installed ${localCommit.slice(0, 7)}, ` +
+        `[Mokido] Update available on main (installed ${localCommit.slice(0, 7)}, ` +
         `latest ${remoteSha.slice(0, 7)}). Run "node install.mjs --update" from your cloned repo to update.`
       );
     }

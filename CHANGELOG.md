@@ -1,5 +1,21 @@
 # Changelog
 
+## 4.3.0 -- renamed to Mokido
+
+- **New name: Mokido.** Two other projects are also called "Figma MCP Bridge", and Figma's brand guidelines ask
+  third-party products not to use "Figma" or "Fig" in their names. The npm package is now `mokido`
+  (`npx mokido`), the repo is `kolganovr/mokido` (old links redirect), the MCP Registry name is
+  `io.github.kolganovr/mokido`, and the Figma plugin is called "Mokido".
+- **Nothing to migrate:** tool names (`figma_*`), the plugin id, the install folder `~/.figma-mcp-bridge` and the
+  token file stay the same. After `npx mokido --update` Figma may list the plugin under its old name
+  "Antigravity Bridge" until you re-import the manifest.
+- `@kolganovr/figma-mcp-bridge` is deprecated in favor of `mokido`.
+
+- **MCP tool annotations:** every tool now declares `readOnlyHint`, `destructiveHint`, `idempotentHint` and
+  `openWorldHint` (live tools never leave the machine; `figma_execute_code` and `figma_rollback` can delete nodes).
+  Clients can use them for permission prompts; tool descriptions are unchanged, so no extra tokens per turn.
+- **CI:** GitHub Actions runs all seven suites on Node 18 and 22, Ubuntu and Windows.
+
 ## 4.2.7 -- self-contained compare, find with subtree, setText for mixed fonts
 
 Measured on the internal bench stand (Antigravity CLI, Gemini Flash low, seeded tasks in a live Figma file, pass

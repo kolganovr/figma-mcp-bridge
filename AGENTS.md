@@ -6,7 +6,7 @@ This document provides explicit, deterministic instructions for **AI Agents** (G
 
 ## ⚡ Agent Setup & Update Protocol
 
-When the user asks you to **"Install Figma MCP"**, **"Update Figma MCP"**, or passes a link to this repository, follow these steps:
+When the user asks you to **"Install Mokido"**, **"Install Figma MCP"**, **"Update Figma MCP"**, or passes a link to this repository, follow these steps:
 
 ### 1. Run the Automated Installer
 Execute `install.mjs` in the repository root directory (needs only Node.js — no Python, no npm packages):
@@ -25,7 +25,7 @@ node install.mjs --update
 Instruct the user:
 1. Open **Figma Desktop** (must be the Desktop app, not a web browser).
 2. Go to **Plugins** → **Development** → **Import plugin from manifest...** and select `manifest.json` from `~/.gemini/antigravity/mcp/figma-plugin/manifest.json`.
-3. Press **`Ctrl + Alt + P`** (macOS: **`Cmd + Option + P`**) to launch/reload **Antigravity Bridge**.
+3. Press **`Ctrl + Alt + P`** (macOS: **`Cmd + Option + P`**) to launch/reload **Mokido**.
 4. The plugin status indicator will turn green: **`CONNECTED`** (`ws://127.0.0.1:8765`).
 
 > [!CAUTION]
@@ -94,7 +94,7 @@ Six contract tests pin this behaviour; run the ones relevant to what you touched
 ## 🩺 Troubleshooting for Agents
 
 - **If tool calls time out:**
-  1. Ask the user to make sure Figma Desktop is open and the **Antigravity Bridge** plugin window is active.
+  1. Ask the user to make sure Figma Desktop is open and the **Mokido** plugin window is active.
   2. If the plugin shows **`OFFLINE`**, run `node install.mjs --doctor` to verify port `8765` availability.
   3. If there are zombie Node processes holding port 8765, terminate them (`Stop-Process -Name node -Force` on Windows or `killall node` on macOS) and reload the plugin with `Ctrl + Alt + P`.
 - **Figma Web vs Desktop:** Plugins interacting with local WebSocket bridges (`ws://127.0.0.1:8765`) require **Figma Desktop**. Web browser versions of Figma block loopback sockets due to Mixed Content policies.

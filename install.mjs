@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Figma MCP Bridge & Live Canvas Multi-Tool Installer & Updater
+// Mokido & Live Canvas Multi-Tool Installer & Updater
 // Author: Roman Kolganov
 // License: MIT
 
@@ -399,18 +399,18 @@ function installOrUpdate({ token = "", isUpdate = false, home, appdata } = {}) {
 
   console.log("\n==================================================");
   if (isUpdate) {
-    console.log("\u{1F389} Figma MCP Bridge successfully updated!");
+    console.log("\u{1F389} Mokido successfully updated!");
     console.log("==================================================");
     console.log("1. In Figma: Close and re-open the plugin (or press Ctrl + Alt + P / Cmd + Option + P).");
     console.log("2. In your AI IDE: Restart the session to apply any server changes.");
   } else {
-    console.log("\u{1F389} Figma MCP Bridge successfully installed!");
+    console.log("\u{1F389} Mokido successfully installed!");
     console.log("==================================================");
     console.log("Next steps:");
     console.log("1. In Figma Desktop:");
     console.log("   - Menu > Plugins > Development > Import plugin from manifest...");
     console.log(`   - Select: ${manifestPath}`);
-    console.log("   - Press Ctrl + Alt + P to launch the 'Antigravity Bridge' plugin.");
+    console.log("   - Press Ctrl + Alt + P to launch the 'Mokido' plugin.");
     console.log("2. Restart your AI IDE / editor to load the new MCP tools.");
     if (targets.length) {
       console.log("   Detected: " + [...new Set(targets.map((t) => t.location))].sort().join(", "));
@@ -482,7 +482,7 @@ function reportFigmaPluginRegistration(home, appdata) {
   const reg = checkFigmaPluginRegistration(home, appdata);
   if (reg.status === "wrong") {
     for (const p of reg.wrong) {
-      console.log(`[!] Figma loads the 'Antigravity Bridge' plugin from ${p}`);
+      console.log(`[!] Figma loads the 'Mokido' plugin from ${p}`);
     }
     console.log("    That copy was not written by install.mjs, so it has no bridge token and cannot connect.");
     console.log("    In Figma: Plugins > Development > Import plugin from manifest... >");
@@ -491,14 +491,14 @@ function reportFigmaPluginRegistration(home, appdata) {
   } else if (reg.status === "ok") {
     console.log(`[✓] Figma runs the installed plugin copy: ${reg.registered.join(", ")}`);
   } else if (reg.status === "none") {
-    console.log(`[*] Figma has no 'Antigravity Bridge' plugin imported yet — import ${reg.manifest}`);
+    console.log(`[*] Figma has no 'Mokido' plugin imported yet — import ${reg.manifest}`);
   }
   return reg;
 }
 
 function runDoctor(home, appdata) {
   console.log("==================================================");
-  console.log("\u{1FA7A} Figma MCP Bridge Diagnostic Report");
+  console.log("\u{1FA7A} Mokido Diagnostic Report");
   console.log("==================================================");
   checkNodeVersion();
   home = home ?? os.homedir();
@@ -569,7 +569,7 @@ function main() {
   }
 
   console.log("==================================================");
-  console.log(`⚡ ${args.update ? "Updating" : "Installing"} Figma MCP Bridge + Visual Feedback Loop`);
+  console.log(`⚡ ${args.update ? "Updating" : "Installing"} Mokido + Visual Feedback Loop`);
   console.log("==================================================");
 
   checkNodeVersion();

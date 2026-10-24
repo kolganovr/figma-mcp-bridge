@@ -13,7 +13,7 @@ body:
     id: doctor
     attributes:
       label: Output of --doctor
-      description: Run `npx @kolganovr/figma-mcp-bridge --doctor` and paste the output.
+      description: Run `npx mokido --doctor` and paste the output.
       render: text
     validations:
       required: true
@@ -21,7 +21,7 @@ body:
     id: version
     attributes:
       label: Bridge version
-      placeholder: "4.2.7"
+      placeholder: "4.3.0"
     validations:
       required: true
   - type: dropdown

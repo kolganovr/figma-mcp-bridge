@@ -84,9 +84,9 @@ async function main() {
   const server = startServer({ FIGMA_PERSONAL_ACCESS_TOKEN: "", FIGMA_API_KEY: "", FIGMA_MCP_LEGACY_TOOLS: "", FIGMA_BRIDGE_PORT: "18764" });
   try {
     const init = await server.call("initialize", { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "test", version: "0" } });
-    check("initialize responds with serverInfo.name", init.result && init.result.serverInfo && init.result.serverInfo.name === "figma-mcp", init);
+    check("initialize responds with serverInfo.name", init.result && init.result.serverInfo && init.result.serverInfo.name === "mokido", init);
     check("initialize advertises tools capability", init.result && init.result.capabilities && "tools" in init.result.capabilities, init);
-    check("serverInfo.version is 4.2.7", init.result.serverInfo.version === "4.2.7", init.result.serverInfo);
+    check("serverInfo.version is 4.3.0", init.result.serverInfo.version === "4.3.0", init.result.serverInfo);
     check("initialize instructions mention figma_read_canvas", /figma_read_canvas/.test(init.result.instructions || ""), init.result && init.result.instructions);
 
     const list = await server.call("tools/list", {});
@@ -106,7 +106,12 @@ async function main() {
     for (const t of list.result.tools) {
       check(`tool "${t.name}" has a non-empty description`, typeof t.description === "string" && t.description.length > 10);
       check(`tool "${t.name}" declares an object inputSchema`, t.inputSchema && t.inputSchema.type === "object");
+      check(`tool "${t.name}" declares readOnlyHint/destructiveHint annotations`, t.annotations && typeof t.annotations.readOnlyHint === "boolean" && typeof t.annotations.destructiveHint === "boolean", t.annotations);
     }
+    check("read tools are annotated read-only, writes are not",
+      byName.figma_inspect.annotations.readOnlyHint === true && byName.figma_get_selection.annotations.readOnlyHint === true &&
+      byName.figma_execute_code.annotations.readOnlyHint === false && byName.figma_execute_code.annotations.destructiveHint === true &&
+      byName.figma_rollback.annotations.destructiveHint === true && byName.figma_insert_svg.annotations.destructiveHint === false);
 
     console.log("\n== figma_list_targets (pure server state, no plugin needed) ==");
     const targets = await server.call("tools/call", { name: "figma_list_targets", arguments: {} });

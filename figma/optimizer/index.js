@@ -1,5 +1,5 @@
 /**
- * Context Optimizer Entry Point for Figma MCP Bridge (CommonJS)
+ * Context Optimizer Entry Point for Mokido (CommonJS)
  */
 
 const { pruneNode } = require('./pruner.js');
